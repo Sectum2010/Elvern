@@ -57,6 +57,7 @@ dev/artifacts/
 tmp/
 data/
 LLM/
+/Elvern-ui-redesign/
 
 # Local/private security review notes
 

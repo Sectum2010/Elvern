@@ -56,7 +56,12 @@ def _to_user_settings_response(payload: dict[str, object], *, user_role: str) ->
         background_gradient_end=str(payload["background_gradient_end"]),
         background_gradient_accent=str(payload["background_gradient_accent"]),
         background_solid_color=str(payload["background_solid_color"]),
+        background_custom_model=str(payload["background_custom_model"]),
+        background_gradient_start_hue=int(payload["background_gradient_start_hue"]),
+        background_gradient_end_hue=int(payload["background_gradient_end_hue"]),
+        background_solid_hue=int(payload["background_solid_hue"]),
         background_photo_url=payload["background_photo_url"],
+        background_photo_original_filename=payload["background_photo_original_filename"],
         media_library_reference_private_value=media_reference_private_value,
         media_library_reference_shared_default_value=media_reference_shared_default_value,
         media_library_reference_effective_value=media_reference_effective_value,
@@ -98,6 +103,10 @@ def patch_user_settings(
             background_gradient_end=payload.background_gradient_end,
             background_gradient_accent=payload.background_gradient_accent,
             background_solid_color=payload.background_solid_color,
+            background_custom_model=payload.background_custom_model,
+            background_gradient_start_hue=payload.background_gradient_start_hue,
+            background_gradient_end_hue=payload.background_gradient_end_hue,
+            background_solid_hue=payload.background_solid_hue,
             media_library_reference_private_value=payload.media_library_reference_private_value,
         )
     except UserSettingsValidationError as error:
@@ -130,6 +139,7 @@ async def upload_background_photo(
             user_id=user.id,
             content=content,
             content_type=file.content_type,
+            original_filename=file.filename,
         )
     except UserSettingsValidationError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error

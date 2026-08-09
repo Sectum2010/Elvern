@@ -27,7 +27,7 @@ export function classifyPrimaryNavigationRoute(pathname, user) {
   ) {
     return "library";
   }
-  if (path === "/settings") {
+  if (path === "/settings" || path.startsWith("/settings/")) {
     return "settings";
   }
   if (
@@ -74,7 +74,7 @@ export function sanitizeAssistantContextPath(fromPath) {
   if (pathname === "/library") {
     return "/library";
   }
-  if (pathname === "/settings") {
+  if (pathname === "/settings" || pathname.startsWith("/settings/")) {
     return "/settings";
   }
   if (pathname === "/install") {

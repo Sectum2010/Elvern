@@ -360,7 +360,7 @@ describe("DetailPage source metadata privacy", () => {
     const hiddenLink = await screen.findByRole("link", {
       name: "Open Hidden for me in Settings",
     });
-    expect(hiddenLink).toHaveAttribute("href", "/settings?section=libraries");
+    expect(hiddenLink).toHaveAttribute("href", "/settings/hidden-titles");
     expect(screen.getByText(/Settings > Libraries > Hidden for me/)).toBeInTheDocument();
   });
 
@@ -371,7 +371,7 @@ describe("DetailPage source metadata privacy", () => {
     const hiddenLink = await screen.findByRole("link", {
       name: "Open Hidden for everyone in Settings",
     });
-    expect(hiddenLink).toHaveAttribute("href", "/settings?section=libraries");
+    expect(hiddenLink).toHaveAttribute("href", "/settings/hidden-titles");
   });
 
   test("resets detail scroll once per item before async detail content renders", async () => {

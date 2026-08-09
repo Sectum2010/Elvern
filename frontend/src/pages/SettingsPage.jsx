@@ -21,8 +21,10 @@ import {
   deriveGradientEndFromSingleColor,
   getBackgroundPickerColorAtPosition,
   getBackgroundPickerPositionFromColor,
+  hueToHex,
   normalizeUserBackgroundSettings,
 } from "../lib/userBackground";
+import { NonLoginSecretInput } from "../components/NonLoginSecretInput";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { DesktopBackToLibraryButton } from "../components/DesktopBackToLibraryButton";
 import { InstallSettingsPanel } from "../features/install/InstallSettingsPanel";
@@ -43,6 +45,14 @@ import {
   setUserSettingsQueryData,
   useUserSettingsQuery,
 } from "../lib/userSettingsQueries";
+import {
+  classifyControlCenterPath,
+  desktopSettingsTabToLegacySection,
+} from "../lib/controlCenterRoutes.js";
+import {
+  fetchControlCenterResource,
+  setControlCenterResourceData,
+} from "../lib/controlCenterQueries.js";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
 const SETTINGS_RESOURCE_KEYS = Object.freeze([
@@ -69,6 +79,12 @@ const EMPTY_RESOURCE_STATUS = Object.freeze({
 const HIDDEN_RECONCILIATION_MAX_AGE_MS = 2 * 60 * 1000;
 
 
+function sanitizeGoogleDriveSetupPayload(payload) {
+  const { client_secret: _clientSecret, ...safePayload } = payload || {};
+  return safePayload;
+}
+
+
 function createSettingsResourceStatus() {
   return Object.fromEntries(
     SETTINGS_RESOURCE_KEYS.map((key) => [key, { ...EMPTY_RESOURCE_STATUS }]),
@@ -76,7 +92,22 @@ function createSettingsResourceStatus() {
 }
 
 
-function settingsResourcesForSection(section, role) {
+function settingsResourcesForSection(section, role, desktopTab = "") {
+  if (desktopTab) {
+    if (desktopTab === "library") {
+      return ["totp", ...(role === "admin" ? ["ageGroups"] : [])];
+    }
+    if (desktopTab === "cloud-sharing") {
+      return ["totp", "cloud"];
+    }
+    if (desktopTab === "hidden-titles") {
+      return ["totp", "hidden"];
+    }
+    if (desktopTab === "server-storage" && role === "admin") {
+      return ["totp", "googleSetup", "cloud", "mediaReference", "posterReference"];
+    }
+    return ["totp"];
+  }
   if (section === "libraries") {
     return [
       "hidden",
@@ -105,13 +136,8 @@ const POSTER_CARD_APPEARANCE_OPTIONS = [
 const POSTER_DISPLAY_WIDTH_OPTIONS = [
   { value: "800", label: "800 px" },
   { value: "1000", label: "1000 px" },
-  { value: "1200", label: "1200 px" },
   { value: "1400", label: "1400 px" },
-  { value: "1600", label: "1600 px" },
-  { value: "1800", label: "1800 px" },
-  { value: "2000", label: "2000 px" },
-  { value: "2200", label: "2200 px" },
-  { value: "original", label: "Original / No upperbound" },
+  { value: "original", label: "Original" },
 ];
 
 const BACKGROUND_PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -573,6 +599,18 @@ function firstNonEmptyLine(value) {
     .find(Boolean) || "";
 }
 
+function appendUniqueReferenceLocation(value, nextPath) {
+  const existing = String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const candidate = String(nextPath || "").trim();
+  if (!candidate || existing.includes(candidate)) {
+    return existing.join("\n");
+  }
+  return [...existing, candidate].join("\n");
+}
+
 
 function LibraryReferenceCategorySummary({ summary }) {
   const safeSummary = summary && typeof summary === "object" ? summary : {};
@@ -675,9 +713,9 @@ function sortCloudSources(sources) {
 }
 
 
-function SettingsAccordionSection({ title, description, badge, isOpen, onToggle, children }) {
+function SettingsAccordionSection({ title, description, badge, isOpen, onToggle, children, className = "" }) {
   return (
-    <section className="settings-card settings-card--wide">
+    <section className={`settings-card settings-card--wide ${className}`.trim()}>
       <button
         aria-expanded={isOpen}
         className="settings-disclosure__summary settings-disclosure__summary--button"
@@ -1096,10 +1134,15 @@ export function SettingsPage() {
   const navigate = useNavigate();
   const userSettingsQuery = useUserSettingsQuery(user);
   const settingsIdentity = `${String(user?.id ?? "")}:${String(user?.role || "").trim().toLowerCase()}`;
-  const settingsSectionResolution = resolveSettingsSection({
-    search: location.search,
-    hash: location.hash,
-  });
+  const controlCenterPath = classifyControlCenterPath(location.pathname);
+  const settingsSectionResolution = controlCenterPath.area === "settings" && controlCenterPath.tab
+    ? {
+        section: desktopSettingsTabToLegacySection(controlCenterPath.tab, user?.role),
+        shouldReplace: false,
+        needsStorageMigration: false,
+        storageMigrationTarget: null,
+      }
+    : resolveSettingsSection({ search: location.search, hash: location.hash });
   const settingsHydratedIdentityRef = useRef("");
   const previousSettingsIdentityRef = useRef(settingsIdentity);
   const mountedRef = useRef(true);
@@ -1138,6 +1181,7 @@ export function SettingsPage() {
   const [activeSettingsButtonExpanded, setActiveSettingsButtonExpanded] = useState(true);
   const [hiddenItems, setHiddenItems] = useState([]);
   const [globalHiddenItems, setGlobalHiddenItems] = useState([]);
+  const [hiddenListsExpanded, setHiddenListsExpanded] = useState({ personal: false, global: false });
   const [resourceStatus, setResourceStatus] = useState(createSettingsResourceStatus);
   const [pendingHiddenReconciliation, setPendingHiddenReconciliation] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -1210,7 +1254,6 @@ export function SettingsPage() {
   const [googleDriveSetup, setGoogleDriveSetup] = useState({
     https_origin: "",
     client_id: "",
-    client_secret: "",
     javascript_origin: "",
     redirect_uri: "",
     callback_source: "unconfigured",
@@ -1230,6 +1273,7 @@ export function SettingsPage() {
     client_secret: "",
   });
   const [googleDriveSetupSaving, setGoogleDriveSetupSaving] = useState(false);
+  const [googleDestructiveAction, setGoogleDestructiveAction] = useState("");
   const [totpStatus, setTotpStatus] = useState({
     enabled: false,
     setup_available: false,
@@ -1288,11 +1332,27 @@ export function SettingsPage() {
   const loading = userSettingsLoading;
   const hiddenLoading = resourceStatus.hidden.loading;
   const ageGroupsLoading = resourceStatus.ageGroups.loading;
-  const activeResourceKeys = settingsResourcesForSection(activeSettingsSection, user?.role);
   const settingsClientDeviceClass = detectClientDeviceClass();
   const settingsClientPlatform = detectClientPlatform();
   const showDesktopFloatingIslandSettings = settingsClientDeviceClass === "desktop"
     && ["windows", "mac", "linux"].includes(settingsClientPlatform);
+  const showDesktopControlCenter = showDesktopFloatingIslandSettings
+    && controlCenterPath.area === "settings"
+    && Boolean(controlCenterPath.tab);
+  const desktopSettingsTab = showDesktopControlCenter
+    ? controlCenterPath.tab
+    : "";
+  const visiblePersonalHiddenItems = showDesktopControlCenter && !hiddenListsExpanded.personal
+    ? hiddenItems.slice(0, 4)
+    : hiddenItems;
+  const visibleGlobalHiddenItems = showDesktopControlCenter && !hiddenListsExpanded.global
+    ? globalHiddenItems.slice(0, 4)
+    : globalHiddenItems;
+  const activeResourceKeys = settingsResourcesForSection(
+    activeSettingsSection,
+    user?.role,
+    desktopSettingsTab,
+  );
   const activeResourceErrors = Object.entries(resourceStatus)
     .filter(([key]) => activeResourceKeys.includes(key))
     .filter(([, status]) => status.error)
@@ -1385,6 +1445,7 @@ export function SettingsPage() {
     setBackgroundResetConfirmOpen(false);
     setHiddenItems([]);
     setGlobalHiddenItems([]);
+    setHiddenListsExpanded({ personal: false, global: false });
     setSaving(false);
     setRestoringItemId(null);
     setRestoringGlobalItemId(null);
@@ -1449,7 +1510,6 @@ export function SettingsPage() {
     setGoogleDriveSetup({
       https_origin: "",
       client_id: "",
-      client_secret: "",
       javascript_origin: "",
       redirect_uri: "",
       callback_source: "unconfigured",
@@ -1465,6 +1525,7 @@ export function SettingsPage() {
     });
     setGoogleDriveSetupDraft({ https_origin: "", client_id: "", client_secret: "" });
     setGoogleDriveSetupSaving(false);
+    setGoogleDestructiveAction("");
     setTotpStatus({ enabled: false, setup_available: false });
     setOpenSections({
       myLibraries: false,
@@ -1515,18 +1576,28 @@ export function SettingsPage() {
     }
   }, [settingsIdentity, userSettingsQuery.data, userSettingsQuery.error]);
 
-  const fetchHiddenLists = useCallback(async ({ signal } = {}) => {
+  const fetchHiddenLists = useCallback(async ({ signal, force = false } = {}) => {
+    const sharedQueryOptions = {
+      userId: user?.id,
+      role: user?.role,
+      force,
+    };
+    const useSharedControlCenterCache = showDesktopControlCenter && user?.role === "admin";
     const [personalPayload, globalPayload] = await Promise.all([
-      apiRequest("/api/user-hidden-items", { signal }),
+      useSharedControlCenterCache
+        ? fetchControlCenterResource({ ...sharedQueryOptions, resource: "personalHidden" })
+        : apiRequest("/api/user-hidden-items", { signal }),
       user?.role === "admin"
-        ? apiRequest("/api/admin/global-hidden-items", { signal })
+        ? (useSharedControlCenterCache
+          ? fetchControlCenterResource({ ...sharedQueryOptions, resource: "globalHidden" })
+          : apiRequest("/api/admin/global-hidden-items", { signal }))
         : Promise.resolve({ items: [] }),
     ]);
     return {
       personalItems: personalPayload.items || [],
       globalItems: globalPayload.items || [],
     };
-  }, [user?.role]);
+  }, [showDesktopControlCenter, user?.id, user?.role]);
 
   const refreshHiddenLists = useCallback(async ({
     signal,
@@ -1559,7 +1630,10 @@ export function SettingsPage() {
       && hiddenReadOperationRef.current === operation
     );
     try {
-      const lists = await fetchHiddenLists({ signal: controller.signal });
+      const lists = await fetchHiddenLists({
+        signal: controller.signal,
+        force: ownerKind !== "resource_load",
+      });
       if (!isCurrentOwner()) {
         return { outcome: "superseded", lists: null, error: null };
       }
@@ -1730,7 +1804,14 @@ export function SettingsPage() {
       } else if (resourceKey === "cloud") {
         result = {
           outcome: "applied",
-          payload: await apiRequest("/api/cloud-libraries", { signal: controller.signal }),
+          payload: showDesktopControlCenter && user?.role === "admin"
+            ? await fetchControlCenterResource({
+              userId: user?.id,
+              role: user?.role,
+              resource: "cloudLibraries",
+              force,
+            })
+            : await apiRequest("/api/cloud-libraries", { signal: controller.signal }),
         };
       } else if (resourceKey === "ageGroups") {
         result = {
@@ -1740,7 +1821,14 @@ export function SettingsPage() {
       } else if (resourceKey === "googleSetup") {
         result = {
           outcome: "applied",
-          payload: await apiRequest("/api/admin/google-drive-setup", { signal: controller.signal }),
+          payload: showDesktopControlCenter && user?.role === "admin"
+            ? await fetchControlCenterResource({
+              userId: user?.id,
+              role: user?.role,
+              resource: "googleDriveSetup",
+              force,
+            })
+            : await apiRequest("/api/admin/google-drive-setup", { signal: controller.signal }),
         };
       } else if (resourceKey === "mediaReference") {
         result = {
@@ -1777,11 +1865,12 @@ export function SettingsPage() {
       } else if (resourceKey === "ageGroups") {
         setAgeGroups(payload || { items: [], total: 0 });
       } else if (resourceKey === "googleSetup") {
-        setGoogleDriveSetup(payload);
+        const safePayload = sanitizeGoogleDriveSetupPayload(payload);
+        setGoogleDriveSetup(safePayload);
         setGoogleDriveSetupDraft({
-          https_origin: payload.https_origin || "",
-          client_id: payload.client_id || "",
-          client_secret: payload.client_secret || "",
+          https_origin: safePayload.https_origin || "",
+          client_id: safePayload.client_id || "",
+          client_secret: "",
         });
       } else if (resourceKey === "mediaReference") {
         setSharedMediaLibraryReference(payload);
@@ -1875,14 +1964,24 @@ export function SettingsPage() {
         }));
       }
     }
-  }, [refreshHiddenLists, settingsIdentity]);
+  }, [
+    refreshHiddenLists,
+    settingsIdentity,
+    showDesktopControlCenter,
+    user?.id,
+    user?.role,
+  ]);
 
   useEffect(() => {
-    const resources = settingsResourcesForSection(activeSettingsSection, user?.role);
+    const resources = settingsResourcesForSection(
+      activeSettingsSection,
+      user?.role,
+      desktopSettingsTab,
+    );
     resources.forEach((resourceKey) => {
       void loadSettingsResource(resourceKey);
     });
-  }, [activeSettingsSection, loadSettingsResource, user?.role]);
+  }, [activeSettingsSection, desktopSettingsTab, loadSettingsResource, user?.role]);
 
   useEffect(() => {
     const handleConnectivityRecovered = (event) => {
@@ -1943,7 +2042,6 @@ export function SettingsPage() {
       setGoogleDriveSetup({
         https_origin: "",
         client_id: "",
-        client_secret: "",
         javascript_origin: "",
         redirect_uri: "",
         callback_source: "unconfigured",
@@ -1978,10 +2076,15 @@ export function SettingsPage() {
   }, [user?.role]);
 
   useLayoutEffect(() => {
-    const resolution = resolveSettingsSection({
-      search: location.search,
-      hash: location.hash,
-    });
+    const pathState = classifyControlCenterPath(location.pathname);
+    const resolution = pathState.area === "settings" && pathState.tab
+      ? {
+          section: desktopSettingsTabToLegacySection(pathState.tab, user?.role),
+          shouldReplace: false,
+          needsStorageMigration: false,
+          storageMigrationTarget: null,
+        }
+      : resolveSettingsSection({ search: location.search, hash: location.hash });
     applySettingsSectionStorageMigration(resolution);
     writePersistedSettingsSection(resolution.section);
     if (activeSettingsSection !== resolution.section) {
@@ -1992,6 +2095,7 @@ export function SettingsPage() {
     activeSettingsSection,
     location,
     navigate,
+    user?.role,
   ]);
 
   useLayoutEffect(() => {
@@ -2408,6 +2512,7 @@ export function SettingsPage() {
       await patchBackgroundSettings(
         {
           background_mode: "solid",
+          background_custom_model: "legacy_v1",
           background_solid_color: draft.background_solid_color,
         },
         "Solid background saved.",
@@ -2421,12 +2526,56 @@ export function SettingsPage() {
     await patchBackgroundSettings(
       {
         background_mode: "gradient",
+        background_custom_model: "legacy_v1",
         background_gradient_start: draft.background_gradient_start,
         background_gradient_end: gradientEnd,
         background_gradient_accent: draft.background_gradient_accent,
       },
       "Gradient background saved.",
     );
+  }
+
+  async function handleDesktopHueSave() {
+    const draft = normalizeUserBackgroundSettings(backgroundDraft);
+    if (draft.background_mode === "solid") {
+      await patchBackgroundSettings(
+        {
+          background_mode: "solid",
+          background_custom_model: "hue_v2",
+          background_solid_hue: draft.background_solid_hue,
+          background_solid_color: hueToHex(draft.background_solid_hue, 45, 30),
+        },
+        "Solid background saved.",
+      );
+      return;
+    }
+    await patchBackgroundSettings(
+      {
+        background_mode: "gradient",
+        background_custom_model: "hue_v2",
+        background_gradient_start_hue: draft.background_gradient_start_hue,
+        background_gradient_end_hue: draft.background_gradient_end_hue,
+        background_gradient_start: hueToHex(draft.background_gradient_start_hue, 62, 42),
+        background_gradient_end: hueToHex(draft.background_gradient_end_hue, 60, 22),
+        background_gradient_accent: hueToHex(
+          Math.round((draft.background_gradient_start_hue + draft.background_gradient_end_hue) / 2),
+          61,
+          32,
+        ),
+      },
+      "Gradient background saved.",
+    );
+  }
+
+  function resetDesktopHueDraft() {
+    setBackgroundDraft((current) => ({
+      ...current,
+      background_custom_model: "hue_v2",
+      background_gradient_start_hue: 210,
+      background_gradient_end_hue: 330,
+      background_solid_hue: 210,
+    }));
+    setBackgroundError("");
   }
 
   function requestBackgroundReset() {
@@ -2789,7 +2938,8 @@ export function SettingsPage() {
         if (target === "poster-reference") {
           setPosterReferenceInput(payload.selected_path);
         } else {
-          setSharedMediaLibraryReferenceInput(payload.selected_path);
+          setSharedMediaLibraryReferenceInput((current) =>
+            appendUniqueReferenceLocation(current, payload.selected_path));
         }
         setDirectoryPickerFallback({ target: "", reason: "" });
         return;
@@ -2839,13 +2989,21 @@ export function SettingsPage() {
     if (directoryPicker.target === "poster-reference") {
       setPosterReferenceInput(directoryPicker.current_path);
     } else {
-      setSharedMediaLibraryReferenceInput(directoryPicker.current_path);
+      setSharedMediaLibraryReferenceInput((current) =>
+        appendUniqueReferenceLocation(current, directoryPicker.current_path));
     }
     handleCloseDirectoryPicker();
   }
 
   async function refreshCloudLibraries() {
-    const payload = await apiRequest("/api/cloud-libraries");
+    const payload = showDesktopControlCenter && user?.role === "admin"
+      ? await fetchControlCenterResource({
+        userId: user?.id,
+        role: user?.role,
+        resource: "cloudLibraries",
+        force: true,
+      })
+      : await apiRequest("/api/cloud-libraries");
     setCloudLibraries(payload);
     return payload;
   }
@@ -3067,12 +3225,20 @@ export function SettingsPage() {
     if (user?.role !== "admin") {
       return null;
     }
-    const payload = await apiRequest("/api/admin/google-drive-setup");
+    const responsePayload = showDesktopControlCenter
+      ? await fetchControlCenterResource({
+        userId: user?.id,
+        role: user?.role,
+        resource: "googleDriveSetup",
+        force: true,
+      })
+      : await apiRequest("/api/admin/google-drive-setup");
+    const payload = sanitizeGoogleDriveSetupPayload(responsePayload);
     setGoogleDriveSetup(payload);
     setGoogleDriveSetupDraft({
       https_origin: payload.https_origin || "",
       client_id: payload.client_id || "",
-      client_secret: payload.client_secret || "",
+      client_secret: "",
     });
     return payload;
   }
@@ -3083,7 +3249,7 @@ export function SettingsPage() {
     setError("");
     setMessage("");
     try {
-      const payload = await apiRequest("/api/admin/google-drive-setup", {
+      const responsePayload = await apiRequest("/api/admin/google-drive-setup", {
         method: "PUT",
         data: {
           https_origin: googleDriveSetupDraft.https_origin,
@@ -3091,11 +3257,19 @@ export function SettingsPage() {
           client_secret: googleDriveSetupDraft.client_secret,
         },
       });
+      const payload = sanitizeGoogleDriveSetupPayload(responsePayload);
       setGoogleDriveSetup(payload);
+      if (showDesktopControlCenter) {
+        setControlCenterResourceData({
+          userId: user?.id,
+          role: user?.role,
+          resource: "googleDriveSetup",
+        }, payload);
+      }
       setGoogleDriveSetupDraft({
         https_origin: payload.https_origin || "",
         client_id: payload.client_id || "",
-        client_secret: payload.client_secret || "",
+        client_secret: "",
       });
       const successMessage = payload.configuration_state === "ready"
         ? "Google Drive setup saved. You can connect Google Drive below."
@@ -3109,6 +3283,46 @@ export function SettingsPage() {
       }
     } catch (requestError) {
       setError(requestError.message || "Failed to save Google Drive setup");
+    } finally {
+      setGoogleDriveSetupSaving(false);
+    }
+  }
+
+  async function handleGoogleDestructiveAction() {
+    const action = googleDestructiveAction;
+    if (!action || googleDriveSetupSaving) {
+      return;
+    }
+    setGoogleDriveSetupSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const endpoint = action === "clear-setup"
+        ? "/api/admin/google-drive-setup"
+        : "/api/admin/google-drive-account";
+      const responsePayload = await apiRequest(endpoint, { method: "DELETE" });
+      const payload = sanitizeGoogleDriveSetupPayload(responsePayload);
+      setGoogleDriveSetup(payload);
+      if (showDesktopControlCenter) {
+        setControlCenterResourceData({
+          userId: user?.id,
+          role: user?.role,
+          resource: "googleDriveSetup",
+        }, payload);
+      }
+      setGoogleDriveSetupDraft({
+        https_origin: payload.https_origin || "",
+        client_id: payload.client_id || "",
+        client_secret: "",
+      });
+      await refreshCloudLibraries();
+      void invalidateLibraryQueries();
+      setMessage(action === "clear-setup"
+        ? "Saved OAuth overrides cleared."
+        : "Google account disconnected. Cloud sources were kept.");
+      setGoogleDestructiveAction("");
+    } catch (requestError) {
+      setError(requestError.message || "Failed to update Google Drive configuration");
     } finally {
       setGoogleDriveSetupSaving(false);
     }
@@ -3199,12 +3413,22 @@ export function SettingsPage() {
       const payload = await apiRequest(`/api/cloud-libraries/sources/${source.id}/hide`, {
         method: nextHidden ? "POST" : "DELETE",
       });
-      setCloudLibraries((current) => ({
-        ...current,
-        shared_libraries: current.shared_libraries.map((entry) =>
-          entry.id === source.id ? { ...entry, hidden_for_user: nextHidden } : entry,
-        ),
-      }));
+      setCloudLibraries((current) => {
+        const next = {
+          ...current,
+          shared_libraries: current.shared_libraries.map((entry) =>
+            entry.id === source.id ? { ...entry, hidden_for_user: nextHidden } : entry,
+          ),
+        };
+        if (showDesktopControlCenter && user?.role === "admin") {
+          setControlCenterResourceData({
+            userId: user?.id,
+            role: user?.role,
+            resource: "cloudLibraries",
+          }, next);
+        }
+        return next;
+      });
       setMessage(
         payload.message
           || (nextHidden ? "This shared library is hidden for your account." : "This shared library is visible again."),
@@ -3231,17 +3455,33 @@ export function SettingsPage() {
         const nextMyLibraries = current.my_libraries.filter((entry) => entry.id !== source.id);
         const nextSharedLibraries = current.shared_libraries.filter((entry) => entry.id !== source.id);
         if (nextShared) {
-          return {
+          const next = {
             ...current,
             my_libraries: nextMyLibraries,
             shared_libraries: sortCloudSources([updated, ...nextSharedLibraries]),
           };
+          if (showDesktopControlCenter && user?.role === "admin") {
+            setControlCenterResourceData({
+              userId: user?.id,
+              role: user?.role,
+              resource: "cloudLibraries",
+            }, next);
+          }
+          return next;
         }
-        return {
+        const next = {
           ...current,
           my_libraries: sortCloudSources([updated, ...nextMyLibraries]),
           shared_libraries: nextSharedLibraries,
         };
+        if (showDesktopControlCenter && user?.role === "admin") {
+          setControlCenterResourceData({
+            userId: user?.id,
+            role: user?.role,
+            resource: "cloudLibraries",
+          }, next);
+        }
+        return next;
       });
       setMessage(nextShared ? "Library shared globally." : "Library moved back to My Libraries.");
       await refreshCloudLibraries();
@@ -3374,6 +3614,7 @@ export function SettingsPage() {
         savingKey={ageBucketManager.savingKey}
       />
 
+      {!showDesktopControlCenter ? (
       <div className="admin-nav-card settings-section-nav-card" aria-label="Settings sections">
         <div
           aria-orientation="horizontal"
@@ -3411,6 +3652,7 @@ export function SettingsPage() {
         </div>
         <DesktopBackToLibraryButton className="admin-nav-card__back" />
       </div>
+      ) : null}
 
       {activeSettingsSection !== "install" && userSettingsLoadError ? (
         <p className="form-error settings-user-settings-load-error">
@@ -3452,7 +3694,15 @@ export function SettingsPage() {
         </div>
       ) : null}
 
-      {activeSettingsSection === "preferences" ? (
+      {showDesktopControlCenter && totpStatus?.setup_available && !totpStatus?.enabled ? (
+        <div className="control-center-notice" role="status">
+          <span>Two-factor setup is still required for this account.</span>
+          <button onClick={() => navigate("/setup/totp")} type="button">Set up 2FA</button>
+        </div>
+      ) : null}
+
+      {activeSettingsSection === "preferences"
+        || (showDesktopControlCenter && desktopSettingsTab === "library") ? (
       <div
         aria-labelledby="settings-tab-preferences"
         className="settings-grid settings-grid--preferences settings-grid--compact-columns"
@@ -3500,6 +3750,32 @@ export function SettingsPage() {
               </div>
             )}
           </section>
+          ) : null}
+
+          {showDesktopControlCenter ? (
+            <section className="settings-card control-center-settings-poster-width">
+              <h2>Maximum poster width</h2>
+              {loading ? (
+                <p className="page-subnote">Loading poster display quality...</p>
+              ) : (
+                <label className="settings-field">
+                  <span>
+                    <strong>Library card images</strong>
+                    <small>Choose the upper width used for poster card requests.</small>
+                  </span>
+                  <select
+                    className="admin-select"
+                    disabled={saving}
+                    onChange={handlePosterDisplayWidthChange}
+                    value={normalizePosterDisplayWidth(settings.poster_card_display_max_width)}
+                  >
+                    {POSTER_DISPLAY_WIDTH_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </section>
           ) : null}
 
           <section className="settings-card settings-display-library-card settings-preferences-library-card">
@@ -3593,17 +3869,57 @@ export function SettingsPage() {
 
                 {backgroundDraft.background_mode === "gradient" ? (
                   <div className="settings-background-picker-panel">
-                    <BackgroundColorPicker
-                      color={getBackgroundColorPickerValue(backgroundDraft)}
-                      disabled={backgroundSaving}
-                      mode="gradient"
-                      onPick={handleBackgroundPalettePick}
-                    />
+                    {showDesktopControlCenter ? (
+                      <div className="control-center-hue-editor">
+                        <label>
+                          <span>Start hue <strong>{backgroundDraft.background_gradient_start_hue}°</strong></span>
+                          <input
+                            disabled={backgroundSaving}
+                            max="359"
+                            min="0"
+                            onChange={(event) => setBackgroundDraft((current) => ({
+                              ...current,
+                              background_custom_model: "hue_v2",
+                              background_gradient_start_hue: Number(event.target.value),
+                            }))}
+                            type="range"
+                            value={backgroundDraft.background_gradient_start_hue}
+                          />
+                        </label>
+                        <label>
+                          <span>End hue <strong>{backgroundDraft.background_gradient_end_hue}°</strong></span>
+                          <input
+                            disabled={backgroundSaving}
+                            max="359"
+                            min="0"
+                            onChange={(event) => setBackgroundDraft((current) => ({
+                              ...current,
+                              background_custom_model: "hue_v2",
+                              background_gradient_end_hue: Number(event.target.value),
+                            }))}
+                            type="range"
+                            value={backgroundDraft.background_gradient_end_hue}
+                          />
+                        </label>
+                        <div
+                          aria-label="Custom gradient preview"
+                          className="control-center-hue-editor__preview"
+                          style={buildBackgroundPreviewStyle({ ...backgroundDraft, background_custom_model: "hue_v2" })}
+                        />
+                      </div>
+                    ) : (
+                      <BackgroundColorPicker
+                        color={getBackgroundColorPickerValue(backgroundDraft)}
+                        disabled={backgroundSaving}
+                        mode="gradient"
+                        onPick={handleBackgroundPalettePick}
+                      />
+                    )}
                     <div className="settings-background-actions">
                       <button
                         className="ghost-button ghost-button--inline"
                         disabled={backgroundSaving}
-                        onClick={handleBackgroundCustomSave}
+                        onClick={showDesktopControlCenter ? handleDesktopHueSave : handleBackgroundCustomSave}
                         type="button"
                       >
                         Save gradient
@@ -3611,7 +3927,7 @@ export function SettingsPage() {
                       <button
                         className="ghost-button ghost-button--inline"
                         disabled={backgroundSaving}
-                        onClick={requestBackgroundReset}
+                        onClick={showDesktopControlCenter ? resetDesktopHueDraft : requestBackgroundReset}
                         type="button"
                       >
                         Reset
@@ -3622,17 +3938,42 @@ export function SettingsPage() {
 
                 {backgroundDraft.background_mode === "solid" ? (
                   <div className="settings-background-picker-panel">
-                    <BackgroundColorPicker
-                      color={getBackgroundColorPickerValue(backgroundDraft)}
-                      disabled={backgroundSaving}
-                      mode="solid"
-                      onPick={handleBackgroundPalettePick}
-                    />
+                    {showDesktopControlCenter ? (
+                      <div className="control-center-hue-editor">
+                        <label>
+                          <span>Hue <strong>{backgroundDraft.background_solid_hue}°</strong></span>
+                          <input
+                            disabled={backgroundSaving}
+                            max="359"
+                            min="0"
+                            onChange={(event) => setBackgroundDraft((current) => ({
+                              ...current,
+                              background_custom_model: "hue_v2",
+                              background_solid_hue: Number(event.target.value),
+                            }))}
+                            type="range"
+                            value={backgroundDraft.background_solid_hue}
+                          />
+                        </label>
+                        <div
+                          aria-label="Custom solid background preview"
+                          className="control-center-hue-editor__preview"
+                          style={buildBackgroundPreviewStyle({ ...backgroundDraft, background_custom_model: "hue_v2" })}
+                        />
+                      </div>
+                    ) : (
+                      <BackgroundColorPicker
+                        color={getBackgroundColorPickerValue(backgroundDraft)}
+                        disabled={backgroundSaving}
+                        mode="solid"
+                        onPick={handleBackgroundPalettePick}
+                      />
+                    )}
                     <div className="settings-background-actions">
                       <button
                         className="ghost-button ghost-button--inline"
                         disabled={backgroundSaving}
-                        onClick={handleBackgroundCustomSave}
+                        onClick={showDesktopControlCenter ? handleDesktopHueSave : handleBackgroundCustomSave}
                         type="button"
                       >
                         Save solid
@@ -3640,7 +3981,7 @@ export function SettingsPage() {
                       <button
                         className="ghost-button ghost-button--inline"
                         disabled={backgroundSaving}
-                        onClick={requestBackgroundReset}
+                        onClick={showDesktopControlCenter ? resetDesktopHueDraft : requestBackgroundReset}
                         type="button"
                       >
                         Reset
@@ -3663,6 +4004,11 @@ export function SettingsPage() {
                       >
                         <span className="settings-background-preview__shine" aria-hidden="true" />
                       </div>
+                    ) : null}
+                    {settings.background_photo_url ? (
+                      <p className="page-subnote">
+                        {settings.background_photo_original_filename || "Background photo"}
+                      </p>
                     ) : null}
                     <div className="settings-background-actions">
                       <label className="ghost-button ghost-button--inline settings-background-upload">
@@ -3769,6 +4115,7 @@ export function SettingsPage() {
         ) : null}
 
         <SettingsAccordionSection
+          className="control-center-settings-cloud"
           badge={cloudLibraries.my_libraries.length}
           description="Add your own Google Drive movie folders here. Personal cloud sources appear in your Library alongside DGX titles."
           isOpen={openSections.myLibraries}
@@ -3903,6 +4250,7 @@ export function SettingsPage() {
         </SettingsAccordionSection>
 
         <SettingsAccordionSection
+          className="control-center-settings-cloud"
           badge={cloudLibraries.shared_libraries.length}
           description="Admin-shared Google Drive libraries appear in every user&apos;s Library. You can still hide a shared library for your own account."
           isOpen={openSections.sharedLibraries}
@@ -4011,8 +4359,8 @@ export function SettingsPage() {
         </SettingsAccordionSection>
 
         <div className="settings-hidden-list-target" id="hidden-list">
-        <section className="settings-card settings-card--wide">
-          <details className="settings-disclosure">
+        <section className="settings-card settings-card--wide control-center-settings-legacy-poster-width">
+          <details className="settings-disclosure" open={showDesktopControlCenter || undefined}>
             <summary className="settings-disclosure__summary">
               <span className="settings-disclosure__header">
                 <span className="settings-disclosure__title">Hidden for me</span>
@@ -4028,7 +4376,7 @@ export function SettingsPage() {
                 <p className="page-subnote">Loading hidden movies...</p>
               ) : hiddenItems.length > 0 ? (
                 <div className="hidden-movie-list">
-                  {hiddenItems.map((hiddenItem) => (
+                  {visiblePersonalHiddenItems.map((hiddenItem) => (
                     <article className="hidden-movie-row" key={hiddenItem.id}>
                       {hiddenItem.poster_url ? (
                         <img
@@ -4079,6 +4427,20 @@ export function SettingsPage() {
                       </div>
                     </article>
                   ))}
+                  {showDesktopControlCenter && hiddenItems.length > 4 ? (
+                    <button
+                      className="control-center-list-expander"
+                      onClick={() => setHiddenListsExpanded((current) => ({
+                        ...current,
+                        personal: !current.personal,
+                      }))}
+                      type="button"
+                    >
+                      {hiddenListsExpanded.personal
+                        ? "Show fewer"
+                        : `...and ${hiddenItems.length - 4} more hidden titles`}
+                    </button>
+                  ) : null}
                 </div>
               ) : (
                 <p className="page-subnote">You have no hidden movies right now.</p>
@@ -4089,7 +4451,7 @@ export function SettingsPage() {
 
         {user?.role === "admin" ? (
           <section className="settings-card settings-card--wide">
-            <details className="settings-disclosure">
+            <details className="settings-disclosure" open={showDesktopControlCenter || undefined}>
               <summary className="settings-disclosure__summary">
                 <span className="settings-disclosure__header">
                   <span className="settings-disclosure__title">Hidden for everyone</span>
@@ -4105,7 +4467,7 @@ export function SettingsPage() {
                   <p className="page-subnote">Loading globally hidden movies...</p>
                 ) : globalHiddenItems.length > 0 ? (
                   <div className="hidden-movie-list">
-                    {globalHiddenItems.map((hiddenItem) => (
+                    {visibleGlobalHiddenItems.map((hiddenItem) => (
                       <article className="hidden-movie-row" key={hiddenItem.id}>
                         {hiddenItem.poster_url ? (
                           <img
@@ -4154,6 +4516,20 @@ export function SettingsPage() {
                         </div>
                       </article>
                     ))}
+                    {showDesktopControlCenter && globalHiddenItems.length > 4 ? (
+                      <button
+                        className="control-center-list-expander"
+                        onClick={() => setHiddenListsExpanded((current) => ({
+                          ...current,
+                          global: !current.global,
+                        }))}
+                        type="button"
+                      >
+                        {hiddenListsExpanded.global
+                          ? "Show fewer"
+                          : `...and ${globalHiddenItems.length - 4} more hidden titles`}
+                      </button>
+                    ) : null}
                   </div>
                 ) : (
                   <p className="page-subnote">No globally hidden movies right now.</p>
@@ -4199,6 +4575,7 @@ export function SettingsPage() {
 
         {totpStatus?.setup_available && !totpStatus?.enabled ? (
           <SettingsAccordionSection
+            className="control-center-settings-totp"
             description="Your admin has enabled two-factor setup for this account. You can finish setup here whenever you're ready."
             isOpen={openSections.totpSetup}
             onToggle={() => toggleSection("totpSetup")}
@@ -4293,6 +4670,7 @@ export function SettingsPage() {
                   </span>
                   <input
                     autoCapitalize="off"
+                    autoComplete="off"
                     autoCorrect="off"
                     className="cloud-source-form__input"
                     disabled={googleDriveSetupSaving}
@@ -4310,15 +4688,16 @@ export function SettingsPage() {
                     <strong>Google OAuth Client Secret</strong>
                     <small>Paste the matching client secret for this same Google OAuth app.</small>
                   </span>
-                  <input
-                    autoCapitalize="off"
-                    autoCorrect="off"
+                  <NonLoginSecretInput
                     className="cloud-source-form__input"
                     disabled={googleDriveSetupSaving}
                     onChange={(event) =>
                       setGoogleDriveSetupDraft((current) => ({ ...current, client_secret: event.target.value }))
                     }
-                    spellCheck="false"
+                    placeholder={googleDriveSetup.client_secret_configured
+                      ? "Leave blank to keep the saved secret"
+                      : "Enter the Google OAuth client secret"}
+                    purpose="google-oauth-client-secret"
                     value={googleDriveSetupDraft.client_secret}
                   />
                 </label>
@@ -4365,6 +4744,56 @@ export function SettingsPage() {
                     {googleDriveSetupSaving ? "Saving..." : "Save Google Drive Setup"}
                   </button>
                 </div>
+                <div className="control-center-destructive-actions">
+                  <button
+                    className="ghost-button ghost-button--inline"
+                    disabled={googleDriveSetupSaving}
+                    onClick={() => setGoogleDestructiveAction("clear-setup")}
+                    type="button"
+                  >
+                    Clear saved OAuth overrides
+                  </button>
+                  <button
+                    className="ghost-button ghost-button--inline ghost-button--danger"
+                    disabled={googleDriveSetupSaving || !googleDriveSetup.connected}
+                    onClick={() => setGoogleDestructiveAction("disconnect-account")}
+                    type="button"
+                  >
+                    Disconnect Google account
+                  </button>
+                </div>
+                {googleDestructiveAction ? (
+                  <div className="control-center-confirm" role="alertdialog" aria-modal="true">
+                    <strong>
+                      {googleDestructiveAction === "clear-setup"
+                        ? "Clear saved OAuth overrides?"
+                        : "Disconnect this Google account?"}
+                    </strong>
+                    <p>
+                      {googleDestructiveAction === "clear-setup"
+                        ? "Database overrides will be removed. Connected account tokens and cloud sources will be kept."
+                        : "Account tokens will be removed. Cloud source records and OAuth setup will be kept."}
+                    </p>
+                    <div className="player-actions">
+                      <button
+                        className="ghost-button ghost-button--inline"
+                        disabled={googleDriveSetupSaving}
+                        onClick={() => setGoogleDestructiveAction("")}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="ghost-button ghost-button--inline ghost-button--danger"
+                        disabled={googleDriveSetupSaving}
+                        onClick={handleGoogleDestructiveAction}
+                        type="button"
+                      >
+                        {googleDriveSetupSaving ? "Working..." : "Confirm"}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </form>
             </div>
           </SettingsAccordionSection>

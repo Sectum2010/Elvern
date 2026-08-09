@@ -29,6 +29,7 @@ import {
   classifyPrimaryNavigationRoute,
   resolveAssistantNavigationTarget,
 } from "../lib/assistantAccess.js";
+import { classifyControlCenterPath, isDesktopControlCenterDevice } from "../lib/controlCenterRoutes.js";
 
 function normalizePosterCardAppearance(value) {
   if (value === "modern" || value === "clean") {
@@ -110,6 +111,8 @@ function ShellLayoutContent({ children }) {
   const desktopPosterContextMenuEnabled = isDesktopClientPlatform(clientPlatform);
   const desktopLibraryClient = clientDeviceClass === "desktop"
     && isDesktopClientPlatform(clientPlatform);
+  const desktopControlCenter = isDesktopControlCenterDevice(clientDeviceClass, clientPlatform)
+    && Boolean(classifyControlCenterPath(location.pathname).area);
   const showDesktopLibraryIsland = desktopLibraryClient
     && libraryPath.kind === "root";
   const protectedDesktopLibraryState = (
@@ -388,11 +391,15 @@ function ShellLayoutContent({ children }) {
   }
 
   useEffect(() => {
+    if (desktopControlCenter) {
+      resetUserBackgroundTheme();
+      return undefined;
+    }
     applyUserBackgroundTheme(backgroundSettings);
     return () => {
       resetUserBackgroundTheme();
     };
-  }, [backgroundSettings]);
+  }, [backgroundSettings, desktopControlCenter]);
 
   useEffect(() => {
     floatingLinkRefs.current.length = navigation.length;
@@ -468,11 +475,18 @@ function ShellLayoutContent({ children }) {
           isLibraryRootPage ? "app-shell--library-root" : "",
           isLibrarySourcePage ? "app-shell--library-source" : "",
           desktopLibraryClient ? "app-shell--desktop-client" : "",
+          desktopControlCenter ? "app-shell--desktop-control-center" : "",
           showDesktopLibraryIsland
             ? `app-shell--desktop-library-island-${desktopFloatingIslandPosition}`
             : "",
           mobileSelectionGuardEnabled ? "app-shell--selection-guard" : "",
         ].filter(Boolean).join(" ")}
+        style={desktopControlCenter ? {
+          inlineSize: "100%",
+          maxInlineSize: "none",
+          margin: 0,
+          padding: 0,
+        } : undefined}
       >
       {playbackReadyNotice ? (
         <div className="playback-ready-bubble" role="status">
@@ -612,7 +626,12 @@ function ShellLayoutContent({ children }) {
         </div>
       ) : null}
 
-        <main className="page-shell">{children}</main>
+        <main
+          className={`page-shell${desktopControlCenter ? " page-shell--desktop-control-center" : ""}`}
+          style={desktopControlCenter ? { margin: 0 } : undefined}
+        >
+          {children}
+        </main>
       </div>
     </PosterContextMenuProvider>
   );

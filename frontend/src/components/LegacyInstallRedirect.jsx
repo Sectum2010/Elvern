@@ -1,22 +1,15 @@
 import { Navigate, useLocation } from "react-router-dom";
 
-import { buildSettingsSectionLocation } from "../lib/settingsSectionState.js";
-
-
 export function LegacyInstallRedirect() {
   const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  params.delete("section");
+  const search = params.toString();
   return (
     <Navigate
       replace
       state={location.state}
-      to={buildSettingsSectionLocation(
-        {
-          pathname: "/settings",
-          search: location.search,
-          hash: location.hash,
-        },
-        "install",
-      )}
+      to={`/settings/playback-apps${search ? `?${search}` : ""}${location.hash || ""}`}
     />
   );
 }

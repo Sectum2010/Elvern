@@ -22,6 +22,7 @@ frontend/playwright-report/
 frontend/blob-report/
 frontend/tmp/
 tmp/
+/Elvern-ui-redesign/
 clients/desktop-vlc-opener/artifacts/
 clients/desktop-vlc-opener/**/bin/
 clients/desktop-vlc-opener/**/obj/

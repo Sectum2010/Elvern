@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from io import BytesIO
 import re
+import unicodedata
+from urllib.parse import unquote
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -23,18 +25,19 @@ BACKGROUND_GRADIENT_START_KEY = "background_gradient_start"
 BACKGROUND_GRADIENT_END_KEY = "background_gradient_end"
 BACKGROUND_GRADIENT_ACCENT_KEY = "background_gradient_accent"
 BACKGROUND_SOLID_COLOR_KEY = "background_solid_color"
+BACKGROUND_CUSTOM_MODEL_KEY = "background_custom_model"
+BACKGROUND_GRADIENT_START_HUE_KEY = "background_gradient_start_hue"
+BACKGROUND_GRADIENT_END_HUE_KEY = "background_gradient_end_hue"
+BACKGROUND_SOLID_HUE_KEY = "background_solid_hue"
+BACKGROUND_PHOTO_ORIGINAL_FILENAME_KEY = "background_photo_original_filename"
 POSTER_CARD_APPEARANCES = {"classic", "modern", "clean"}
 POSTER_CARD_DISPLAY_MAX_WIDTHS = {
     "800",
     "1000",
-    "1200",
     "1400",
-    "1600",
-    "1800",
-    "2000",
-    "2200",
     "original",
 }
+LEGACY_POSTER_CARD_DISPLAY_MAX_WIDTHS = {"1200", "1600", "1800", "2000", "2200"}
 BACKGROUND_MODES = {"preset", "gradient", "solid", "photo"}
 BACKGROUND_PRESETS = {"neon", "basic", "midnight", "aurora", "rose", "ocean"}
 BACKGROUND_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
@@ -44,6 +47,7 @@ DEFAULT_BACKGROUND_GRADIENT_END = "#1b41b5"
 DEFAULT_BACKGROUND_GRADIENT_ACCENT = "#5c1867"
 DEFAULT_BACKGROUND_SOLID_COLOR = "#151a21"
 SAFE_HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class UserSettingsValidationError(ValueError):
@@ -64,6 +68,21 @@ def _try_normalize_hex_color(value: str | None, fallback: str) -> str:
         return _normalize_hex_color(value, field_name="Background color")
     except UserSettingsValidationError:
         return fallback
+
+
+def _normalize_hue(value: int | str | None, *, fallback: int) -> int:
+    try:
+        normalized = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+    return max(0, min(359, normalized))
+
+
+def sanitize_background_photo_filename(filename: str | None) -> str:
+    candidate = unicodedata.normalize("NFKC", unquote(str(filename or "")))
+    candidate = candidate.replace("\\", "/").rsplit("/", 1)[-1]
+    candidate = CONTROL_CHAR_RE.sub("", candidate).strip()
+    return candidate[:160] or "Background photo"
 
 
 def get_user_background_photo_path(settings: Settings, *, user_id: int):
@@ -93,7 +112,12 @@ def get_user_settings(settings: Settings, *, user_id: int) -> dict[str, bool | s
         BACKGROUND_GRADIENT_END_KEY: DEFAULT_BACKGROUND_GRADIENT_END,
         BACKGROUND_GRADIENT_ACCENT_KEY: DEFAULT_BACKGROUND_GRADIENT_ACCENT,
         BACKGROUND_SOLID_COLOR_KEY: DEFAULT_BACKGROUND_SOLID_COLOR,
+        BACKGROUND_CUSTOM_MODEL_KEY: "legacy_v1",
+        BACKGROUND_GRADIENT_START_HUE_KEY: 210,
+        BACKGROUND_GRADIENT_END_HUE_KEY: 330,
+        BACKGROUND_SOLID_HUE_KEY: 210,
         "background_photo_url": None,
+        BACKGROUND_PHOTO_ORIGINAL_FILENAME_KEY: None,
         "media_library_reference_private_value": None,
         "media_library_reference_shared_default_value": "",
         "media_library_reference_effective_value": "",
@@ -127,8 +151,10 @@ def get_user_settings(settings: Settings, *, user_id: int) -> dict[str, bool | s
             )
         if row["key"] == POSTER_CARD_APPEARANCE_KEY and row["value"] in POSTER_CARD_APPEARANCES:
             values[POSTER_CARD_APPEARANCE_KEY] = row["value"]
-        if row["key"] == POSTER_CARD_DISPLAY_MAX_WIDTH_KEY and row["value"] in POSTER_CARD_DISPLAY_MAX_WIDTHS:
-            values[POSTER_CARD_DISPLAY_MAX_WIDTH_KEY] = row["value"]
+        if row["key"] == POSTER_CARD_DISPLAY_MAX_WIDTH_KEY:
+            values[POSTER_CARD_DISPLAY_MAX_WIDTH_KEY] = (
+                row["value"] if row["value"] in POSTER_CARD_DISPLAY_MAX_WIDTHS else "1400"
+            )
         if row["key"] == BACKGROUND_MODE_KEY and row["value"] in BACKGROUND_MODES:
             values[BACKGROUND_MODE_KEY] = row["value"]
         if row["key"] == BACKGROUND_PRESET_KEY and row["value"] in BACKGROUND_PRESETS:
@@ -153,6 +179,18 @@ def get_user_settings(settings: Settings, *, user_id: int) -> dict[str, bool | s
                 row["value"],
                 DEFAULT_BACKGROUND_SOLID_COLOR,
             )
+        if row["key"] == BACKGROUND_CUSTOM_MODEL_KEY:
+            values[BACKGROUND_CUSTOM_MODEL_KEY] = (
+                row["value"] if row["value"] in {"legacy_v1", "hue_v2"} else "legacy_v1"
+            )
+        if row["key"] == BACKGROUND_GRADIENT_START_HUE_KEY:
+            values[BACKGROUND_GRADIENT_START_HUE_KEY] = _normalize_hue(row["value"], fallback=210)
+        if row["key"] == BACKGROUND_GRADIENT_END_HUE_KEY:
+            values[BACKGROUND_GRADIENT_END_HUE_KEY] = _normalize_hue(row["value"], fallback=330)
+        if row["key"] == BACKGROUND_SOLID_HUE_KEY:
+            values[BACKGROUND_SOLID_HUE_KEY] = _normalize_hue(row["value"], fallback=210)
+        if row["key"] == BACKGROUND_PHOTO_ORIGINAL_FILENAME_KEY:
+            values[BACKGROUND_PHOTO_ORIGINAL_FILENAME_KEY] = sanitize_background_photo_filename(row["value"])
         if row["key"] == MEDIA_LIBRARY_REFERENCE_PRIVATE_KEY:
             private_value = validate_media_library_reference(value=row["value"])
             values["media_library_reference_private_value"] = private_value
@@ -182,6 +220,10 @@ def update_user_settings(
     background_gradient_end: str | None = None,
     background_gradient_accent: str | None = None,
     background_solid_color: str | None = None,
+    background_custom_model: str | None = None,
+    background_gradient_start_hue: int | None = None,
+    background_gradient_end_hue: int | None = None,
+    background_solid_hue: int | None = None,
     media_library_reference_private_value: str | None = None,
 ) -> dict[str, bool | str | None]:
     if (
@@ -197,6 +239,10 @@ def update_user_settings(
         and background_gradient_end is None
         and background_gradient_accent is None
         and background_solid_color is None
+        and background_custom_model is None
+        and background_gradient_start_hue is None
+        and background_gradient_end_hue is None
+        and background_solid_hue is None
         and media_library_reference_private_value is None
     ):
         return get_user_settings(settings, user_id=user_id)
@@ -223,7 +269,9 @@ def update_user_settings(
         updates.append((POSTER_CARD_APPEARANCE_KEY, normalized_appearance))
     if poster_card_display_max_width is not None:
         normalized_max_width = str(poster_card_display_max_width).strip().lower()
-        if normalized_max_width not in POSTER_CARD_DISPLAY_MAX_WIDTHS:
+        if normalized_max_width in LEGACY_POSTER_CARD_DISPLAY_MAX_WIDTHS:
+            normalized_max_width = "1400"
+        elif normalized_max_width not in POSTER_CARD_DISPLAY_MAX_WIDTHS:
             normalized_max_width = "1400"
         updates.append((POSTER_CARD_DISPLAY_MAX_WIDTH_KEY, normalized_max_width))
     if background_mode is not None:
@@ -257,6 +305,26 @@ def update_user_settings(
         updates.append((
             BACKGROUND_SOLID_COLOR_KEY,
             _normalize_hex_color(background_solid_color, field_name="Solid background color"),
+        ))
+    if background_custom_model is not None:
+        normalized_model = str(background_custom_model).strip().lower()
+        if normalized_model not in {"legacy_v1", "hue_v2"}:
+            raise UserSettingsValidationError("Background custom model is not supported.")
+        updates.append((BACKGROUND_CUSTOM_MODEL_KEY, normalized_model))
+    if background_gradient_start_hue is not None:
+        updates.append((
+            BACKGROUND_GRADIENT_START_HUE_KEY,
+            str(_normalize_hue(background_gradient_start_hue, fallback=210)),
+        ))
+    if background_gradient_end_hue is not None:
+        updates.append((
+            BACKGROUND_GRADIENT_END_HUE_KEY,
+            str(_normalize_hue(background_gradient_end_hue, fallback=330)),
+        ))
+    if background_solid_hue is not None:
+        updates.append((
+            BACKGROUND_SOLID_HUE_KEY,
+            str(_normalize_hue(background_solid_hue, fallback=210)),
         ))
     if media_library_reference_private_value is not None:
         normalized_media_library_reference = validate_media_library_reference(
@@ -311,6 +379,7 @@ def save_user_background_photo(
     user_id: int,
     content: bytes,
     content_type: str | None = None,
+    original_filename: str | None = None,
 ) -> dict[str, bool | str | None]:
     if not content:
         raise UserSettingsValidationError("Choose a JPEG, PNG, or WebP image.")
@@ -355,6 +424,23 @@ def save_user_background_photo(
         progressive=True,
     )
     temporary_path.replace(photo_path)
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO user_settings (user_id, key, value, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                BACKGROUND_PHOTO_ORIGINAL_FILENAME_KEY,
+                sanitize_background_photo_filename(original_filename),
+                utcnow_iso(),
+            ),
+        )
+        connection.commit()
     return update_user_settings(
         settings,
         user_id=user_id,
@@ -366,6 +452,12 @@ def delete_user_background_photo(settings: Settings, *, user_id: int) -> dict[st
     photo_path = get_user_background_photo_path(settings, user_id=user_id)
     if photo_path.exists():
         photo_path.unlink()
+    with get_connection(settings) as connection:
+        connection.execute(
+            "DELETE FROM user_settings WHERE user_id = ? AND key = ?",
+            (user_id, BACKGROUND_PHOTO_ORIGINAL_FILENAME_KEY),
+        )
+        connection.commit()
     return update_user_settings(
         settings,
         user_id=user_id,

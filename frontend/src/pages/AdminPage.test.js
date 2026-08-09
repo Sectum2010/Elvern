@@ -194,12 +194,18 @@ describe("AdminPage exposure mode planner guards", () => {
 
   test("manage button opens the planner modal path", () => {
     const source = readAdminPage();
+    const handlerStart = source.indexOf("async function handleOpenExposurePlanner()");
+    const handlerEnd = source.indexOf("function handleCloseExposurePlanner()", handlerStart);
     const modalStart = source.indexOf("const exposurePlannerModal = exposurePlannerOpen ? (");
     const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
 
     expect(source).toContain("const [exposurePlannerOpen, setExposurePlannerOpen] = useState(false)");
-    expect(source).toContain("async function handleOpenExposurePlanner()");
-    expect(source).toContain("setExposurePlannerOpen(true);");
+    expect(handlerStart).toBeGreaterThan(0);
+    expect(handlerEnd).toBeGreaterThan(handlerStart);
+    const handlerSource = source.slice(handlerStart, handlerEnd);
+    expect(handlerSource).toContain("setExposurePlannerOpen(true);");
+    expect(handlerSource).toContain("await loadExposureStatus();");
+    expect(handlerSource).not.toContain("if (!exposureStatus)");
     expect(source).toContain("onClick={handleOpenExposurePlanner}");
     expect(modalStart).toBeGreaterThan(0);
     expect(modalEnd).toBeGreaterThan(modalStart);
@@ -224,7 +230,7 @@ describe("AdminPage exposure mode planner guards", () => {
     const modalEnd = source.indexOf("const adminConfirmModalConfig", modalStart);
     const modalSource = source.slice(modalStart, modalEnd);
 
-    expect(source).toContain("apiRequest(\"/api/admin/exposure/status\")");
+    expect(source).toContain("/api/admin/exposure/status");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/validate\"");
     expect(source).toContain("apiRequest(\"/api/admin/exposure/drafts\"");
     expect(source).toContain("apiRequest(\"/api/admin/maintenance-mode\"");
@@ -380,5 +386,53 @@ describe("AdminPage exposure mode planner guards", () => {
     expect(modalSource).toContain("<summary>Env Suggestions</summary>");
     expect(modalSource).toContain("<summary>Reverse Proxy Notes</summary>");
     expect(modalSource).toContain("<summary>Activation Notes</summary>");
+  });
+});
+
+describe("AdminPage desktop Control Center contracts", () => {
+  test("keeps approved synthetic display isolated from real admin state", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain("<strong>92</strong>");
+    expect(source).toContain(">PRIVATE</span>");
+    expect(source).toContain("ADMIN_LIVE_AUDIT_TICKER_LINE");
+    expect(source).toContain("statusPayload?.total_users");
+    expect(source).toContain("sessionsPayload.length");
+    expect(source).toContain("statusPayload?.total_media_items");
+    expect(source).toContain("liveInviteCount");
+  });
+
+  test("uses route-owned loading and single polling owners", () => {
+    const source = readAdminPage();
+    const scanEffectStart = source.indexOf("if (!statusPayload?.scan?.running)");
+    const workerEffectStart = source.indexOf("const ownsDesktopPoll");
+    const streamEventsStart = source.indexOf("const ADMIN_STREAM_RELEVANT_EVENTS");
+
+    expect(source).toContain("desktopAdminResourcesForTab(tab)");
+    expect(source).toContain("loadDesktopAdminSection(desktopAdminTab");
+    expect(source.slice(scanEffectStart, workerEffectStart)).toContain("loadSystemStatus({ silent: true })");
+    expect(source.slice(scanEffectStart, workerEffectStart)).not.toContain("loadAdminData({ silent: true })");
+    expect(source).toContain("shouldPollDesktopPlaybackWorkers");
+    expect(source).toContain("document.visibilityState === \"visible\"");
+    expect(source.slice(streamEventsStart, streamEventsStart + 500)).not.toContain("stream_connected");
+  });
+
+  test("uses in-app own-2FA dialogs and locks URL rotation while pending", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain("const [ownTotpModal, setOwnTotpModal]");
+    expect(source).toContain("own-totp-${ownTotpModal.mode}-password");
+    expect(source).toContain("Save these replacement codes now. They are shown only once.");
+    expect(source).not.toContain("window.prompt");
+    expect(source).toContain("function closeUrlPrefixRotateModal()");
+    expect(source).toContain("disabled={urlPrefixRotateModal.pending}");
+  });
+
+  test("password help can open the existing user actions flow", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain("requestEntry.user_id");
+    expect(source).toContain("Open user actions");
+    expect(source).toContain("openUserActionsModal(requestUser)");
   });
 });

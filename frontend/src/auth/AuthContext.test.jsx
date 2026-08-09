@@ -11,6 +11,12 @@ import { buildLibraryQueryKey } from "../lib/libraryQueries";
 import { queryClient } from "../lib/queryClient";
 import { PAGE_RESUME_EVENT } from "../lib/pageResume";
 import { buildUserSettingsQueryKey } from "../lib/userSettingsQueries";
+import {
+  readControlCenterTab,
+  readControlCenterTheme,
+  writeControlCenterTab,
+  writeControlCenterTheme,
+} from "../lib/controlCenterSession";
 import { LoginPage } from "../pages/LoginPage";
 
 
@@ -30,7 +36,7 @@ function jsonResponse(payload, status = 200) {
 }
 
 function ProtectedApiProbe({ protectedPath = "/api/protected" }) {
-  const { user } = useAuth();
+  const { logout, user } = useAuth();
   const [error, setError] = useState("");
 
   async function handleProtectedRequest() {
@@ -47,6 +53,7 @@ function ProtectedApiProbe({ protectedPath = "/api/protected" }) {
       <p>Protected content</p>
       <p>Signed in as {user?.username || "unknown"}</p>
       <button onClick={handleProtectedRequest} type="button">Call protected API</button>
+      <button onClick={logout} type="button">Log out</button>
       {error ? <p role="alert">{error}</p> : null}
     </div>
   );
@@ -75,6 +82,7 @@ function renderAuthRoutes({ initialEntry = "/library", protectedPath = "/api/pro
 describe("AuthProvider maintenance mode handling", () => {
   beforeEach(() => {
     queryClient.clear();
+    window.sessionStorage.clear();
     window.scrollTo = vi.fn();
   });
 
@@ -202,12 +210,43 @@ describe("AuthProvider maintenance mode handling", () => {
     });
     queryClient.setQueryData(userASettingsKey, { poster_card_display_max_width: "800" });
     expect(queryClient.getQueryData(userALibraryKey)).toBeDefined();
+    writeControlCenterTheme("dark");
+    writeControlCenterTab("settings", "cloud-sharing");
+    writeControlCenterTab("admin", "logs");
 
     fireEvent(window, new CustomEvent(PAGE_RESUME_EVENT));
 
     expect(await screen.findByText("Signed in as second-viewer")).toBeInTheDocument();
     expect(queryClient.getQueryData(userALibraryKey)).toBeUndefined();
     expect(queryClient.getQueryData(userASettingsKey)).toBeUndefined();
+    expect(readControlCenterTheme()).toBe("light");
+    expect(readControlCenterTab("settings")).toBe("appearance");
+    expect(readControlCenterTab("admin")).toBe("overview");
+  });
+
+  test("logout clears Control Center session UI state before returning to login", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (requestPath) => {
+      if (requestPath === "/api/auth/me") {
+        return jsonResponse({ user: standardUser });
+      }
+      if (requestPath === "/api/auth/logout") {
+        return jsonResponse({ ok: true });
+      }
+      throw new Error(`Unexpected request: ${requestPath}`);
+    }));
+
+    renderAuthRoutes();
+    expect(await screen.findByText("Signed in as viewer")).toBeInTheDocument();
+    writeControlCenterTheme("mixed");
+    writeControlCenterTab("settings", "library");
+    writeControlCenterTab("admin", "security");
+
+    fireEvent.click(screen.getByRole("button", { name: "Log out" }));
+
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(readControlCenterTheme()).toBe("light");
+    expect(readControlCenterTab("settings")).toBe("appearance");
+    expect(readControlCenterTab("admin")).toBe("overview");
   });
 
   test("a business 403 revalidates the same identity without clearing library cache", async () => {

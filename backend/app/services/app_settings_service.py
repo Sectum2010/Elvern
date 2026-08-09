@@ -35,6 +35,7 @@ from .local_path_security import (
 )
 from .poster_index_service import invalidate_poster_indexes
 from .library_revision_mutation_service import bump_library_revision_layers
+from .at_rest_encryption import decrypt_at_rest, encrypt_at_rest
 
 
 POSTER_REFERENCE_LOCATION_KEY = "poster_reference_location"
@@ -165,7 +166,14 @@ def get_effective_google_oauth_client_secret(
         connection=connection,
     )
     if configured:
-        return configured.strip() or None
+        try:
+            plaintext, _ = decrypt_at_rest(configured, settings)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Stored Google OAuth credentials could not be read.",
+            ) from error
+        return plaintext.strip() or None
     fallback = (settings.google_oauth_client_secret or "").strip()
     return fallback or None
 
@@ -279,7 +287,19 @@ def get_google_drive_setup_payload(
 ) -> dict[str, object]:
     def _build_payload(db: sqlite3.Connection) -> dict[str, object]:
         client_id = get_effective_google_oauth_client_id(settings, connection=db)
+        configured_secret = get_global_app_setting(
+            settings,
+            key=GOOGLE_OAUTH_CLIENT_SECRET_KEY,
+            connection=db,
+        )
         client_secret = get_effective_google_oauth_client_secret(settings, connection=db)
+        client_secret_source = (
+            "database"
+            if configured_secret
+            else "environment"
+            if (settings.google_oauth_client_secret or "").strip()
+            else "unconfigured"
+        )
         https_origin = get_effective_google_drive_https_origin(settings, connection=db)
         account_row = db.execute(
             """
@@ -318,7 +338,8 @@ def get_google_drive_setup_payload(
         return {
             "https_origin": https_origin or "",
             "client_id": client_id or "",
-            "client_secret": client_secret or "",
+            "client_secret_configured": bool(client_secret),
+            "client_secret_source": client_secret_source,
             "javascript_origin": https_origin or "",
             "redirect_uri": google_drive_callback_url(settings),
             "callback_source": callback_source,
@@ -377,9 +398,7 @@ def update_google_drive_setup(
                 """,
                 (GOOGLE_OAUTH_CLIENT_ID_KEY, normalized_client_id, utcnow_iso()),
             )
-        if normalized_client_secret is None:
-            connection.execute("DELETE FROM app_settings WHERE key = ?", (GOOGLE_OAUTH_CLIENT_SECRET_KEY,))
-        else:
+        if normalized_client_secret is not None:
             connection.execute(
                 """
                 INSERT INTO app_settings (key, value, updated_at)
@@ -388,8 +407,62 @@ def update_google_drive_setup(
                     value = excluded.value,
                     updated_at = excluded.updated_at
                 """,
-                (GOOGLE_OAUTH_CLIENT_SECRET_KEY, normalized_client_secret, utcnow_iso()),
+                (
+                    GOOGLE_OAUTH_CLIENT_SECRET_KEY,
+                    encrypt_at_rest(normalized_client_secret, settings),
+                    utcnow_iso(),
+                ),
             )
+        connection.commit()
+        return get_google_drive_setup_payload(settings, user_id=user_id, connection=connection)
+
+
+def clear_google_drive_setup_overrides(
+    settings: Settings,
+    *,
+    user_id: int,
+) -> dict[str, object]:
+    with get_connection(settings) as connection:
+        connection.execute(
+            "DELETE FROM app_settings WHERE key IN (?, ?, ?)",
+            (
+                GOOGLE_DRIVE_HTTPS_ORIGIN_KEY,
+                GOOGLE_OAUTH_CLIENT_ID_KEY,
+                GOOGLE_OAUTH_CLIENT_SECRET_KEY,
+            ),
+        )
+        connection.commit()
+        return get_google_drive_setup_payload(settings, user_id=user_id, connection=connection)
+
+
+def disconnect_google_drive_account(
+    settings: Settings,
+    *,
+    user_id: int,
+) -> dict[str, object]:
+    with get_connection(settings) as connection:
+        account_row = connection.execute(
+            "SELECT id FROM google_drive_accounts WHERE user_id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if account_row is not None:
+            connection.execute(
+                """
+                UPDATE library_sources
+                SET last_error = ?, updated_at = ?
+                WHERE google_drive_account_id = ?
+                """,
+                (
+                    "Google Drive account disconnected. Reconnect to refresh this source.",
+                    utcnow_iso(),
+                    int(account_row["id"]),
+                ),
+            )
+            connection.execute(
+                "DELETE FROM google_drive_accounts WHERE id = ?",
+                (int(account_row["id"]),),
+            )
+        connection.execute("DELETE FROM google_oauth_states WHERE user_id = ?", (user_id,))
         connection.commit()
         return get_google_drive_setup_payload(settings, user_id=user_id, connection=connection)
 

@@ -96,6 +96,8 @@ from ..services.account_access_service import (
     update_download_access_for_user,
 )
 from ..services.app_settings_service import (
+    clear_google_drive_setup_overrides,
+    disconnect_google_drive_account,
     get_google_drive_setup_payload,
     get_media_library_reference_payload,
     get_poster_reference_location_payload,
@@ -1451,6 +1453,58 @@ def admin_update_google_drive_setup(
             "https_origin": updated["https_origin"],
             "redirect_uri": updated["redirect_uri"],
         },
+    )
+    return GoogleDriveSetupResponse(**updated)
+
+
+@router.delete("/google-drive-setup", response_model=GoogleDriveSetupResponse)
+def admin_clear_google_drive_setup_overrides(
+    request: Request,
+    user=CurrentAdmin,
+) -> GoogleDriveSetupResponse:
+    updated = clear_google_drive_setup_overrides(
+        request.app.state.settings,
+        user_id=user.id,
+    )
+    log_audit_event(
+        request.app.state.settings,
+        action="admin.settings.google_drive_setup.clear_overrides",
+        outcome="success",
+        user_id=user.id,
+        username=user.username,
+        role=user.role,
+        session_id=user.session_id,
+        target_type="app_setting",
+        target_id="google_drive_setup",
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        details={"configuration_state": updated["configuration_state"]},
+    )
+    return GoogleDriveSetupResponse(**updated)
+
+
+@router.delete("/google-drive-account", response_model=GoogleDriveSetupResponse)
+def admin_disconnect_google_drive_account(
+    request: Request,
+    user=CurrentAdmin,
+) -> GoogleDriveSetupResponse:
+    updated = disconnect_google_drive_account(
+        request.app.state.settings,
+        user_id=user.id,
+    )
+    log_audit_event(
+        request.app.state.settings,
+        action="admin.google_drive.disconnect",
+        outcome="success",
+        user_id=user.id,
+        username=user.username,
+        role=user.role,
+        session_id=user.session_id,
+        target_type="google_drive_account",
+        target_id=str(user.id),
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        details={"connected": False},
     )
     return GoogleDriveSetupResponse(**updated)
 

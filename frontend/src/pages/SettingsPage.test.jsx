@@ -85,6 +85,10 @@ const defaultSettings = {
   background_gradient_end: "#1b41b5",
   background_gradient_accent: "#5c1867",
   background_solid_color: "#151a21",
+  background_custom_model: "legacy_v1",
+  background_gradient_start_hue: 210,
+  background_gradient_end_hue: 330,
+  background_solid_hue: 210,
   background_photo_url: null,
   media_library_reference_private_value: null,
   media_library_reference_shared_default_value: "",
@@ -405,6 +409,19 @@ async function renderDisplaySettings(initialSettings = defaultSettings) {
   await screen.findByRole("heading", { name: "Background" });
   await waitFor(() => {
     expect(screen.queryByText("Loading display preferences...")).not.toBeInTheDocument();
+  });
+}
+
+async function renderDesktopAppearanceSettings(initialSettings = defaultSettings) {
+  mockApi(initialSettings);
+  render(
+    <MemoryRouter initialEntries={["/settings/appearance"]}>
+      <SettingsPage />
+    </MemoryRouter>,
+  );
+  await screen.findByRole("heading", { name: "Background" });
+  await waitFor(() => {
+    expect(screen.queryByText("Loading background preferences...")).not.toBeInTheDocument();
   });
 }
 
@@ -1092,7 +1109,7 @@ describe("SettingsPage section navigation and consolidation", () => {
     expect(screen.queryByText("Loading hidden movies...")).not.toBeInTheDocument();
   });
 
-  test("identity switch clears an old admin secret before the next admin resource settles", async () => {
+  test("OAuth setup never hydrates a returned secret and clears identity-owned fields immediately", async () => {
     mockAuthState.role = "admin";
     mockApi();
     const originalImplementation = apiRequest.getMockImplementation();
@@ -1134,18 +1151,24 @@ describe("SettingsPage section navigation and consolidation", () => {
     );
     const view = testingLibraryRender(renderTree());
     fireEvent.click(await screen.findByText("Google Drive OAuth Setup"));
-    expect(await screen.findByDisplayValue("admin-a-secret")).toBeInTheDocument();
+    const clientIdInput = await screen.findByLabelText(/Google OAuth Client ID/);
+    const secretInput = screen.getByLabelText(/Google OAuth Client Secret/);
+    expect(clientIdInput).toHaveAttribute("type", "text");
+    expect(clientIdInput).toHaveValue("admin-a-client");
+    expect(secretInput).toHaveAttribute("type", "password");
+    expect(secretInput).toHaveValue("");
+    expect(screen.queryByDisplayValue("admin-a-secret")).not.toBeInTheDocument();
 
     mockAuthState.id = 8;
     view.rerender(renderTree());
-    expect(screen.queryByDisplayValue("admin-a-secret")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("admin-a-client")).not.toBeInTheDocument();
     fireEvent.click(await screen.findByText("Google Drive OAuth Setup"));
-    const secretInput = screen.getByLabelText(/Google OAuth Client Secret/);
-    expect(secretInput).toHaveValue("");
+    const nextSecretInput = screen.getByLabelText(/Google OAuth Client Secret/);
+    expect(nextSecretInput).toHaveValue("");
 
     rejectSecondSetup(new Error("Admin B setup unavailable"));
     expect(await screen.findByText("Admin B setup unavailable")).toBeInTheDocument();
-    expect(secretInput).toHaveValue("");
+    expect(nextSecretInput).toHaveValue("");
   });
 
   test("user-settings recovery clears only its load error and preserves a mutation error", async () => {
@@ -1879,6 +1902,20 @@ describe("SettingsPage Preferences controls", () => {
     expect(within(panel).queryByText("Your account")).not.toBeInTheDocument();
   });
 
+  test("desktop Library route keeps the existing library preference controls", async () => {
+    mockApi();
+    render(
+      <MemoryRouter initialEntries={["/settings/library"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("checkbox", { name: /Hide Recently added/ }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /Hide duplicate copies/ }))
+      .toBeInTheDocument();
+  });
+
   test("phone hides the desktop-only dynamic search setting", async () => {
     mockPlatformState.deviceClass = "phone";
     await renderDisplaySettings();
@@ -2071,7 +2108,9 @@ describe("SettingsPage Preferences controls", () => {
     });
     const pickerCall = apiRequest.mock.calls.find(([requestPath]) => requestPath === "/api/admin/local-directory-picker");
     expect(pickerCall?.[1]?.data).not.toHaveProperty("title");
-    expect(await screen.findByLabelText("Reference locations")).toHaveValue("/srv/media/selected-library");
+    expect(await screen.findByLabelText("Reference locations")).toHaveValue(
+      "/srv/media\n/srv/media/selected-library",
+    );
   });
 
   test("poster reference folder button sends native picker poster purpose", async () => {
@@ -2221,6 +2260,48 @@ describe("SettingsPage Preferences controls", () => {
     expect(screen.getByRole("slider", { name: "Solid background color picker" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Solid background color")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save solid" })).toBeInTheDocument();
+  });
+
+  test("desktop hue controls keep changes as draft until Save and Reset stays local", async () => {
+    await renderDesktopAppearanceSettings();
+    fireEvent.click(screen.getByRole("radio", { name: "Gradient" }));
+
+    const startHue = screen.getByRole("slider", { name: /Start hue/i });
+    const endHue = screen.getByRole("slider", { name: /End hue/i });
+    fireEvent.change(startHue, { target: { value: "125" } });
+    fireEvent.change(endHue, { target: { value: "245" } });
+
+    expect(apiRequest).not.toHaveBeenCalledWith(
+      "/api/user-settings",
+      expect.objectContaining({ method: "PATCH" }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    expect(startHue).toHaveValue("210");
+    expect(endHue).toHaveValue("330");
+    expect(apiRequest).not.toHaveBeenCalledWith(
+      "/api/user-settings",
+      expect.objectContaining({ method: "PATCH" }),
+    );
+
+    fireEvent.change(startHue, { target: { value: "125" } });
+    fireEvent.change(endHue, { target: { value: "245" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save gradient" }));
+
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith("/api/user-settings", {
+        method: "PATCH",
+        data: {
+          background_mode: "gradient",
+          background_custom_model: "hue_v2",
+          background_gradient_start_hue: 125,
+          background_gradient_end_hue: 245,
+          background_gradient_start: expect.stringMatching(/^#[0-9a-f]{6}$/i),
+          background_gradient_end: expect.stringMatching(/^#[0-9a-f]{6}$/i),
+          background_gradient_accent: expect.stringMatching(/^#[0-9a-f]{6}$/i),
+        },
+      });
+    });
   });
 
   test("background photo tab opens before upload and reset uses an in-app confirmation", async () => {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from collections import Counter
+from dataclasses import replace
 from io import BytesIO
 import json
 import os
@@ -2375,7 +2376,9 @@ def test_admin_google_drive_setup_save_smoke(client, admin_credentials) -> None:
     assert update_response.status_code == 200
     assert update_response.json()["https_origin"] == "https://example.com"
     assert update_response.json()["client_id"] == "example.apps.googleusercontent.com"
-    assert update_response.json()["client_secret"] == "secret123"
+    assert "client_secret" not in update_response.json()
+    assert update_response.json()["client_secret_configured"] is True
+    assert update_response.json()["client_secret_source"] == "database"
     assert update_response.json()["configuration_state"] == "ready"
     assert update_response.json()["missing_fields"] == []
 
@@ -2384,6 +2387,203 @@ def test_admin_google_drive_setup_save_smoke(client, admin_credentials) -> None:
     assert cloud_response.json()["google"]["enabled"] is True
     assert cloud_response.json()["google"]["connection_status"] == "not_connected"
     assert cloud_response.json()["google"]["reconnect_required"] is False
+
+
+def test_admin_google_drive_setup_encrypts_secret_and_blank_preserves_it(
+    client,
+    admin_credentials,
+    initialized_settings,
+    caplog,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+    secret = "control-center-oauth-secret"
+    saved = client.put(
+        "/api/admin/google-drive-setup",
+        json={
+            "https_origin": "https://example.com",
+            "client_id": "example.apps.googleusercontent.com",
+            "client_secret": secret,
+        },
+    )
+    assert saved.status_code == 200
+    assert "client_secret" not in saved.json()
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute(
+            "SELECT value FROM app_settings WHERE key = 'google_oauth_client_secret'"
+        ).fetchone()
+    assert row is not None
+    assert str(row["value"]).startswith("fernet1$")
+    assert secret not in str(row["value"])
+    assert secret not in saved.text
+    assert secret not in caplog.text
+    with get_connection(initialized_settings) as connection:
+        audit_row = connection.execute(
+            """
+            SELECT details_json
+            FROM audit_logs
+            WHERE action = 'admin.settings.google_drive_setup'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert audit_row is not None
+    assert secret not in str(audit_row["details_json"])
+
+    preserved = client.put(
+        "/api/admin/google-drive-setup",
+        json={
+            "https_origin": "https://example.com",
+            "client_id": "example.apps.googleusercontent.com",
+            "client_secret": "",
+        },
+    )
+    assert preserved.status_code == 200
+    assert preserved.json()["client_secret_configured"] is True
+    assert preserved.json()["client_secret_source"] == "database"
+    assert "client_secret" not in client.get("/api/admin/google-drive-setup").json()
+
+
+def test_admin_google_drive_setup_reports_environment_secret_without_exposing_it(
+    initialized_settings,
+) -> None:
+    from backend.app.services.app_settings_service import get_google_drive_setup_payload
+
+    environment_secret = "environment-only-oauth-secret"
+    environment_settings = replace(
+        initialized_settings,
+        public_app_origin="https://example.com",
+        google_oauth_client_id="environment.apps.googleusercontent.com",
+        google_oauth_client_secret=environment_secret,
+    )
+    with get_connection(initialized_settings) as connection:
+        user_id = int(
+            connection.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()["id"]
+        )
+
+    payload = get_google_drive_setup_payload(environment_settings, user_id=user_id)
+
+    assert payload["configuration_state"] == "ready"
+    assert payload["client_secret_configured"] is True
+    assert payload["client_secret_source"] == "environment"
+    assert "client_secret" not in payload
+    assert environment_secret not in json.dumps(payload)
+
+
+def test_google_oauth_plaintext_secret_migration_is_idempotent(initialized_settings) -> None:
+    from backend.app.db import GOOGLE_OAUTH_SECRET_ENCRYPTION_MIGRATION
+
+    plaintext = "legacy-plaintext-oauth-secret"
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES ('google_oauth_client_secret', ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (plaintext, utcnow_iso()),
+        )
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            (GOOGLE_OAUTH_SECRET_ENCRYPTION_MIGRATION,),
+        )
+        connection.commit()
+
+    init_db(initialized_settings)
+    init_db(initialized_settings)
+    with get_connection(initialized_settings) as connection:
+        stored = connection.execute(
+            "SELECT value FROM app_settings WHERE key = 'google_oauth_client_secret'"
+        ).fetchone()["value"]
+        migration_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM schema_migrations WHERE name = ?",
+            (GOOGLE_OAUTH_SECRET_ENCRYPTION_MIGRATION,),
+        ).fetchone()["count"]
+    assert str(stored).startswith("fernet1$")
+    assert plaintext not in str(stored)
+    assert migration_count == 1
+
+
+def test_admin_google_drive_setup_clear_and_account_disconnect_are_independent(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+    client.put(
+        "/api/admin/google-drive-setup",
+        json={
+            "https_origin": "https://example.com",
+            "client_id": "example.apps.googleusercontent.com",
+            "client_secret": "separate-actions-secret",
+        },
+    )
+    now = utcnow_iso()
+    with get_connection(initialized_settings) as connection:
+        user_id = int(connection.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()["id"])
+        account_id = int(connection.execute(
+            """
+            INSERT INTO google_drive_accounts (
+                user_id, google_account_id, email, display_name,
+                refresh_token, access_token, access_token_expires_at,
+                created_at, updated_at
+            ) VALUES (?, 'google-admin', 'admin@example.com', 'Admin', ?, ?, ?, ?, ?)
+            """,
+            (user_id, "fernet1$placeholder", None, None, now, now),
+        ).lastrowid)
+        source_id = int(connection.execute(
+            """
+            INSERT INTO library_sources (
+                owner_user_id, provider, google_drive_account_id, resource_type,
+                resource_id, display_name, is_shared, created_at, updated_at
+            ) VALUES (?, 'google_drive', ?, 'folder', 'folder-control-center',
+                      'Control Center', 0, ?, ?)
+            """,
+            (user_id, account_id, now, now),
+        ).lastrowid)
+        connection.commit()
+
+    cleared = client.delete("/api/admin/google-drive-setup")
+    assert cleared.status_code == 200
+    assert cleared.json()["connected"] is True
+    with get_connection(initialized_settings) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS count FROM google_drive_accounts WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()["count"] == 1
+
+    restored_setup = client.put(
+        "/api/admin/google-drive-setup",
+        json={
+            "https_origin": "https://example.com",
+            "client_id": "example.apps.googleusercontent.com",
+            "client_secret": "disconnect-keeps-setup-secret",
+        },
+    )
+    assert restored_setup.status_code == 200
+    assert restored_setup.json()["configuration_state"] == "ready"
+
+    disconnected = client.delete("/api/admin/google-drive-account")
+    assert disconnected.status_code == 200
+    assert disconnected.json()["connected"] is False
+    assert disconnected.json()["configuration_state"] == "ready"
+    assert disconnected.json()["client_id"] == "example.apps.googleusercontent.com"
+    assert disconnected.json()["client_secret_configured"] is True
+    assert disconnected.json()["client_secret_source"] == "database"
+    with get_connection(initialized_settings) as connection:
+        source = connection.execute(
+            "SELECT google_drive_account_id, last_error FROM library_sources WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+    assert source["google_drive_account_id"] is None
+    assert "disconnected" in str(source["last_error"]).lower()
 
 
 def test_cloud_libraries_distinguish_oauth_ready_from_reconnect_required_source_health(
@@ -2587,6 +2787,7 @@ def test_admin_google_drive_setup_validation_surfaces_specific_error(client, adm
         },
     )
     assert invalid_response.status_code == 400
+    assert "bad secret" not in invalid_response.text
     assert invalid_response.json() == {
         "detail": "Google OAuth Client Secret must not contain spaces.",
     }
@@ -2988,6 +3189,64 @@ def test_user_settings_background_defaults_persist_and_reject_unsafe_css(client,
     assert "hex color" in rejected.json()["detail"]
 
 
+def test_user_settings_background_hue_v2_persists_without_converting_legacy_reads(
+    client,
+    admin_credentials,
+    initialized_settings,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+
+    initial = client.get("/api/user-settings")
+    assert initial.status_code == 200
+    assert initial.json()["background_custom_model"] == "legacy_v1"
+    assert initial.json()["background_gradient_start_hue"] == 210
+    assert initial.json()["background_gradient_end_hue"] == 330
+    with get_connection(initialized_settings) as connection:
+        stored_before_save = connection.execute(
+            "SELECT COUNT(*) AS count FROM user_settings WHERE key LIKE 'background_%_hue'"
+        ).fetchone()["count"]
+    assert stored_before_save == 0
+
+    hue_update = client.patch(
+        "/api/user-settings",
+        json={
+            "background_mode": "gradient",
+            "background_custom_model": "hue_v2",
+            "background_gradient_start_hue": 125,
+            "background_gradient_end_hue": 245,
+            "background_gradient_start": "#123456",
+            "background_gradient_end": "#234567",
+            "background_gradient_accent": "#345678",
+        },
+    )
+    assert hue_update.status_code == 200
+    assert hue_update.json()["background_custom_model"] == "hue_v2"
+    assert hue_update.json()["background_gradient_start_hue"] == 125
+    assert hue_update.json()["background_gradient_end_hue"] == 245
+
+    persisted = client.get("/api/user-settings")
+    assert persisted.status_code == 200
+    assert persisted.json()["background_custom_model"] == "hue_v2"
+    assert persisted.json()["background_gradient_start_hue"] == 125
+    assert persisted.json()["background_gradient_end_hue"] == 245
+
+    legacy_update = client.patch(
+        "/api/user-settings",
+        json={
+            "background_mode": "solid",
+            "background_custom_model": "legacy_v1",
+            "background_solid_color": "#445566",
+        },
+    )
+    assert legacy_update.status_code == 200
+    assert legacy_update.json()["background_custom_model"] == "legacy_v1"
+    assert legacy_update.json()["background_solid_color"] == "#445566"
+
+
 def test_user_settings_background_stays_per_user(client, admin_credentials) -> None:
     alice_password = "alice-background-password"
     bob_password = "bob-background-password"
@@ -3042,12 +3301,13 @@ def test_user_settings_background_photo_upload_sanitizes_and_can_be_removed(clie
     large_png = _background_image_bytes(size=(3000, 1200))
     response = client.post(
         "/api/user-settings/background-photo",
-        files={"file": ("background.png", large_png, "image/png")},
+        files={"file": ("../Vacation\x01 Poster.png", large_png, "image/png")},
     )
     assert response.status_code == 200
     payload = response.json()
     assert payload["background_mode"] == "photo"
     assert payload["background_photo_url"].startswith("/api/user-settings/background-photo?v=")
+    assert payload["background_photo_original_filename"] == "Vacation Poster.png"
 
     photo_response = client.get("/api/user-settings/background-photo")
     assert photo_response.status_code == 200
@@ -3061,7 +3321,68 @@ def test_user_settings_background_photo_upload_sanitizes_and_can_be_removed(clie
     assert remove_response.json()["background_mode"] == "preset"
     assert remove_response.json()["background_preset"] == "neon"
     assert remove_response.json()["background_photo_url"] is None
+    assert remove_response.json()["background_photo_original_filename"] is None
     assert client.get("/api/user-settings/background-photo").status_code == 404
+
+
+def test_user_settings_poster_width_contract_normalizes_legacy_values(
+    client,
+    admin_credentials,
+) -> None:
+    _login(
+        client,
+        username=admin_credentials["username"],
+        password=admin_credentials["password"],
+    )
+    for legacy_value in ["1200", "1600", "1800", "2000", "2200"]:
+        response = client.patch(
+            "/api/user-settings",
+            json={"poster_card_display_max_width": legacy_value},
+        )
+        assert response.status_code == 200
+        assert response.json()["poster_card_display_max_width"] == "1400"
+    for supported_value in ["800", "1000", "1400", "original"]:
+        response = client.patch(
+            "/api/user-settings",
+            json={"poster_card_display_max_width": supported_value},
+        )
+        assert response.status_code == 200
+        assert response.json()["poster_card_display_max_width"] == supported_value
+
+
+def test_poster_width_migration_resets_existing_users_once(initialized_settings) -> None:
+    from backend.app.db import POSTER_WIDTH_CONTROL_CENTER_MIGRATION
+
+    now = utcnow_iso()
+    with get_connection(initialized_settings) as connection:
+        user_id = int(connection.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()["id"])
+        connection.execute(
+            """
+            INSERT INTO user_settings (user_id, key, value, updated_at)
+            VALUES (?, 'poster_card_display_max_width', '800', ?)
+            ON CONFLICT(user_id, key) DO UPDATE SET value = '800', updated_at = excluded.updated_at
+            """,
+            (user_id, now),
+        )
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            (POSTER_WIDTH_CONTROL_CENTER_MIGRATION,),
+        )
+        connection.commit()
+
+    init_db(initialized_settings)
+    init_db(initialized_settings)
+    with get_connection(initialized_settings) as connection:
+        setting = connection.execute(
+            "SELECT value FROM user_settings WHERE user_id = ? AND key = 'poster_card_display_max_width'",
+            (user_id,),
+        ).fetchone()
+        migration_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM schema_migrations WHERE name = ?",
+            (POSTER_WIDTH_CONTROL_CENTER_MIGRATION,),
+        ).fetchone()["count"]
+    assert setting["value"] == "1400"
+    assert migration_count == 1
 
 
 def test_user_settings_background_photo_rejects_svg_and_oversized_uploads(client, admin_credentials) -> None:

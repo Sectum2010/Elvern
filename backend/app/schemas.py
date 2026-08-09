@@ -420,12 +420,7 @@ class UserSettingsResponse(BaseModel):
     poster_card_display_max_width: Literal[
         "800",
         "1000",
-        "1200",
         "1400",
-        "1600",
-        "1800",
-        "2000",
-        "2200",
         "original",
     ] = "1400"
     background_mode: Literal["preset", "gradient", "solid", "photo"] = "preset"
@@ -434,7 +429,12 @@ class UserSettingsResponse(BaseModel):
     background_gradient_end: str = "#1b41b5"
     background_gradient_accent: str = "#5c1867"
     background_solid_color: str = "#151a21"
+    background_custom_model: Literal["legacy_v1", "hue_v2"] = "legacy_v1"
+    background_gradient_start_hue: int = 210
+    background_gradient_end_hue: int = 330
+    background_solid_hue: int = 210
     background_photo_url: str | None = None
+    background_photo_original_filename: str | None = None
     media_library_reference_private_value: str | None = None
     media_library_reference_shared_default_value: str = ""
     media_library_reference_effective_value: str = ""
@@ -455,6 +455,10 @@ class UserSettingsUpdateRequest(BaseModel):
     background_gradient_end: str | None = None
     background_gradient_accent: str | None = None
     background_solid_color: str | None = None
+    background_custom_model: str | None = None
+    background_gradient_start_hue: int | None = None
+    background_gradient_end_hue: int | None = None
+    background_solid_hue: int | None = None
     media_library_reference_private_value: str | None = None
 
 
@@ -671,7 +675,8 @@ class GoogleDriveSetupUpdateRequest(BaseModel):
 class GoogleDriveSetupResponse(BaseModel):
     https_origin: str = ""
     client_id: str = ""
-    client_secret: str = ""
+    client_secret_configured: bool = False
+    client_secret_source: Literal["database", "environment", "unconfigured"] = "unconfigured"
     javascript_origin: str = ""
     redirect_uri: str = ""
     callback_source: Literal["google_drive_https_origin", "public_app_origin", "unconfigured"]

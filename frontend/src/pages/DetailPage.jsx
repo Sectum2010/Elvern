@@ -3146,7 +3146,7 @@ export function DetailPage() {
             >
               {globalHiddenActionPending ? "Restoring..." : "Show for everyone"}
             </button>
-            <Link className="ghost-button ghost-button--inline" to="/settings?section=libraries">
+            <Link className="ghost-button ghost-button--inline" to="/settings/hidden-titles">
               Open Hidden for everyone in Settings
             </Link>
             {renderBackToLibraryButton()}
@@ -3191,7 +3191,7 @@ export function DetailPage() {
             >
               {hiddenActionPending ? "Restoring..." : "Show again"}
             </button>
-            <Link className="ghost-button ghost-button--inline" to="/settings?section=libraries">
+            <Link className="ghost-button ghost-button--inline" to="/settings/hidden-titles">
               Open Hidden for me in Settings
             </Link>
             {renderBackToLibraryButton()}
@@ -4200,7 +4200,7 @@ export function DetailPage() {
                     <button className="ghost-button" onClick={startAgeRequirementEdit} type="button">
                       Edit age requirement
                     </button>
-                    <Link className="ghost-button ghost-button--inline" to="/settings?section=libraries">
+                    <Link className="ghost-button ghost-button--inline" to="/settings/library">
                       Open Age Groups in Settings
                     </Link>
                   </div>

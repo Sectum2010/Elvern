@@ -7,6 +7,12 @@ import { DesktopBackToLibraryButton } from "../components/DesktopBackToLibraryBu
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import {
+  ADMIN_LIVE_AUDIT_TICKER_LINE,
+  desktopAdminResourcesForTab,
+  shouldPollDesktopPlaybackWorkers,
+  shouldRefreshDesktopRealtimeResource,
+} from "../lib/adminControlCenter.js";
+import {
   buildPlaybackWorkerSummaryBubbles,
   buildPlaybackStatusDismissKey,
   buildPlaybackStatusDismissPrompt,
@@ -30,11 +36,20 @@ import {
   readPersistedPanelState,
   writePersistedPanelState,
 } from "../lib/persistedPanelState";
+import {
+  classifyControlCenterPath,
+  desktopAdminTabToLegacySection,
+  isDesktopControlCenterDevice,
+} from "../lib/controlCenterRoutes.js";
+import {
+  detectClientDeviceClass,
+  detectClientPlatform,
+} from "../lib/platformDetection.js";
+import { fetchControlCenterResource } from "../lib/controlCenterQueries.js";
 
 
 const SELF_DELETE_CONFIRM_DETAIL = "Confirm deletion before removing your own account";
 const ADMIN_STREAM_RELEVANT_EVENTS = [
-  "stream_connected",
   "session_created",
   "session_ended",
   "session_revoked",
@@ -645,6 +660,8 @@ export function AdminPage() {
   const [sessionActionPending, setSessionActionPending] = useState(null);
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [showAllAudit, setShowAllAudit] = useState(false);
+  const [showAllUsers, setShowAllUsers] = useState(false);
+  const [showAllCreateUserAges, setShowAllCreateUserAges] = useState(false);
   const [userFeedback, setUserFeedback] = useState({});
   const [userActionsModalUserId, setUserActionsModalUserId] = useState(null);
   const [createUserExpanded, setCreateUserExpanded] = useState(false);
@@ -697,6 +714,15 @@ export function AdminPage() {
   const [exposureFinalizeFeedback, setExposureFinalizeFeedback] = useState(null);
   const [exposurePlannerOpen, setExposurePlannerOpen] = useState(false);
   const [totpStatus, setTotpStatus] = useState(null);
+  const [ownTotpModal, setOwnTotpModal] = useState({
+    mode: null,
+    password: "",
+    code: "",
+    pending: false,
+    error: "",
+    recoveryCodes: [],
+    copyFeedback: "",
+  });
   const [totpPromptPendingUserId, setTotpPromptPendingUserId] = useState(null);
   const [totpDisableUserModal, setTotpDisableUserModal] = useState({
     userId: null,
@@ -762,11 +788,30 @@ export function AdminPage() {
   const adminStreamReconnectDelayRef = useRef(3000);
   const realtimeRefreshInFlightRef = useRef(false);
   const realtimeRefreshQueuedRef = useRef(false);
+  const desktopRequestGenerationRef = useRef(0);
+  const desktopRequestControllerRef = useRef(null);
+  const activeDesktopAdminTabRef = useRef("");
   const sectionCollapseTimerRef = useRef(0);
+  const ownTotpDialogRef = useRef(null);
+  const ownTotpReturnFocusRef = useRef(null);
+  const ownTotpPendingRef = useRef(false);
+  ownTotpPendingRef.current = ownTotpModal.pending;
+  const initialControlCenterPath = classifyControlCenterPath(location.pathname);
+  const desktopControlCenter = isDesktopControlCenterDevice(
+    detectClientDeviceClass(),
+    detectClientPlatform(),
+  ) && initialControlCenterPath.area === "admin" && Boolean(initialControlCenterPath.tab);
+  const desktopAdminTab = desktopControlCenter ? initialControlCenterPath.tab : "";
+  activeDesktopAdminTabRef.current = desktopAdminTab;
   const [activeSection, setActiveSection] = useState(() => (
-    readPersistedPanelState(ADMIN_ACTIVE_SECTION_STORAGE_KEY, ADMIN_SECTION_KEYS, "panel")
+    initialControlCenterPath.area === "admin" && initialControlCenterPath.tab
+      ? desktopAdminTabToLegacySection(initialControlCenterPath.tab)
+      : readPersistedPanelState(ADMIN_ACTIVE_SECTION_STORAGE_KEY, ADMIN_SECTION_KEYS, "panel")
   ));
   const [expandedSection, setExpandedSection] = useState(null);
+  const [documentVisible, setDocumentVisible] = useState(() => (
+    typeof document === "undefined" || document.visibilityState === "visible"
+  ));
 
   useEffect(() => {
     try {
@@ -783,6 +828,13 @@ export function AdminPage() {
   }, []);
 
   useEffect(() => {
+    const controlCenterPath = classifyControlCenterPath(location.pathname);
+    if (controlCenterPath.area === "admin" && controlCenterPath.tab) {
+      const nestedSection = desktopAdminTabToLegacySection(controlCenterPath.tab);
+      setActiveSection(nestedSection);
+      setExpandedSection(nestedSection);
+      return;
+    }
     const params = new URLSearchParams(location.search);
     const requestedSection = params.get("section");
     if (!requestedSection) {
@@ -842,6 +894,117 @@ export function AdminPage() {
     }
   }
 
+  function applySystemStatus(status) {
+    if (scanRunningRef.current && !status.scan.running) {
+      const completionText = cloudSyncWarningRef.current
+        ? formatCompletedRescanWarning(cloudSyncWarningRef.current)
+        : (status.last_scan?.message || "Library scan completed.");
+      setBanner({
+        tone: cloudSyncWarningRef.current ? "error" : "success",
+        text: completionText,
+      });
+    }
+    scanRunningRef.current = Boolean(status.scan.running);
+    setStatusPayload(status);
+  }
+
+  async function loadSystemStatus({ silent = false, signal } = {}) {
+    try {
+      const status = desktopControlCenter
+        ? await desktopAdminResourceRequest("system", { force: true })
+        : await apiRequest("/api/system/status", { signal });
+      applySystemStatus(status);
+      return true;
+    } catch (requestError) {
+      if (requestError.name === "AbortError") {
+        return false;
+      }
+      if (!silent) {
+        setBanner({ tone: "error", text: requestError.message || "Failed to load system status" });
+      }
+      return false;
+    }
+  }
+
+  function applyDesktopAdminResource(resource, payload) {
+    if (resource === "system") {
+      applySystemStatus(payload);
+    } else if (resource === "users") {
+      setUsersPayload(payload.users || []);
+    } else if (resource === "sessions") {
+      setSessionsPayload(payload.sessions || []);
+    } else if (resource === "audit") {
+      setAuditPayload(payload.events || []);
+    } else if (resource === "urlPrefix") {
+      setUrlPrefixStatus(payload);
+    } else if (resource === "ownTotp") {
+      setTotpStatus(payload);
+    } else if (resource === "invites") {
+      setInviteCodes(payload.invite_codes || []);
+    } else if (resource === "passwordHelp") {
+      setPasswordHelpRequests(payload.requests || []);
+    } else if (resource === "exposure") {
+      setExposureStatus(payload);
+      setExposurePlan(payload);
+      setExposureVerificationResult(payload.prepared_switch?.verification || null);
+    } else if (resource === "backups") {
+      const checkpoints = Array.isArray(payload.checkpoints) ? payload.checkpoints : [];
+      setBackupsDirectory(typeof payload.backups_dir === "string" ? payload.backups_dir : "");
+      setBackupsPayload(checkpoints);
+      setRecoveryLoaded(true);
+      setSelectedCheckpointId((current) => (
+        current && checkpoints.some((entry) => entry.checkpoint_id === current)
+          ? current
+          : checkpoints[0]?.checkpoint_id || ""
+      ));
+    }
+  }
+
+  function desktopAdminResourceRequest(resource, { force = false } = {}) {
+    return fetchControlCenterResource({
+      userId: user?.id,
+      role: user?.role,
+      resource,
+      force,
+    });
+  }
+
+  async function loadDesktopAdminSection(tab, { signal, force = false } = {}) {
+    const generation = desktopRequestGenerationRef.current + 1;
+    desktopRequestGenerationRef.current = generation;
+    setLoading(true);
+    const resources = desktopAdminResourcesForTab(tab);
+    const results = await Promise.allSettled(
+      resources.map((resource) => desktopAdminResourceRequest(resource, { force })),
+    );
+    if (signal?.aborted || generation !== desktopRequestGenerationRef.current) {
+      return;
+    }
+    const failures = [];
+    results.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        applyDesktopAdminResource(resources[index], result.value);
+        return;
+      }
+      if (result.reason?.name !== "AbortError") {
+        failures.push(result.reason?.message || `Failed to load ${resources[index]}`);
+      }
+    });
+    if (failures.length > 0) {
+      setBanner({ tone: "error", text: failures[0] });
+    }
+    setLoading(false);
+  }
+
+  async function refreshAdminUsersResource() {
+    if (!desktopControlCenter) {
+      await loadAdminData({ silent: true });
+      return;
+    }
+    const payload = await desktopAdminResourceRequest("users", { force: true });
+    applyDesktopAdminResource("users", payload);
+  }
+
   async function loadAdminData({ silent = false } = {}) {
     if (!silent) {
       setLoading(true);
@@ -855,25 +1018,12 @@ export function AdminPage() {
         apiRequest("/api/admin/url-prefix"),
         apiRequest("/api/auth/totp/status"),
       ]);
-      if (scanRunningRef.current && !status.scan.running) {
-        const completionText = cloudSyncWarningRef.current
-          ? formatCompletedRescanWarning(cloudSyncWarningRef.current)
-          : (status.last_scan?.message || "Library scan completed.");
-        setBanner({
-          tone: cloudSyncWarningRef.current ? "error" : "success",
-          text: completionText,
-        });
-      }
-      scanRunningRef.current = Boolean(status.scan.running);
-      setStatusPayload(status);
+      applySystemStatus(status);
       setUsersPayload(users.users);
       setSessionsPayload(sessions.sessions);
       setAuditPayload(audit.events);
       setUrlPrefixStatus(urlPrefix);
       setTotpStatus(ownTotpStatus);
-      if (user?.role === "admin" && activeSection === "panel") {
-        await loadPlaybackWorkers({ silent: true });
-      }
       return true;
     } catch (requestError) {
       setBanner({
@@ -939,15 +1089,16 @@ export function AdminPage() {
     }
   }
 
-  async function loadExposureStatus() {
+  async function loadExposureStatus({ signal } = {}) {
     try {
-      const payload = await apiRequest("/api/admin/exposure/status");
+      const payload = await apiRequest("/api/admin/exposure/status", { signal });
       setExposureStatus(payload);
       setExposureVerificationResult(payload.prepared_switch?.verification || null);
-      if (!exposurePlan) {
-        setExposurePlan(payload);
-      }
+      setExposurePlan(payload);
     } catch (requestError) {
+      if (requestError.name === "AbortError") {
+        return;
+      }
       setExposureFeedback({
         tone: "error",
         text: requestError.message || "Failed to load exposure planner status.",
@@ -1315,9 +1466,7 @@ export function AdminPage() {
     setExposureVerifyFeedback(null);
     setExposureFinalizeFeedback(null);
     setExposureMaintenanceTargetMode(null);
-    if (!exposureStatus) {
-      await loadExposureStatus();
-    }
+    await loadExposureStatus();
   }
 
   function handleCloseExposurePlanner() {
@@ -1353,6 +1502,18 @@ export function AdminPage() {
     }
   }
 
+  function closeUrlPrefixRotateModal() {
+    if (urlPrefixRotateModal.pending) {
+      return;
+    }
+    setUrlPrefixRotateModal({
+      open: false,
+      currentAdminPassword: "",
+      pending: false,
+      error: "",
+    });
+  }
+
   async function handleToggleUserTotpRequirement(entry) {
     const currentlyEnabled = Boolean(entry.totp_setup_prompt_enabled || entry.totp_enabled);
     const nextEnabled = !currentlyEnabled;
@@ -1376,7 +1537,7 @@ export function AdminPage() {
         tone: "success",
         text: `Enabled 2FA for ${entry.username}.`,
       });
-      await loadAdminData({ silent: true });
+      await refreshAdminUsersResource();
     } catch (requestError) {
       setBanner({
         tone: "error",
@@ -1432,7 +1593,7 @@ export function AdminPage() {
         pending: false,
         error: "",
       });
-      await loadAdminData({ silent: true });
+      await refreshAdminUsersResource();
     } catch (requestError) {
       setTotpDisableUserModal((current) => ({
         ...current,
@@ -1444,45 +1605,105 @@ export function AdminPage() {
     }
   }
 
-  async function handleRegenerateOwnRecoveryCodes() {
-    const password = window.prompt("Enter your current admin password to regenerate recovery codes.");
-    if (!password) {
+  function openOwnTotpModal(mode) {
+    ownTotpReturnFocusRef.current = document.activeElement;
+    setOwnTotpModal({
+      mode,
+      password: "",
+      code: "",
+      pending: false,
+      error: "",
+      recoveryCodes: [],
+      copyFeedback: "",
+    });
+  }
+
+  function closeOwnTotpModal() {
+    if (ownTotpModal.pending) {
       return;
     }
-    const totpCode = window.prompt("Enter a current 6-digit authenticator code.");
-    if (!totpCode) {
+    setOwnTotpModal({
+      mode: null,
+      password: "",
+      code: "",
+      pending: false,
+      error: "",
+      recoveryCodes: [],
+      copyFeedback: "",
+    });
+  }
+
+  async function handleRegenerateOwnRecoveryCodes(event) {
+    event?.preventDefault?.();
+    if (!ownTotpModal.password.trim() || !/^\d{6}$/.test(ownTotpModal.code.trim())) {
+      setOwnTotpModal((current) => ({
+        ...current,
+        error: "Enter your current password and a current 6-digit authenticator code.",
+      }));
       return;
     }
+    setOwnTotpModal((current) => ({ ...current, pending: true, error: "" }));
     try {
       const payload = await apiRequest("/api/auth/recovery-codes/regenerate", {
         method: "POST",
-        data: { password, totp_code: totpCode },
+        data: { password: ownTotpModal.password, totp_code: ownTotpModal.code.trim() },
       });
-      window.alert(`Save these recovery codes now:\n\n${(payload.recovery_codes || []).join("\n")}`);
-      await loadAdminData({ silent: true });
+      setOwnTotpModal((current) => ({
+        ...current,
+        password: "",
+        code: "",
+        pending: false,
+        recoveryCodes: payload.recovery_codes || [],
+      }));
+      const status = await apiRequest("/api/auth/totp/status");
+      setTotpStatus(status);
     } catch (requestError) {
-      setBanner({ tone: "error", text: requestError.message || "Failed to regenerate recovery codes." });
+      setOwnTotpModal((current) => ({
+        ...current,
+        password: "",
+        code: "",
+        pending: false,
+        error: requestError.message || "Failed to regenerate recovery codes.",
+      }));
     }
   }
 
-  async function handleDisableOwnTotp() {
-    const password = window.prompt("Enter your current admin password to disable 2FA.");
-    if (!password) {
+  async function handleDisableOwnTotp(event) {
+    event?.preventDefault?.();
+    if (!ownTotpModal.password.trim() || !ownTotpModal.code.trim()) {
+      setOwnTotpModal((current) => ({
+        ...current,
+        error: "Enter your current password and an authenticator or recovery code.",
+      }));
       return;
     }
-    const totpOrRecovery = window.prompt("Enter a current authenticator code or recovery code.");
-    if (!totpOrRecovery) {
-      return;
-    }
+    setOwnTotpModal((current) => ({ ...current, pending: true, error: "" }));
     try {
       await apiRequest("/api/auth/totp/disable", {
         method: "POST",
-        data: { password, totp_or_recovery: totpOrRecovery },
+        data: { password: ownTotpModal.password, totp_or_recovery: ownTotpModal.code.trim() },
       });
       setBanner({ tone: "success", text: "Two-factor authentication disabled." });
-      await loadAdminData({ silent: true });
+      const status = await apiRequest("/api/auth/totp/status");
+      setTotpStatus(status);
+      closeOwnTotpModal();
     } catch (requestError) {
-      setBanner({ tone: "error", text: requestError.message || "Failed to disable 2FA." });
+      setOwnTotpModal((current) => ({
+        ...current,
+        password: "",
+        code: "",
+        pending: false,
+        error: requestError.message || "Failed to disable 2FA.",
+      }));
+    }
+  }
+
+  async function handleCopyOwnRecoveryCodes() {
+    try {
+      await navigator.clipboard.writeText(ownTotpModal.recoveryCodes.join("\n"));
+      setOwnTotpModal((current) => ({ ...current, copyFeedback: "Copied" }));
+    } catch {
+      setOwnTotpModal((current) => ({ ...current, copyFeedback: "Could not copy. Select the codes manually." }));
     }
   }
 
@@ -1527,14 +1748,32 @@ export function AdminPage() {
     }
     realtimeRefreshInFlightRef.current = true;
     try {
-      const [users, sessions] = await Promise.all([
-        apiRequest("/api/admin/users"),
-        apiRequest("/api/admin/sessions"),
-      ]);
-      setUsersPayload(users.users);
-      setSessionsPayload(sessions.sessions);
-      if (activeSection === "panel") {
-        await loadPlaybackWorkers({ silent: true });
+      const activeTab = activeDesktopAdminTabRef.current;
+      const refreshUsers = !desktopControlCenter
+        || shouldRefreshDesktopRealtimeResource(activeTab, "users");
+      const refreshSessions = !desktopControlCenter
+        || shouldRefreshDesktopRealtimeResource(activeTab, "sessions");
+      const requests = [];
+      if (refreshUsers) {
+        requests.push(["users", desktopControlCenter
+          ? desktopAdminResourceRequest("users", { force: true })
+          : apiRequest("/api/admin/users")]);
+      }
+      if (refreshSessions) {
+        requests.push(["sessions", desktopControlCenter
+          ? desktopAdminResourceRequest("sessions", { force: true })
+          : apiRequest("/api/admin/sessions")]);
+      }
+      const results = await Promise.all(requests.map(([, request]) => request));
+      results.forEach((payload, index) => {
+        if (requests[index][0] === "users") {
+          setUsersPayload(payload.users || []);
+        } else {
+          setSessionsPayload(payload.sessions || []);
+        }
+      });
+      if (requests.length === 0) {
+        return;
       }
     } catch (requestError) {
       if (requestError.status !== 401 && requestError.status !== 403) {
@@ -1552,30 +1791,105 @@ export function AdminPage() {
   }
 
   useEffect(() => {
-    loadAdminData();
-  }, []);
+    if (!desktopControlCenter) {
+      loadAdminData();
+    }
+  }, [desktopControlCenter]);
 
   useEffect(() => {
-    if (activeSection !== "recovery" || recoveryLoaded || recoveryLoading) {
+    if (!desktopControlCenter || !desktopAdminTab) {
+      return undefined;
+    }
+    desktopRequestControllerRef.current?.abort();
+    const controller = new AbortController();
+    desktopRequestControllerRef.current = controller;
+    loadDesktopAdminSection(desktopAdminTab, { signal: controller.signal });
+    return () => {
+      controller.abort();
+      if (desktopRequestControllerRef.current === controller) {
+        desktopRequestControllerRef.current = null;
+      }
+    };
+  }, [desktopAdminTab, desktopControlCenter, user?.id, user?.role]);
+
+  useEffect(() => {
+    if (desktopControlCenter || activeSection !== "recovery" || recoveryLoaded || recoveryLoading) {
       return;
     }
     loadRecoveryData();
-  }, [activeSection, recoveryLoaded, recoveryLoading]);
+  }, [activeSection, desktopControlCenter, recoveryLoaded, recoveryLoading]);
 
   useEffect(() => {
-    if (user?.role !== "admin" || activeSection !== "panel") {
+    if (desktopControlCenter || user?.role !== "admin" || activeSection !== "panel") {
       return;
     }
     loadInviteCodes();
-  }, [activeSection, user?.role]);
+  }, [activeSection, desktopControlCenter, user?.role]);
 
   useEffect(() => {
-    if (user?.role !== "admin" || activeSection !== "security") {
+    if (desktopControlCenter || user?.role !== "admin" || activeSection !== "security") {
       return;
     }
     loadExposureStatus();
     loadPasswordHelpRequests();
-  }, [activeSection, user?.role]);
+  }, [activeSection, desktopControlCenter, user?.role]);
+
+  useEffect(() => {
+    function handleVisibilityChange() {
+      setDocumentVisible(document.visibilityState === "visible");
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, []);
+
+  useEffect(() => {
+    if (!ownTotpModal.mode) {
+      return undefined;
+    }
+    const dialog = ownTotpDialogRef.current;
+    const focusableSelector = [
+      "button:not([disabled])",
+      "input:not([disabled])",
+      "select:not([disabled])",
+      "textarea:not([disabled])",
+      "[href]",
+      "[tabindex]:not([tabindex='-1'])",
+    ].join(",");
+    dialog?.querySelector(focusableSelector)?.focus();
+
+    function handleDialogKeyDown(event) {
+      if (event.key === "Escape") {
+        if (!ownTotpPendingRef.current) {
+          event.preventDefault();
+          closeOwnTotpModal();
+        }
+        return;
+      }
+      if (event.key !== "Tab" || !dialog) {
+        return;
+      }
+      const focusable = [...dialog.querySelectorAll(focusableSelector)];
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleDialogKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleDialogKeyDown);
+      ownTotpReturnFocusRef.current?.focus?.();
+    };
+  }, [ownTotpModal.mode]);
 
   useEffect(() => {
     if (!selectedUserActionsEntry) {
@@ -1648,7 +1962,7 @@ export function AdminPage() {
       return undefined;
     }
     const intervalId = window.setInterval(() => {
-      loadAdminData({ silent: true });
+      loadSystemStatus({ silent: true });
     }, 2500);
     return () => {
       window.clearInterval(intervalId);
@@ -1656,7 +1970,13 @@ export function AdminPage() {
   }, [statusPayload?.scan?.running]);
 
   useEffect(() => {
-    if (user?.role !== "admin" || activeSection !== "panel") {
+    const ownsDesktopPoll = desktopControlCenter
+      && shouldPollDesktopPlaybackWorkers(desktopAdminTab, documentVisible ? "visible" : "hidden");
+    const ownsLegacyPoll = !desktopControlCenter
+      && user?.role === "admin"
+      && activeSection === "panel"
+      && documentVisible;
+    if (user?.role !== "admin" || (!ownsDesktopPoll && !ownsLegacyPoll)) {
       return undefined;
     }
     loadPlaybackWorkers({ silent: true });
@@ -1666,7 +1986,7 @@ export function AdminPage() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [activeSection, user?.role]);
+  }, [activeSection, desktopAdminTab, desktopControlCenter, documentVisible, user?.role]);
 
   useEffect(() => {
     if (user?.role !== "admin") {
@@ -1870,7 +2190,7 @@ export function AdminPage() {
       });
       const terminatedTitle = terminateWorkerModal.title;
       setTerminateWorkerModal(null);
-      await loadAdminRealtimeState();
+      await loadPlaybackWorkers({ silent: true });
       setPlaybackWorkersFeedback({
         tone: "success",
         text: `${terminatedTitle} terminated.`,
@@ -1892,9 +2212,18 @@ export function AdminPage() {
     setStatusRefreshPending(true);
     setBanner(null);
     try {
-      const refreshed = await loadAdminData({ silent: true });
-      await loadPlaybackWorkers({ silent: true });
-      if (refreshed) {
+      if (desktopControlCenter) {
+        await loadDesktopAdminSection(desktopAdminTab, { force: true });
+      } else {
+        await loadAdminData({ silent: true });
+      }
+      const shouldRefreshWorkers = user?.role === "admin" && (
+        desktopControlCenter ? desktopAdminTab === "users-invites" : activeSection === "panel"
+      );
+      if (shouldRefreshWorkers) {
+        await loadPlaybackWorkers({ silent: true });
+      }
+      if (statusPayload) {
         setBanner({ tone: "success", text: "Admin status refreshed." });
       }
     } catch (requestError) {
@@ -2114,6 +2443,7 @@ export function AdminPage() {
 
   function closeCreateUserForm() {
     setCreateUserForm({ username: "", password: "", role: "standard_user", ageCredential: 18 });
+    setShowAllCreateUserAges(false);
     setCreateUserExpanded(false);
   }
 
@@ -2142,7 +2472,7 @@ export function AdminPage() {
       });
       closeCreateUserForm();
       setBanner({ tone: "success", text: "User created." });
-      await loadAdminData({ silent: true });
+      await refreshAdminUsersResource();
     } catch (requestError) {
       setCreateUserForm((current) => ({ ...current, password: "" }));
       setBanner({
@@ -2164,7 +2494,7 @@ export function AdminPage() {
       });
       clearUserEditors(targetUser.id);
       setFeedbackForUser(targetUser.id, "success", successText || `Updated ${payload.username}.`);
-      await loadAdminData({ silent: true });
+      await refreshAdminUsersResource();
     } catch (requestError) {
       if (updates && Object.prototype.hasOwnProperty.call(updates, "current_admin_password")) {
         setRoleConfirm((current) => (current.userId === targetUser.id
@@ -2196,7 +2526,7 @@ export function AdminPage() {
         "success",
         `${entry.username} ${entry.assistant_beta_enabled ? "lost" : "gained"} Assistant access.`,
       );
-      await loadAdminData({ silent: true });
+      await refreshAdminUsersResource();
     } catch (requestError) {
       setPasswordEditor((current) => (current.userId === entry.id
         ? { ...current, newPassword: "", currentAdminPassword: "" }
@@ -2300,7 +2630,7 @@ export function AdminPage() {
         error: "",
       });
       setBanner({ tone: "success", text: `Deleted user ${entry.username}.` });
-      await loadAdminData({ silent: true });
+      await refreshAdminUsersResource();
     } catch (requestError) {
       setDeleteUserState((current) => ({
         ...current,
@@ -2542,8 +2872,14 @@ export function AdminPage() {
     setBanner(null);
     try {
       await apiRequest(`/api/admin/sessions/${session.id}/revoke`, { method: "POST" });
+      const authenticatedUser = await refreshAuth({ notifyOnFailure: true });
+      if (!authenticatedUser) {
+        navigate("/login", { replace: true });
+        return;
+      }
+      const sessions = await apiRequest("/api/admin/sessions");
+      setSessionsPayload(sessions.sessions || []);
       setBanner({ tone: "success", text: `Session ${session.id} revoked.` });
-      await loadAdminData({ silent: true });
     } catch (requestError) {
       setBanner({
         tone: "error",
@@ -2630,6 +2966,14 @@ export function AdminPage() {
 
   const visibleSessions = showAllSessions ? sessionsPayload : sessionsPayload.slice(0, 8);
   const visibleAuditEvents = showAllAudit ? auditPayload : auditPayload.slice(0, 10);
+  const visibleUsers = showAllUsers ? usersPayload : usersPayload.slice(0, 6);
+  const liveInviteCount = inviteCodes.filter((entry) => {
+    if (entry.used_at) {
+      return false;
+    }
+    const expiresAt = Date.parse(entry.expires_at);
+    return !Number.isFinite(expiresAt) || expiresAt > Date.now();
+  }).length;
   const recentBackupWarnings = useMemo(
     () =>
       auditPayload.filter((event) => event?.details?.auto_backup_status === "failed").slice(0, 6),
@@ -2760,7 +3104,7 @@ export function AdminPage() {
         </p>
       ) : null}
       <div className="admin-list">
-        {usersPayload.map((entry) => {
+        {visibleUsers.map((entry) => {
           const isSelf = entry.id === user?.id;
           const isActionsModalOpen = userActionsModalUserId === entry.id;
           const workerGroup = playbackWorkersByUserId.get(entry.id) || null;
@@ -2972,7 +3316,16 @@ export function AdminPage() {
                               ) : null}
                             </div>
                           );
-                        })}
+		        })}
+        {usersPayload.length > 6 ? (
+          <button
+            className="ghost-button ghost-button--inline control-center-user-expander"
+            onClick={() => setShowAllUsers((current) => !current)}
+            type="button"
+          >
+            {showAllUsers ? "Show fewer" : `Show all ${usersPayload.length}`}
+          </button>
+        ) : null}
                         {workerGroup.nativeItems
                           .filter((nativePlayback) => !dismissedPlaybackStatusKeys[buildPlaybackStatusDismissKey(nativePlayback)])
                           .map((nativePlayback) => {
@@ -3103,18 +3456,42 @@ export function AdminPage() {
                     <option value="admin">Admin</option>
                   </select>
                 </label>
-                <label>
-                  Age credential
-                  <select
-                    className="admin-select"
-                    onChange={(event) => setCreateUserForm((current) => ({ ...current, ageCredential: Number(event.target.value) }))}
-                    value={createUserForm.ageCredential}
-                  >
-                    {AGE_CREDENTIAL_OPTIONS.map((age) => (
-                      <option key={age} value={age}>{formatAgeCredential(age)}</option>
+                <fieldset className="control-center-age-choices">
+                  <legend>Age credential</legend>
+                  <div className="control-center-age-choices__quick">
+                    {[18, 16, 13].map((age) => (
+                      <button
+                        aria-pressed={createUserForm.ageCredential === age}
+                        className="ghost-button"
+                        key={age}
+                        onClick={() => setCreateUserForm((current) => ({ ...current, ageCredential: age }))}
+                        type="button"
+                      >
+                        {formatAgeCredential(age)}
+                      </button>
                     ))}
-                  </select>
-                </label>
+                    <button
+                      aria-expanded={showAllCreateUserAges}
+                      className="ghost-button"
+                      onClick={() => setShowAllCreateUserAges((current) => !current)}
+                      type="button"
+                    >
+                      More ages
+                    </button>
+                  </div>
+                  {showAllCreateUserAges ? (
+                    <select
+                      aria-label="All age credentials"
+                      className="admin-select"
+                      onChange={(event) => setCreateUserForm((current) => ({ ...current, ageCredential: Number(event.target.value) }))}
+                      value={createUserForm.ageCredential}
+                    >
+                      {AGE_CREDENTIAL_OPTIONS.map((age) => (
+                        <option key={age} value={age}>{formatAgeCredential(age)}</option>
+                      ))}
+                    </select>
+                  ) : null}
+                </fieldset>
                 <div className="admin-form__actions">
                   <button className="primary-button" disabled={createPending} type="submit">
                     {createPending ? "Creating..." : "Create user"}
@@ -3908,9 +4285,41 @@ export function AdminPage() {
     ? exposureFinalizeProfileSource?.public_origin
     : exposureFinalizeProfileSource?.private_origin || "Not required";
   const exposureFinalizeVerificationStatus = exposureVerificationStatusLabel;
+  const adminOverviewSummary = desktopControlCenter ? (
+    <div className="control-center-overview-summary">
+      <section className="control-center-score-card" aria-label="Security score 92, private">
+        <span className="control-center-score-card__eyebrow">Security score</span>
+        <strong>92</strong>
+        <span className="control-center-score-card__label">PRIVATE</span>
+        <p>Presentation score only. Operational controls below remain authoritative.</p>
+      </section>
+      <section className="settings-card control-center-overview-facts">
+        <h2>Current posture</h2>
+        <StatusRow label="Users" value={String(statusPayload?.total_users ?? usersPayload.length)} />
+        <StatusRow label="Active auth sessions" value={String(sessionsPayload.length)} />
+        <StatusRow label="Titles indexed" value={String(statusPayload?.total_media_items ?? 0)} />
+        <StatusRow label="Multi-user" value={statusPayload?.security?.multiuser_enabled ? "Enabled" : "Disabled"} />
+      </section>
+    </div>
+  ) : null;
+  const adminSecurityKpis = desktopControlCenter ? (
+    <div className="control-center-admin-kpis" aria-label="Security summary">
+      {[
+        ["Users", statusPayload?.total_users ?? usersPayload.length],
+        ["Active sessions", sessionsPayload.length],
+        ["Titles indexed", statusPayload?.total_media_items ?? 0],
+        ["Live invites", liveInviteCount],
+      ].map(([label, value]) => (
+        <section className="control-center-admin-kpi" key={label}>
+          <span>{label}</span>
+          <strong>{String(value)}</strong>
+        </section>
+      ))}
+    </div>
+  ) : null;
   const securitySection = statusPayload ? (
     <div className="admin-section-grid">
-      <section className="settings-card">
+      <section className="settings-card control-center-admin-library-status">
         <h2>Library status</h2>
         <StatusRow label="Indexed movies" value={String(statusPayload.total_media_items)} />
         <StatusRow
@@ -4010,7 +4419,7 @@ export function AdminPage() {
 	      </section>
 
       {urlPrefixStatus?.rotation_reminder_due && !urlPrefixReminderDismissed ? (
-        <section className="settings-card settings-card--wide">
+        <section className="settings-card settings-card--wide control-center-admin-url-reminder">
           <div className="settings-inline-header">
             <div>
               <h2>URL prefix reminder</h2>
@@ -4041,7 +4450,7 @@ export function AdminPage() {
         </section>
       ) : null}
 
-      <section className="settings-card">
+      <section className="settings-card control-center-admin-url-prefix">
         <div className="settings-inline-header">
           <div>
             <h2>URL Prefix</h2>
@@ -4087,7 +4496,7 @@ export function AdminPage() {
           </div>
           <div className="admin-list__actions">
             {totpStatus?.enabled ? (
-              <button className="ghost-button" onClick={handleRegenerateOwnRecoveryCodes} type="button">
+              <button className="ghost-button" onClick={() => openOwnTotpModal("regenerate")} type="button">
                 Regenerate recovery codes
               </button>
             ) : (
@@ -4099,9 +4508,14 @@ export function AdminPage() {
         </div>
         <StatusRow label="Status" value={totpStatus?.enabled ? `Enabled${totpStatus.enabled_at ? ` since ${formatDate(totpStatus.enabled_at)}` : ""}` : "Not enabled"} />
         <StatusRow label="Recovery codes remaining" value={String(totpStatus?.recovery_codes_remaining ?? 0)} />
+        {totpStatus?.enabled ? (
+          <button className="ghost-button ghost-button--danger" onClick={() => openOwnTotpModal("disable")} type="button">
+            Disable 2FA
+          </button>
+        ) : null}
       </section>
 
-      <section className="settings-card settings-card--wide">
+      <section className="settings-card settings-card--wide control-center-admin-manage-user-totp">
         <div className="settings-inline-header">
           <div>
             <h2>Manage user 2FA</h2>
@@ -4145,7 +4559,7 @@ export function AdminPage() {
         </div>
       </section>
 
-      <section className="settings-card settings-card--wide">
+      <section className="settings-card settings-card--wide control-center-admin-password-help">
         <div className="settings-inline-header">
           <div>
             <h2>Password help requests</h2>
@@ -4161,8 +4575,9 @@ export function AdminPage() {
         </div>
         <div className="admin-list admin-list--dense password-help-request-list">
           {passwordHelpRequests.length > 0 ? (
-            passwordHelpRequests.map((requestEntry) => {
-              const detailsOpen = expandedPasswordHelpRequestId === requestEntry.id;
+	            passwordHelpRequests.map((requestEntry) => {
+	              const detailsOpen = expandedPasswordHelpRequestId === requestEntry.id;
+	              const requestUser = usersPayload.find((entry) => entry.id === requestEntry.user_id) || null;
               const requesterIpAddress = unknownIfEmpty(requestEntry.requester_ip_address);
               const requesterDevice = detectPasswordHelpDevice(requestEntry.requester_user_agent);
               const requesterBrowser = detectPasswordHelpBrowser(requestEntry.requester_user_agent);
@@ -4207,14 +4622,24 @@ export function AdminPage() {
                       </div>
                     </div>
                   ) : null}
-                  <button
-                    className="ghost-button ghost-button--danger"
-                    disabled={passwordHelpPendingId === requestEntry.id}
-                    onClick={() => openPasswordHelpDismissModal(requestEntry)}
-                    type="button"
-                  >
-                    {passwordHelpPendingId === requestEntry.id ? "Dismissing..." : "Dismiss"}
-                  </button>
+                  <div className="admin-list__actions">
+                    <button
+                      className="ghost-button"
+                      disabled={!requestUser}
+                      onClick={() => requestUser && openUserActionsModal(requestUser)}
+                      type="button"
+                    >
+                      Open user actions
+                    </button>
+                    <button
+                      className="ghost-button ghost-button--danger"
+                      disabled={passwordHelpPendingId === requestEntry.id}
+                      onClick={() => openPasswordHelpDismissModal(requestEntry)}
+                      type="button"
+                    >
+                      {passwordHelpPendingId === requestEntry.id ? "Dismissing..." : "Dismiss"}
+                    </button>
+                  </div>
                 </div>
               );
             })
@@ -4227,7 +4652,17 @@ export function AdminPage() {
 	  ) : null;
 
   const logsSection = (
-    <div className="admin-activity-grid">
+    <>
+      {desktopControlCenter ? (
+        <div className="control-center-live-audit" aria-label="Live audit design ticker">
+          <span className="control-center-live-audit__label"><i aria-hidden="true" />LIVE AUDIT</span>
+          <div className="control-center-live-audit__track">
+            <span>{ADMIN_LIVE_AUDIT_TICKER_LINE}</span>
+            <span aria-hidden="true">{ADMIN_LIVE_AUDIT_TICKER_LINE}</span>
+          </div>
+        </div>
+      ) : null}
+      <div className="admin-activity-grid">
       <section className="settings-card admin-activity-card">
         <div className="settings-inline-header">
           <div>
@@ -4314,7 +4749,8 @@ export function AdminPage() {
           )}
         </div>
       </section>
-    </div>
+      </div>
+    </>
   );
 
   const recoverySection = (
@@ -5328,10 +5764,105 @@ export function AdminPage() {
         confirmLabel: "Dismiss",
         danger: true,
       };
+  const ownTotpSecureModal = ownTotpModal.mode ? (
+    <div
+      aria-labelledby="control-center-own-totp-title"
+      aria-modal="true"
+      className="browser-resume-modal"
+      role="dialog"
+    >
+      <button
+        aria-label="Close two-factor authentication dialog"
+        className="browser-resume-modal__backdrop"
+        disabled={ownTotpModal.pending}
+        onClick={closeOwnTotpModal}
+        type="button"
+      />
+      <form
+        className="browser-resume-modal__card detail-info-modal__card control-center-secure-modal"
+        onSubmit={ownTotpModal.mode === "regenerate"
+          ? handleRegenerateOwnRecoveryCodes
+          : handleDisableOwnTotp}
+        ref={ownTotpDialogRef}
+      >
+        <div className="detail-info-modal__header">
+          <div className="detail-info-modal__copy">
+            <p className="detail-info-modal__eyebrow">Security</p>
+            <h2 id="control-center-own-totp-title">
+              {ownTotpModal.mode === "regenerate" ? "Regenerate recovery codes" : "Disable 2FA"}
+            </h2>
+          </div>
+          <button
+            aria-label="Close two-factor authentication dialog"
+            className="detail-info-modal__close"
+            disabled={ownTotpModal.pending}
+            onClick={closeOwnTotpModal}
+            type="button"
+          >
+            X
+          </button>
+        </div>
+        <div className="detail-info-modal__body">
+          {ownTotpModal.recoveryCodes.length > 0 ? (
+            <>
+              <p className="page-subnote">Save these replacement codes now. They are shown only once.</p>
+              <pre className="control-center-recovery-codes">{ownTotpModal.recoveryCodes.join("\n")}</pre>
+              {ownTotpModal.copyFeedback ? <p className="action-feedback" role="status">{ownTotpModal.copyFeedback}</p> : null}
+            </>
+          ) : (
+            <>
+              <label className="settings-field">
+                <span><strong>Current password</strong></span>
+                <NonLoginSecretInput
+                  disabled={ownTotpModal.pending}
+                  onChange={(event) => setOwnTotpModal((current) => ({ ...current, password: event.target.value, error: "" }))}
+                  purpose={`own-totp-${ownTotpModal.mode}-password`}
+                  value={ownTotpModal.password}
+                />
+              </label>
+              <label className="settings-field">
+                <span>
+                  <strong>{ownTotpModal.mode === "regenerate" ? "Authenticator code" : "Authenticator or recovery code"}</strong>
+                </span>
+                <input
+                  autoComplete="one-time-code"
+                  disabled={ownTotpModal.pending}
+                  inputMode={ownTotpModal.mode === "regenerate" ? "numeric" : "text"}
+                  maxLength={ownTotpModal.mode === "regenerate" ? 6 : 64}
+                  onChange={(event) => setOwnTotpModal((current) => ({ ...current, code: event.target.value, error: "" }))}
+                  value={ownTotpModal.code}
+                />
+              </label>
+            </>
+          )}
+          {ownTotpModal.error ? <p className="action-feedback action-feedback--error" role="alert">{ownTotpModal.error}</p> : null}
+        </div>
+        <div className="browser-resume-modal__actions">
+          {ownTotpModal.recoveryCodes.length > 0 ? (
+            <button className="primary-button" onClick={handleCopyOwnRecoveryCodes} type="button">Copy codes</button>
+          ) : (
+            <button
+              className={ownTotpModal.mode === "disable" ? "ghost-button ghost-button--danger" : "primary-button"}
+              disabled={ownTotpModal.pending}
+              type="submit"
+            >
+              {ownTotpModal.pending
+                ? "Working..."
+                : ownTotpModal.mode === "regenerate" ? "Regenerate" : "Disable 2FA"}
+            </button>
+          )}
+          <button className="ghost-button" disabled={ownTotpModal.pending} onClick={closeOwnTotpModal} type="button">
+            {ownTotpModal.recoveryCodes.length > 0 ? "Done" : "Cancel"}
+          </button>
+        </div>
+      </form>
+    </div>
+  ) : null;
 
   return (
     <section className="page-section">
-      <div className="admin-nav-card" aria-label="Admin sections">
+      {!desktopControlCenter ? (
+        <div className="admin-nav-card" aria-label="Admin sections">
         <div className="admin-nav-card__actions">
           {ADMIN_SECTIONS.map((section) => {
             const isActive = activeSection === section.key;
@@ -5366,20 +5897,25 @@ export function AdminPage() {
             {statusRefreshPending ? "Refreshing..." : "Refresh status"}
           </RefreshSweepButton>
         ) : null}
-        <DesktopBackToLibraryButton className="admin-nav-card__back" />
-      </div>
+          <DesktopBackToLibraryButton className="admin-nav-card__back" />
+        </div>
+      ) : null}
 
       <FeedbackBanner banner={banner} />
 
       {statusPayload ? (
         <div className="admin-section-stack">
-	              {activeSection === "panel" ? (
+		          {desktopAdminTab === "overview" ? adminOverviewSummary : null}
+		          {desktopAdminTab === "security" ? adminSecurityKpis : null}
+		              {activeSection === "panel" ? (
 	                <>
 	                  {usersCard}
 	                </>
 	              ) : null}
 
-          {activeSection === "security" ? securitySection : null}
+          {activeSection === "security" || (desktopControlCenter && desktopAdminTab === "users-invites")
+            ? securitySection
+            : null}
 
           {activeSection === "logs" ? logsSection : null}
 
@@ -5804,14 +6340,8 @@ export function AdminPage() {
           <button
             aria-label="Close URL prefix rotation confirmation"
             className="browser-resume-modal__backdrop"
-            onClick={() =>
-              setUrlPrefixRotateModal({
-                open: false,
-                currentAdminPassword: "",
-                pending: false,
-                error: "",
-              })
-            }
+            disabled={urlPrefixRotateModal.pending}
+            onClick={closeUrlPrefixRotateModal}
             type="button"
           />
           <form
@@ -5826,14 +6356,8 @@ export function AdminPage() {
               <button
                 aria-label="Close URL prefix rotation confirmation"
                 className="detail-info-modal__close"
-                onClick={() =>
-                  setUrlPrefixRotateModal({
-                    open: false,
-                    currentAdminPassword: "",
-                    pending: false,
-                    error: "",
-                  })
-                }
+                disabled={urlPrefixRotateModal.pending}
+                onClick={closeUrlPrefixRotateModal}
                 type="button"
               >
                 X
@@ -5872,14 +6396,7 @@ export function AdminPage() {
               <button
                 className="ghost-button"
                 disabled={urlPrefixRotateModal.pending}
-                onClick={() =>
-                  setUrlPrefixRotateModal({
-                    open: false,
-                    currentAdminPassword: "",
-                    pending: false,
-                    error: "",
-                  })
-                }
+                onClick={closeUrlPrefixRotateModal}
                 type="button"
               >
                 Cancel
@@ -5888,6 +6405,7 @@ export function AdminPage() {
           </form>
         </div>
       ) : null}
+      {ownTotpSecureModal}
     </section>
   );
 }

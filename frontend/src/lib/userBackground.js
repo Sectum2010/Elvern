@@ -39,7 +39,12 @@ export const DEFAULT_BACKGROUND_SETTINGS = {
   background_gradient_end: "#1b41b5",
   background_gradient_accent: "#5c1867",
   background_solid_color: "#151a21",
+  background_custom_model: "legacy_v1",
+  background_gradient_start_hue: 210,
+  background_gradient_end_hue: 330,
+  background_solid_hue: 210,
   background_photo_url: null,
+  background_photo_original_filename: null,
 };
 
 const PRESET_VALUES = new Set(BACKGROUND_PRESETS.map((preset) => preset.value));
@@ -141,6 +146,22 @@ function hslToHex({ h, s, l }) {
   });
 }
 
+function normalizeHue(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return ((Math.round(numeric) % 360) + 360) % 360;
+}
+
+export function hueToHex(hue, saturationPercent, lightnessPercent) {
+  return hslToHex({
+    h: normalizeHue(hue, 0) / 360,
+    s: clampUnit(Number(saturationPercent) / 100),
+    l: clampUnit(Number(lightnessPercent) / 100),
+  });
+}
+
 function mixHexColors(left, right, ratio) {
   const leftRgb = hexToRgb(left);
   const rightRgb = hexToRgb(right);
@@ -235,6 +256,19 @@ export function normalizeUserBackgroundSettings(payload = {}) {
     payload.background_solid_color,
     DEFAULT_BACKGROUND_SETTINGS.background_solid_color,
   );
+  const customModel = payload.background_custom_model === "hue_v2" ? "hue_v2" : "legacy_v1";
+  const gradientStartHue = normalizeHue(
+    payload.background_gradient_start_hue,
+    DEFAULT_BACKGROUND_SETTINGS.background_gradient_start_hue,
+  );
+  const gradientEndHue = normalizeHue(
+    payload.background_gradient_end_hue,
+    DEFAULT_BACKGROUND_SETTINGS.background_gradient_end_hue,
+  );
+  const solidHue = normalizeHue(
+    payload.background_solid_hue,
+    DEFAULT_BACKGROUND_SETTINGS.background_solid_hue,
+  );
   return {
     background_mode: backgroundMode,
     background_preset: backgroundPreset,
@@ -242,16 +276,32 @@ export function normalizeUserBackgroundSettings(payload = {}) {
     background_gradient_end: gradientEnd,
     background_gradient_accent: gradientAccent,
     background_solid_color: solidColor,
+    background_custom_model: customModel,
+    background_gradient_start_hue: gradientStartHue,
+    background_gradient_end_hue: gradientEndHue,
+    background_solid_hue: solidHue,
     background_photo_url: photoUrl,
+    background_photo_original_filename:
+      typeof payload.background_photo_original_filename === "string"
+        ? payload.background_photo_original_filename
+        : null,
   };
 }
 
 export function buildBackgroundPreviewStyle(settings) {
   const normalized = normalizeUserBackgroundSettings(settings);
   if (normalized.background_mode === "solid") {
+    if (normalized.background_custom_model === "hue_v2") {
+      return { background: `hsl(${normalized.background_solid_hue} 45% 30%)` };
+    }
     return { background: normalized.background_solid_color };
   }
   if (normalized.background_mode === "gradient") {
+    if (normalized.background_custom_model === "hue_v2") {
+      return {
+        background: `linear-gradient(120deg, hsl(${normalized.background_gradient_start_hue} 62% 42%), hsl(${normalized.background_gradient_end_hue} 60% 22%))`,
+      };
+    }
     const gradientEnd =
       normalized.background_gradient_end === normalized.background_gradient_start
         ? deriveGradientEndFromSingleColor(normalized.background_gradient_start)
@@ -281,10 +331,19 @@ export function applyUserBackgroundTheme(
   }
   root.dataset.elvernBackgroundMode = normalized.background_mode;
   root.dataset.elvernBackgroundPreset = normalized.background_preset;
+  root.dataset.elvernBackgroundCustomModel = normalized.background_custom_model;
   root.style.setProperty("--app-background-gradient-start", normalized.background_gradient_start);
   root.style.setProperty("--app-background-gradient-end", normalized.background_gradient_end);
   root.style.setProperty("--app-background-gradient-accent", normalized.background_gradient_accent);
   root.style.setProperty("--app-background-solid-color", normalized.background_solid_color);
+  if (normalized.background_custom_model === "hue_v2") {
+    const customBackground = normalized.background_mode === "solid"
+      ? `hsl(${normalized.background_solid_hue} 45% 30%)`
+      : `linear-gradient(120deg, hsl(${normalized.background_gradient_start_hue} 62% 42%), hsl(${normalized.background_gradient_end_hue} 60% 22%))`;
+    root.style.setProperty("--app-background-custom", customBackground);
+  } else {
+    root.style.removeProperty("--app-background-custom");
+  }
   if (normalized.background_photo_url) {
     root.style.setProperty("--app-background-photo", `url("${normalized.background_photo_url}")`);
   } else {
@@ -299,9 +358,11 @@ export function resetUserBackgroundTheme(root = typeof document !== "undefined" 
   }
   delete root.dataset.elvernBackgroundMode;
   delete root.dataset.elvernBackgroundPreset;
+  delete root.dataset.elvernBackgroundCustomModel;
   root.style.removeProperty("--app-background-gradient-start");
   root.style.removeProperty("--app-background-gradient-end");
   root.style.removeProperty("--app-background-gradient-accent");
   root.style.removeProperty("--app-background-solid-color");
   root.style.removeProperty("--app-background-photo");
+  root.style.removeProperty("--app-background-custom");
 }

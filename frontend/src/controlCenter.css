@@ -1,0 +1,919 @@
+@font-face {
+  font-family: "Elvern Control Archivo";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("./assets/fonts/control-center/archivo-latin-variable.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Elvern Control Sora";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("./assets/fonts/control-center/sora-latin-variable.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Elvern Control Space Grotesk";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("./assets/fonts/control-center/space-grotesk-latin-variable.woff2") format("woff2");
+}
+
+.control-center-desktop {
+  --cc-bg: #f1eee8;
+  --cc-sidebar: #e9e4dc;
+  --cc-surface: #fffdf9;
+  --cc-surface-muted: #f4f0e9;
+  --cc-line: #d9d2c8;
+  --cc-ink: #1e2024;
+  --cc-muted: #6e6a65;
+  --cc-accent: #315e63;
+  --cc-accent-soft: #d9e6e2;
+  --cc-danger: #a13f48;
+  --cc-shadow: 0 18px 48px rgba(36, 29, 23, 0.1);
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-height: 100dvh;
+  overflow: hidden;
+  color: var(--cc-ink);
+  background: var(--cc-bg);
+  font-family: "Elvern Control Archivo", Arial, sans-serif;
+  isolation: isolate;
+}
+
+.control-center-desktop--mixed {
+  --cc-bg: #17191d;
+  --cc-sidebar: #ece7df;
+  --cc-surface: #22252a;
+  --cc-surface-muted: #2b2e34;
+  --cc-line: #3c4048;
+  --cc-ink: #f2eee7;
+  --cc-muted: #aaa69f;
+  --cc-accent: #9cc2bd;
+  --cc-accent-soft: #303f3f;
+  --cc-shadow: 0 18px 48px rgba(0, 0, 0, 0.24);
+}
+
+.control-center-desktop--dark {
+  --cc-bg: #111317;
+  --cc-sidebar: #171a1f;
+  --cc-surface: #1b1e24;
+  --cc-surface-muted: #242830;
+  --cc-line: #343943;
+  --cc-ink: #f2eee8;
+  --cc-muted: #a39f98;
+  --cc-accent: #9fc7c1;
+  --cc-accent-soft: #283b3a;
+  --cc-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+}
+
+.control-center-desktop__sidebar {
+  display: flex;
+  width: 252px;
+  flex: 0 0 252px;
+  min-height: 100dvh;
+  flex-direction: column;
+  padding: 24px 18px 20px;
+  border-right: 1px solid var(--cc-line);
+  background: var(--cc-sidebar);
+  color: var(--cc-ink);
+  transition: background-color 220ms ease, color 220ms ease, border-color 220ms ease;
+}
+
+.control-center-desktop--mixed .control-center-desktop__sidebar {
+  color: #25272b;
+}
+
+.control-center-desktop__brand,
+.control-center-desktop__library-return,
+.control-center-desktop__area-switch,
+.control-center-desktop__theme-button {
+  appearance: none;
+  border: 0;
+  font: inherit;
+}
+
+.control-center-desktop__brand {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 10px;
+  padding: 2px 4px;
+  color: inherit;
+  background: transparent;
+  font-family: "Elvern Control Sora", sans-serif;
+  font-size: 21px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.control-center-desktop__brand-mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 9px;
+  color: #f8f5ee;
+  background: #315e63;
+  font-size: 14px;
+}
+
+.control-center-desktop__sidebar-heading {
+  margin: 34px 10px 11px;
+  color: currentColor;
+  font-family: "Elvern Control Sora", sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.62;
+}
+
+.control-center-desktop__nav {
+  display: grid;
+  gap: 4px;
+}
+
+.control-center-desktop__nav-link {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 11px;
+  padding: 0 12px;
+  border-radius: 10px;
+  color: currentColor;
+  font-size: 13.5px;
+  font-weight: 600;
+  text-decoration: none;
+  opacity: 0.72;
+  transition: background-color 160ms ease, color 160ms ease, opacity 160ms ease, transform 160ms ease;
+}
+
+.control-center-desktop__nav-link:hover,
+.control-center-desktop__nav-link:focus-visible {
+  background: color-mix(in srgb, var(--cc-accent-soft) 60%, transparent);
+  opacity: 1;
+}
+
+.control-center-desktop__nav-link--active {
+  color: var(--cc-accent);
+  background: var(--cc-accent-soft);
+  opacity: 1;
+}
+
+.control-center-desktop--mixed .control-center-desktop__nav-link--active {
+  color: #315e63;
+}
+
+.control-center-desktop__sidebar-footer {
+  display: grid;
+  gap: 10px;
+  margin-top: auto;
+}
+
+.control-center-desktop__library-return,
+.control-center-desktop__area-switch {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  color: currentColor;
+  background: transparent;
+  cursor: pointer;
+}
+
+.control-center-desktop__library-return {
+  min-height: 38px;
+  padding: 0 11px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.72;
+}
+
+.control-center-desktop__library-return:hover,
+.control-center-desktop__library-return:focus-visible {
+  background: rgba(128, 128, 128, 0.12);
+  opacity: 1;
+}
+
+.control-center-desktop__area-switch {
+  min-height: 62px;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(30, 25, 20, 0.06);
+  text-align: left;
+  transform-style: preserve-3d;
+  transition: transform 180ms ease, border-color 180ms ease, background-color 180ms ease;
+}
+
+.control-center-desktop__area-switch:hover,
+.control-center-desktop__area-switch:focus-visible {
+  border-color: color-mix(in srgb, var(--cc-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--cc-accent-soft) 38%, transparent);
+  transform: perspective(500px) rotateX(2deg) rotateY(-3deg) translateY(-1px);
+}
+
+.control-center-desktop__area-switch span {
+  display: grid;
+  gap: 2px;
+  font-family: "Elvern Control Sora", sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.control-center-desktop__area-switch small {
+  font-family: "Elvern Control Archivo", sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  opacity: 0.56;
+}
+
+.control-center-desktop__workspace {
+  min-width: 0;
+  flex: 1;
+  overflow: auto;
+  background: var(--cc-bg);
+}
+
+.control-center-desktop__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.control-center-desktop__status-button {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid var(--cc-line);
+  border-radius: 9px;
+  color: var(--cc-ink);
+  background: var(--cc-surface);
+  font: 650 12px/1 "Elvern Control Archivo", sans-serif;
+  cursor: pointer;
+}
+
+.control-center-desktop__status-button:hover,
+.control-center-desktop__status-button:focus-visible,
+.control-center-desktop__status-button[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--cc-accent) 58%, var(--cc-line));
+  color: var(--cc-accent);
+  background: var(--cc-accent-soft);
+}
+
+.control-center-desktop .control-center-status-rail {
+  position: relative;
+  z-index: 16;
+  width: 304px;
+  flex: 0 0 304px;
+  min-height: 100dvh;
+  overflow: auto;
+  padding: 30px 22px;
+  border-left: 1px solid var(--cc-line);
+  color: var(--cc-ink);
+  background: var(--cc-surface);
+  box-shadow: -18px 0 42px rgba(20, 18, 16, 0.08);
+  animation: controlCenterRailIn 220ms ease both;
+}
+
+.control-center-desktop .control-center-status-rail__header,
+.control-center-desktop .control-center-status-rail__actions {
+  display: flex;
+  align-items: center;
+}
+
+.control-center-desktop .control-center-status-rail__header {
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--cc-line);
+}
+
+.control-center-desktop .control-center-status-rail__header span {
+  color: var(--cc-muted);
+  font-family: "Elvern Control Space Grotesk", sans-serif;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.control-center-desktop .control-center-status-rail__header h2 {
+  margin: 3px 0 0;
+  font-family: "Elvern Control Sora", sans-serif;
+  font-size: 19px;
+}
+
+.control-center-desktop .control-center-status-rail__actions {
+  gap: 5px;
+}
+
+.control-center-desktop .control-center-status-rail__actions button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  color: var(--cc-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.control-center-desktop .control-center-status-rail__actions button:hover,
+.control-center-desktop .control-center-status-rail__actions button:focus-visible {
+  color: var(--cc-accent);
+  background: var(--cc-accent-soft);
+}
+
+.control-center-desktop .control-center-status-rail__actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.control-center-desktop .control-center-status-rail__stale {
+  margin: 14px 0 0;
+  color: var(--cc-danger);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.control-center-desktop .control-center-status-rail__list {
+  display: grid;
+  gap: 0;
+  margin: 18px 0 0;
+}
+
+.control-center-desktop .control-center-status-rail__list div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--cc-line) 72%, transparent);
+}
+
+.control-center-desktop .control-center-status-rail__list dt,
+.control-center-desktop .control-center-status-rail__list dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.control-center-desktop .control-center-status-rail__list dt {
+  color: var(--cc-muted);
+}
+
+.control-center-desktop .control-center-status-rail__list dd {
+  overflow-wrap: anywhere;
+  color: var(--cc-ink);
+  font-weight: 650;
+  text-align: right;
+}
+
+.control-center-desktop .control-center-status-rail__watermark {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  color: var(--cc-accent);
+  opacity: 0.07;
+  pointer-events: none;
+}
+
+.control-center-desktop .control-center-status-rail .is-spinning {
+  animation: controlCenterSpin 800ms linear infinite;
+}
+
+.control-center-desktop__header,
+.control-center-desktop__content {
+  width: min(820px, calc(100% - 64px));
+  margin-inline: auto;
+}
+
+.control-center-desktop__header {
+  padding: 42px 0 26px;
+}
+
+.control-center-desktop__header h1 {
+  margin: 0;
+  color: var(--cc-ink);
+  font-family: "Elvern Control Sora", sans-serif;
+  font-size: 26px;
+  font-weight: 800;
+}
+
+.control-center-desktop__header p {
+  margin: 8px 0 0;
+  color: var(--cc-muted);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+.control-center-desktop__content {
+  padding-bottom: 72px;
+  animation: merIn 240ms ease both;
+}
+
+.control-center-desktop .page-section {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  color: var(--cc-ink);
+}
+
+.control-center-desktop .settings-grid {
+  display: grid;
+  gap: 16px;
+  width: 100%;
+}
+
+.control-center-desktop .settings-grid--compact-columns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.control-center-desktop .settings-grid__column {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+}
+
+.control-center-desktop .settings-card,
+.control-center-desktop .install-settings-panel,
+.control-center-desktop .admin-card {
+  border: 1px solid var(--cc-line);
+  border-radius: 14px;
+  color: var(--cc-ink);
+  background: var(--cc-surface);
+  box-shadow: 0 8px 28px rgba(28, 24, 20, 0.045);
+}
+
+.control-center-desktop .settings-card {
+  padding: 20px;
+}
+
+.control-center-desktop .settings-card h2,
+.control-center-desktop .settings-disclosure__title {
+  color: var(--cc-ink);
+  font-family: "Elvern Control Sora", sans-serif;
+  font-size: 15px;
+  font-weight: 750;
+}
+
+.control-center-desktop .page-subnote,
+.control-center-desktop .settings-field small,
+.control-center-desktop .settings-disclosure__copy,
+.control-center-desktop .detail-list {
+  color: var(--cc-muted);
+}
+
+.control-center-desktop .settings-segmented-control,
+.control-center-desktop .admin-select,
+.control-center-desktop input,
+.control-center-desktop textarea,
+.control-center-desktop select {
+  border-color: var(--cc-line);
+  color: var(--cc-ink);
+  background: var(--cc-surface-muted);
+}
+
+.control-center-desktop .settings-segmented-control__option--active,
+.control-center-desktop .primary-button {
+  color: #f7f5ef;
+  background: var(--cc-accent);
+}
+
+.control-center-desktop .ghost-button {
+  border-color: var(--cc-line);
+  color: var(--cc-ink);
+  background: transparent;
+}
+
+.control-center-desktop .ghost-button:hover,
+.control-center-desktop .ghost-button:focus-visible {
+  background: var(--cc-surface-muted);
+}
+
+.control-center-desktop .form-error {
+  color: var(--cc-danger);
+}
+
+.control-center-desktop .page-note,
+.control-center-desktop .control-center-notice {
+  border: 1px solid color-mix(in srgb, var(--cc-accent) 34%, var(--cc-line));
+  border-radius: 11px;
+  color: var(--cc-ink);
+  background: var(--cc-accent-soft);
+}
+
+.control-center-desktop .control-center-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  font-size: 13px;
+}
+
+.control-center-desktop .control-center-notice button {
+  border: 0;
+  color: var(--cc-accent);
+  background: transparent;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.control-center-desktop .control-center-hue-editor {
+  display: grid;
+  gap: 14px;
+}
+
+.control-center-desktop .control-center-hue-editor label {
+  display: grid;
+  gap: 7px;
+  color: var(--cc-muted);
+  font-size: 12px;
+}
+
+.control-center-desktop .control-center-hue-editor label span {
+  display: flex;
+  justify-content: space-between;
+}
+
+.control-center-desktop .control-center-hue-editor__preview {
+  height: 82px;
+  border: 1px solid var(--cc-line);
+  border-radius: 10px;
+}
+
+.control-center-desktop .control-center-list-expander {
+  justify-self: start;
+  border: 0;
+  color: var(--cc-accent);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.control-center-desktop .control-center-destructive-actions,
+.control-center-desktop .control-center-confirm {
+  display: grid;
+  gap: 10px;
+}
+
+.control-center-desktop .control-center-destructive-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding-top: 8px;
+  border-top: 1px solid var(--cc-line);
+}
+
+.control-center-desktop .control-center-confirm {
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--cc-danger) 42%, var(--cc-line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--cc-danger) 7%, var(--cc-surface));
+}
+
+.control-center-desktop .control-center-confirm p {
+  margin: 0;
+  color: var(--cc-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.control-center-desktop[data-control-center-tab="appearance"] .settings-preferences-library-card,
+.control-center-desktop[data-control-center-tab="library"] .control-center-settings-cloud,
+.control-center-desktop[data-control-center-tab="library"] .settings-hidden-list-target,
+.control-center-desktop[data-control-center-tab="cloud-sharing"] .settings-age-groups-card,
+.control-center-desktop[data-control-center-tab="cloud-sharing"] .settings-hidden-list-target,
+.control-center-desktop[data-control-center-tab="hidden-titles"] .settings-age-groups-card,
+.control-center-desktop[data-control-center-tab="hidden-titles"] .control-center-settings-cloud,
+.control-center-desktop[data-control-center-tab="server-storage"] .control-center-settings-legacy-poster-width,
+.control-center-desktop[data-control-center-tab="server-storage"] .control-center-settings-totp {
+  display: none;
+}
+
+.control-center-desktop[data-control-center-tab="library"] .control-center-settings-cloud,
+.control-center-desktop[data-control-center-tab="library"] .settings-hidden-list-target {
+  display: none;
+}
+
+.control-center-desktop[data-control-center-tab="library"] .settings-age-groups-card {
+  display: block;
+}
+
+.control-center-desktop[data-control-center-tab="library"] .settings-grid--preferences {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.control-center-desktop[data-control-center-tab="library"] .settings-preferences-poster-card,
+.control-center-desktop[data-control-center-tab="library"] .settings-preferences-floating-card,
+.control-center-desktop[data-control-center-tab="library"] .control-center-settings-poster-width,
+.control-center-desktop[data-control-center-tab="library"] .settings-grid--preferences > .settings-grid__column:nth-child(2) {
+  display: none;
+}
+
+.control-center-desktop[data-control-center-tab="appearance"] .settings-grid--compact-columns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.control-center-desktop[data-control-center-area="admin"] .admin-section-stack {
+  gap: 16px;
+}
+
+.control-center-desktop[data-control-center-area="admin"] .admin-section-grid,
+.control-center-desktop[data-control-center-area="admin"] .admin-activity-grid {
+  gap: 16px;
+}
+
+.control-center-desktop[data-control-center-tab="overview"] .control-center-admin-library-status,
+.control-center-desktop[data-control-center-tab="overview"] .control-center-admin-url-reminder,
+.control-center-desktop[data-control-center-tab="overview"] .control-center-admin-url-prefix,
+.control-center-desktop[data-control-center-tab="overview"] .admin-totp-summary-card,
+.control-center-desktop[data-control-center-tab="overview"] .control-center-admin-manage-user-totp,
+.control-center-desktop[data-control-center-tab="overview"] .control-center-admin-password-help,
+.control-center-desktop[data-control-center-tab="security"] .control-center-admin-library-status,
+.control-center-desktop[data-control-center-tab="security"] .exposure-summary-card,
+.control-center-desktop[data-control-center-tab="security"] .control-center-admin-password-help,
+.control-center-desktop[data-control-center-tab="users-invites"] .control-center-admin-library-status,
+.control-center-desktop[data-control-center-tab="users-invites"] .exposure-summary-card,
+.control-center-desktop[data-control-center-tab="users-invites"] .control-center-admin-url-reminder,
+.control-center-desktop[data-control-center-tab="users-invites"] .control-center-admin-url-prefix,
+.control-center-desktop[data-control-center-tab="users-invites"] .admin-totp-summary-card,
+.control-center-desktop[data-control-center-tab="users-invites"] .control-center-admin-manage-user-totp {
+  display: none;
+}
+
+.control-center-desktop .control-center-overview-summary,
+.control-center-desktop .control-center-admin-kpis {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.control-center-desktop .control-center-score-card,
+.control-center-desktop .control-center-admin-kpi {
+  border: 1px solid var(--cc-line);
+  border-radius: 14px;
+  background: var(--cc-surface);
+}
+
+.control-center-desktop .control-center-score-card {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  padding: 22px;
+}
+
+.control-center-desktop .control-center-score-card__eyebrow,
+.control-center-desktop .control-center-score-card__label,
+.control-center-desktop .control-center-admin-kpi span {
+  color: var(--cc-muted);
+  font-family: "Elvern Control Space Grotesk", sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.control-center-desktop .control-center-score-card strong {
+  font-family: "Elvern Control Sora", sans-serif;
+  font-size: 56px;
+  line-height: 1;
+}
+
+.control-center-desktop .control-center-score-card__label {
+  align-self: center;
+  color: var(--cc-accent);
+}
+
+.control-center-desktop .control-center-score-card p {
+  grid-column: 1 / -1;
+  margin: 12px 0 0;
+  color: var(--cc-muted);
+  font-size: 11px;
+}
+
+.control-center-desktop .control-center-admin-kpis {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.control-center-desktop .control-center-admin-kpi {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  animation: merIn 260ms ease both;
+}
+
+.control-center-desktop .control-center-admin-kpi strong {
+  font-family: "Elvern Control Sora", sans-serif;
+  font-size: 25px;
+}
+
+.control-center-desktop .control-center-live-audit {
+  display: flex;
+  min-height: 42px;
+  overflow: hidden;
+  border: 1px solid var(--cc-line);
+  border-radius: 11px;
+  background: var(--cc-surface);
+}
+
+.control-center-desktop .control-center-live-audit__label {
+  z-index: 1;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 14px;
+  border-right: 1px solid var(--cc-line);
+  color: var(--cc-accent);
+  background: var(--cc-surface);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.control-center-desktop .control-center-live-audit__label i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: controlCenterStatusPulse 1.6s ease-in-out infinite;
+}
+
+.control-center-desktop .control-center-live-audit__track {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  overflow: hidden;
+  color: var(--cc-muted);
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.control-center-desktop .control-center-live-audit__track span {
+  flex: 0 0 auto;
+  padding-inline: 30px;
+  animation: controlCenterTicker 42s linear infinite;
+}
+
+.control-center-desktop .control-center-age-choices {
+  display: grid;
+  gap: 9px;
+  padding: 0;
+  border: 0;
+}
+
+.control-center-desktop .control-center-age-choices legend {
+  margin-bottom: 7px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.control-center-desktop .control-center-age-choices__quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.control-center-desktop .control-center-age-choices__quick [aria-pressed="true"] {
+  color: var(--cc-surface);
+  background: var(--cc-accent);
+}
+
+.control-center-desktop .control-center-user-expander {
+  justify-self: start;
+  margin: 4px 0 0 54px;
+}
+
+.control-center-desktop .control-center-secure-modal {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.control-center-desktop .control-center-recovery-codes {
+  max-height: 260px;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--cc-line);
+  border-radius: 9px;
+  color: var(--cc-ink);
+  background: var(--cc-surface-muted);
+  font: 600 13px/1.65 ui-monospace, monospace;
+  white-space: pre-wrap;
+}
+
+@keyframes controlCenterTicker {
+  to { transform: translateX(-100%); }
+}
+
+@keyframes controlCenterStatusPulse {
+  50% { opacity: 0.35; }
+}
+
+@keyframes controlCenterRailIn {
+  from { opacity: 0; transform: translateX(18px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes controlCenterSpin {
+  to { transform: rotate(360deg); }
+}
+
+.control-center-desktop__theme-button {
+  position: fixed;
+  z-index: 20;
+  right: 20px;
+  bottom: 20px;
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid var(--cc-line);
+  border-radius: 50%;
+  color: var(--cc-ink);
+  background: var(--cc-surface);
+  box-shadow: var(--cc-shadow);
+  cursor: pointer;
+  transition: transform 160ms ease, background-color 220ms ease, border-color 220ms ease;
+}
+
+.control-center-desktop__theme-button:hover,
+.control-center-desktop__theme-button:focus-visible {
+  transform: translateY(-2px);
+}
+
+.control-center-desktop :focus-visible {
+  outline: 2px solid var(--cc-accent);
+  outline-offset: 2px;
+}
+
+.control-center-desktop--switching .control-center-desktop__workspace {
+  animation: controlCenterFlip 550ms cubic-bezier(0.3, 1, 0.34, 1) both;
+}
+
+@keyframes merIn {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes controlCenterFlip {
+  0% { opacity: 1; transform: perspective(1200px) rotateY(0deg); }
+  49% { opacity: 0.25; transform: perspective(1200px) rotateY(82deg); }
+  51% { opacity: 0.25; transform: perspective(1200px) rotateY(-82deg); }
+  100% { opacity: 1; transform: perspective(1200px) rotateY(0deg); }
+}
+
+@media (max-width: 1120px) {
+  .control-center-desktop__sidebar {
+    width: 224px;
+    flex-basis: 224px;
+  }
+
+  .control-center-desktop__header,
+  .control-center-desktop__content {
+    width: min(820px, calc(100% - 40px));
+  }
+
+  .control-center-desktop .control-center-admin-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .control-center-desktop .control-center-status-rail {
+    position: fixed;
+    inset: 0 0 0 auto;
+    width: min(340px, calc(100vw - 48px));
+    min-height: 100dvh;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .control-center-desktop *,
+  .control-center-desktop *::before,
+  .control-center-desktop *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 80ms !important;
+  }
+
+  .control-center-desktop--switching .control-center-desktop__workspace {
+    animation-name: merIn;
+  }
+}

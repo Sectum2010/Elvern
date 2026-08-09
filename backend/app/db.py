@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 BROWSER_SESSION_HMAC_MIGRATION_NAME = "browser_session_hmac1_v1"
 ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME = "account_short_token_hmac1_v1"
 FLOATING_POSITION_RETIREMENT_MIGRATION = "floating_controls_position_retired_v1"
+POSTER_WIDTH_CONTROL_CENTER_MIGRATION = "poster_width_control_center_1400_v1"
+GOOGLE_OAUTH_SECRET_ENCRYPTION_MIGRATION = "google_oauth_secret_fernet1_v1"
 TOKEN_HASH_MIGRATION_REVOKE_REASON = "token_hash_migration"
 TOKEN_HASH_PREFIX = "hmac1$"
 TOTP_PENDING_SECRET_TTL_SECONDS = 10 * 60
@@ -1218,6 +1220,8 @@ def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings
     _ensure_column(connection, "invite_codes", "assigned_age", "INTEGER NOT NULL DEFAULT 18")
     _run_account_short_token_hmac_migration(connection)
     _run_floating_position_retirement_migration(connection)
+    _run_poster_width_control_center_migration(connection)
+    _run_google_oauth_secret_encryption_migration(connection, settings=settings)
 
     _backfill_playback_watch_history(connection)
     _backfill_session_activity_columns(connection)
@@ -1248,6 +1252,54 @@ def _run_floating_position_retirement_migration(connection: sqlite3.Connection) 
     )
     if cursor.rowcount:
         logger.info("Removed %s retired floating position setting(s)", cursor.rowcount)
+
+
+def _run_poster_width_control_center_migration(connection: sqlite3.Connection) -> None:
+    if connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE name = ? LIMIT 1",
+        (POSTER_WIDTH_CONTROL_CENTER_MIGRATION,),
+    ).fetchone() is not None:
+        return
+    now = utcnow_iso()
+    connection.execute(
+        """
+        INSERT INTO user_settings (user_id, key, value, updated_at)
+        SELECT id, 'poster_card_display_max_width', '1400', ? FROM users
+        WHERE 1
+        ON CONFLICT(user_id, key) DO UPDATE SET
+            value = '1400',
+            updated_at = excluded.updated_at
+        """,
+        (now,),
+    )
+    connection.execute(
+        "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+        (POSTER_WIDTH_CONTROL_CENTER_MIGRATION, now),
+    )
+
+
+def _run_google_oauth_secret_encryption_migration(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+) -> None:
+    if connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE name = ? LIMIT 1",
+        (GOOGLE_OAUTH_SECRET_ENCRYPTION_MIGRATION,),
+    ).fetchone() is not None:
+        return
+    row = connection.execute(
+        "SELECT value FROM app_settings WHERE key = 'google_oauth_client_secret' LIMIT 1"
+    ).fetchone()
+    if row and row["value"] and not str(row["value"]).startswith(CIPHERTEXT_PREFIX):
+        connection.execute(
+            "UPDATE app_settings SET value = ?, updated_at = ? WHERE key = 'google_oauth_client_secret'",
+            (encrypt_at_rest(str(row["value"]), settings), utcnow_iso()),
+        )
+    connection.execute(
+        "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+        (GOOGLE_OAUTH_SECRET_ENCRYPTION_MIGRATION, utcnow_iso()),
+    )
 
 
 def _harden_totp_at_rest_values(connection: sqlite3.Connection, *, settings: Settings) -> None:

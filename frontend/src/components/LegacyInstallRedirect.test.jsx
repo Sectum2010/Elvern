@@ -44,13 +44,13 @@ describe("LegacyInstallRedirect", () => {
           <Routes>
             <Route path="/install" element={<LegacyInstallRedirect />} />
             <Route path="/desktop" element={<LegacyInstallRedirect />} />
-            <Route path="/settings" element={<LocationProbe />} />
+            <Route path="/settings/*" element={<LocationProbe />} />
           </Routes>
         </MemoryRouter>,
       );
 
       await waitFor(() => expect(screen.getByText(
-        "/settings?source=bookmark&section=install#help|REPLACE|preserved",
+        "/settings/playback-apps?source=bookmark#help|REPLACE|preserved",
       )).toBeInTheDocument());
     },
   );
@@ -89,13 +89,13 @@ describe("LegacyInstallRedirect", () => {
               </ProtectedRoute>
             )}
           />
-          <Route path="/settings" element={<LocationProbe />} />
+          <Route path="/settings/*" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>,
     );
 
     await waitFor(() => expect(screen.getByText(
-      "/settings?from=old&section=install#help|REPLACE|",
+      "/settings/playback-apps?from=old#help|REPLACE|",
     )).toBeInTheDocument());
     expect(screen.queryByText("Shell marker")).not.toBeInTheDocument();
   });

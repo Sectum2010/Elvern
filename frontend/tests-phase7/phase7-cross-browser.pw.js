@@ -12,6 +12,22 @@ const LOCAL_FAULT_ORIGINS = new Set();
 const NETWORK_GUARD_STATE = new WeakMap();
 
 
+async function captureControlCenterVisual(page, testInfo, name) {
+  const screenshot = await page.screenshot({ fullPage: true });
+  await testInfo.attach(name, {
+    body: screenshot,
+    contentType: "image/png",
+  });
+  const outputDirectory = process.env.ELVERN_CONTROL_CENTER_SCREENSHOT_DIR;
+  if (outputDirectory) {
+    await page.screenshot({
+      fullPage: true,
+      path: `${outputDirectory}/${testInfo.project.name}-${name}.png`,
+    });
+  }
+}
+
+
 async function proxyControl(path, payload) {
   const controlOrigin = process.env.ELVERN_PHASE7_NETWORK_PROXY_CONTROL;
   const controlToken = process.env.ELVERN_PHASE7_NETWORK_PROXY_CONTROL_TOKEN;
@@ -759,13 +775,13 @@ test("@assistant-navigation admin uses the desktop Avatar menu and standalone qu
     window.localStorage.setItem("elvern:admin-active-section", "assistant");
   });
   await page.goto("admin?section=assistant");
-  await expect(page).toHaveURL(`${baseURL}admin?section=panel`);
+  await expect(page).toHaveURL(`${baseURL}admin/overview`);
   await expect.poll(() => page.evaluate(
-    () => window.localStorage.getItem("elvern:admin-active-section"),
-  )).toBe("panel");
-  const adminSections = page.getByLabel("Admin sections");
-  await expect(adminSections.getByRole("button", { name: "Admin Panel" })).toBeVisible();
-  await expect(adminSections.getByRole("button", { name: "Assistant" })).toHaveCount(0);
+    () => window.sessionStorage.getItem("elvern:control-center:admin-tab"),
+  )).toBe("overview");
+  const adminSections = page.getByRole("navigation", { name: "Admin sections" });
+  await expect(adminSections.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+  await expect(adminSections.getByRole("link", { name: "Assistant" })).toHaveCount(0);
   await expect(page.getByText("Open request queue")).toHaveCount(0);
 });
 
@@ -941,32 +957,20 @@ for (const deviceCase of [
 }
 
 
-test("@settings-navigation tabs use keyboard activation and canonical URLs", async ({
+test("@settings-navigation desktop sections use canonical nested routes and browser history", async ({
   page,
   baseURL,
 }) => {
   await page.goto("settings?section=preferences");
-  const preferences = page.getByRole("tab", { name: "Preferences" });
-  await expect(preferences).toHaveAttribute("aria-selected", "true");
-  await expect(preferences).toHaveAttribute("tabindex", "0");
-
-  await preferences.press("End");
-  await expect(page).toHaveURL(`${baseURL}settings?section=advanced`);
-  const advanced = page.getByRole("tab", { name: "Advanced" });
-  await expect(advanced).toBeFocused();
-  await expect(advanced).toHaveAttribute("aria-controls", "settings-panel-advanced");
-  await expect(page.locator("#settings-panel-advanced")).toHaveAttribute(
-    "aria-labelledby",
-    "settings-tab-advanced",
-  );
-
-  await advanced.press("Home");
-  await expect(page).toHaveURL(`${baseURL}settings?section=preferences`);
-  await expect(preferences).toBeFocused();
-  await preferences.press("ArrowLeft");
-  await expect(page).toHaveURL(`${baseURL}settings?section=advanced`);
-  await advanced.press("ArrowRight");
-  await expect(page).toHaveURL(`${baseURL}settings?section=preferences`);
+  await expect(page).toHaveURL(`${baseURL}settings/appearance`);
+  const navigation = page.getByRole("navigation", { name: "Settings sections" });
+  await expect(navigation.getByRole("link", { name: "Appearance" })).toHaveAttribute("aria-current", "page");
+  await navigation.getByRole("link", { name: "Hidden titles" }).click();
+  await expect(page).toHaveURL(`${baseURL}settings/hidden-titles`);
+  await page.goBack();
+  await expect(page).toHaveURL(`${baseURL}settings/appearance`);
+  await page.goForward();
+  await expect(page).toHaveURL(`${baseURL}settings/hidden-titles`);
 });
 
 
@@ -986,9 +990,8 @@ test("@settings-navigation delayed Libraries data survives the production Strict
   };
   await page.unrouteAll({ behavior: "wait" });
   await installFixture(page, [], state);
-  await page.goto("settings?section=libraries");
+  await page.goto("settings/hidden-titles");
   await expect(page.getByText("Hidden for me", { exact: true })).toBeVisible();
-  await page.getByText("Hidden for me", { exact: true }).click();
   await expect(page.getByText("Delayed Hidden Copy")).toBeVisible();
   expect(state.pathRequestCounts?.["/api/user-hidden-items"] || 0).toBeGreaterThanOrEqual(1);
 });
@@ -999,25 +1002,22 @@ test("@settings-navigation legacy Hidden hash and Install routes replace canonic
   baseURL,
 }) => {
   await page.goto("settings?other=1&section=hidden#hidden-list");
-  await expect(page).toHaveURL(`${baseURL}settings?other=1&section=libraries#hidden-list`);
+  await expect(page).toHaveURL(`${baseURL}settings/hidden-titles?other=1#hidden-list`);
   await expect(page.locator("#hidden-list")).toHaveCount(1);
 
   await page.goto("install?from=legacy#helper");
-  await expect(page).toHaveURL(`${baseURL}settings?from=legacy&section=install#helper`);
+  await expect(page).toHaveURL(`${baseURL}settings/playback-apps?from=legacy#helper`);
   await expect(page.getByText("Elvern VLC Opener", { exact: true })).toBeVisible();
 
   await page.goto("settings?other=1&section=display#poster");
-  await expect(page).toHaveURL(`${baseURL}settings?other=1&section=preferences#poster`);
-  await expect(page.getByRole("tab", { name: "Preferences" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  await expect(page).toHaveURL(`${baseURL}settings/appearance?other=1#poster`);
+  await expect(page.getByRole("link", { name: "Appearance" })).toHaveAttribute("aria-current", "page");
 
   await page.unrouteAll({ behavior: "wait" });
   await installFixture(page, [], { role: "admin" });
   await page.goto("settings?other=1&section=libraries#google-drive-oauth-setup");
   await expect(page).toHaveURL(
-    `${baseURL}settings?other=1&section=advanced#google-drive-oauth-setup`,
+    `${baseURL}settings/server-storage?other=1#google-drive-oauth-setup`,
   );
   await expect(page.getByText("Google Drive OAuth Setup", { exact: true })).toBeVisible();
 });
@@ -1026,42 +1026,41 @@ test("@settings-navigation legacy Hidden hash and Install routes replace canonic
 test("@settings-navigation Preferences and Advanced use the approved desktop information architecture", async ({
   page,
 }) => {
-  await page.goto("settings?section=preferences");
-  await expect(page.getByRole("tab")).toHaveText([
-    "Preferences",
-    "Libraries",
-    "Install",
-    "Advanced",
+  await page.goto("settings/appearance");
+  await expect(page.getByRole("navigation", { name: "Settings sections" }).getByRole("link")).toHaveText([
+    "Appearance",
+    "Library",
+    "Cloud & Sharing",
+    "Hidden titles",
+    "Playback & Apps",
   ]);
-  await expect(page.getByRole("tab", { name: "Display" })).toHaveCount(0);
   await expect(page.getByText("Your account", { exact: true })).toHaveCount(0);
 
   const posterHeading = page.getByRole("heading", { name: "Poster appearance" });
   const floatingHeading = page.getByRole("heading", { name: "Floating Island Position" });
-  const libraryHeading = page.getByRole("heading", { name: "Library" });
   const backgroundHeading = page.getByRole("heading", { name: "Background" });
   await expect(posterHeading).toBeVisible();
   await expect(floatingHeading).toBeVisible();
-  await expect(libraryHeading).toBeVisible();
   await expect(backgroundHeading).toBeVisible();
 
   const posterCard = posterHeading.locator("xpath=ancestor::section[1]");
-  const libraryCard = libraryHeading.locator("xpath=ancestor::section[1]");
   await expect(posterCard.getByRole("combobox")).toHaveCount(0);
-  await expect(libraryCard.getByRole("checkbox", { name: /Hide Recently added/ })).toBeVisible();
-  await expect(libraryCard.getByRole("checkbox", { name: /Hide duplicate copies/ })).toBeVisible();
   const posterBox = await posterHeading.boundingBox();
   const floatingBox = await floatingHeading.boundingBox();
-  const libraryBox = await libraryHeading.boundingBox();
   const backgroundBox = await backgroundHeading.boundingBox();
   expect(floatingBox.x).toBe(posterBox.x);
-  expect(libraryBox.x).toBe(posterBox.x);
   expect(backgroundBox.x).toBeGreaterThan(posterBox.x);
 
-  await page.getByRole("tab", { name: "Advanced" }).click();
-  await expect(page.getByRole("heading", { name: "Poster display quality" })).toBeVisible();
-  await expect(page.getByRole("combobox", { name: /Maximum poster width/ })).toBeVisible();
-  await expect(page.getByText("Google Drive OAuth Setup", { exact: true })).toHaveCount(0);
+  const libraryLink = page.getByRole("link", { name: "Library" });
+  await libraryLink.click();
+  await expect(page).toHaveURL(/\/settings\/library$/);
+  await expect(libraryLink).toHaveAttribute("aria-current", "page");
+  const libraryHeading = page.locator("#settings-panel-preferences")
+    .getByRole("heading", { name: "Library", exact: true });
+  await expect(libraryHeading).toBeVisible();
+  const libraryCard = libraryHeading.locator("xpath=ancestor::section[1]");
+  await expect(libraryCard.getByRole("checkbox", { name: /Hide Recently added/ })).toBeVisible();
+  await expect(libraryCard.getByRole("checkbox", { name: /Hide duplicate copies/ })).toBeVisible();
 });
 
 
@@ -1081,7 +1080,7 @@ for (const deviceCase of [
 ]) {
   test(`@settings-navigation ${deviceCase.label} Preferences hides position and preserves card order`, async ({
     page,
-  }) => {
+  }, testInfo) => {
     await page.addInitScript(({ platform, userAgent }) => {
       Object.defineProperty(navigator, "platform", { configurable: true, get: () => platform });
       Object.defineProperty(navigator, "userAgent", { configurable: true, get: () => userAgent });
@@ -1100,6 +1099,29 @@ for (const deviceCase of [
     expect(backgroundBox.y).toBeGreaterThan(posterBox.y);
     expect(libraryBox.y).toBeGreaterThan(backgroundBox.y);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await captureControlCenterVisual(page, testInfo, `${deviceCase.label}-settings`);
+  });
+
+  test(`@settings-navigation ${deviceCase.label} Admin keeps the legacy surface`, async ({
+    page,
+  }, testInfo) => {
+    await page.addInitScript(({ platform, userAgent }) => {
+      Object.defineProperty(navigator, "platform", { configurable: true, get: () => platform });
+      Object.defineProperty(navigator, "userAgent", { configurable: true, get: () => userAgent });
+      Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, get: () => 5 });
+    }, {
+      platform: deviceCase.platform,
+      userAgent: deviceCase.userAgent,
+    });
+    await page.setViewportSize(deviceCase.viewport);
+    await page.unrouteAll({ behavior: "wait" });
+    await installFixture(page, [], { role: "admin" });
+    await page.goto("admin/overview");
+
+    await expect(page.locator(".control-center-desktop")).toHaveCount(0);
+    await expect(page.getByLabel("Admin sections")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await captureControlCenterVisual(page, testInfo, `${deviceCase.label}-admin`);
   });
 }
 
@@ -1117,18 +1139,47 @@ test("@settings-navigation desktop Settings and Admin use their dock Back to Lib
   await page.getByRole("button", { name: /Account:/ }).click();
   await page.getByRole("menuitem", { name: "Settings" }).click();
   await expect(page.getByRole("navigation", { name: "Library controls" })).toHaveCount(0);
-  const settingsDock = page.getByLabel("Settings sections");
-  await expect(settingsDock.getByRole("link", { name: "Back to Library" })).toBeVisible();
-  await settingsDock.getByRole("link", { name: "Back to Library" }).click();
+  const settingsDock = page.locator(".control-center-desktop__sidebar");
+  await expect(settingsDock.getByRole("button", { name: "Library" })).toBeVisible();
+  await settingsDock.getByRole("button", { name: "Library" }).click();
   await expect(page).toHaveURL(libraryUrl);
 
   await page.getByRole("button", { name: /Account:/ }).click();
   await page.getByRole("menuitem", { name: "Admin Panel" }).click();
   await expect(page.getByRole("navigation", { name: "Library controls" })).toHaveCount(0);
-  const adminDock = page.getByLabel("Admin sections");
-  await expect(adminDock.getByRole("link", { name: "Back to Library" })).toBeVisible();
-  await adminDock.getByRole("link", { name: "Back to Library" }).click();
+  const adminDock = page.locator(".control-center-desktop__sidebar");
+  await expect(adminDock.getByRole("button", { name: "Library" })).toBeVisible();
+  await adminDock.getByRole("button", { name: "Library" }).click();
   await expect(page).toHaveURL(libraryUrl);
+});
+
+
+test("@settings-navigation admin Control Center shares state, status, and real routes", async ({
+  page,
+  baseURL,
+}, testInfo) => {
+  await page.unrouteAll({ behavior: "wait" });
+  const requests = [];
+  await installFixture(page, requests, { role: "admin" });
+  await page.goto("settings/appearance");
+  await expect(page.getByRole("heading", { name: "Appearance", exact: true })).toBeVisible();
+  await captureControlCenterVisual(page, testInfo, "desktop-settings");
+  await page.getByRole("button", { name: "System status" }).click();
+  await expect(page.getByRole("complementary", { name: "System status" })).toBeVisible();
+  await expect(page.getByText("Titles indexed")).toBeVisible();
+  await expect(page.getByText("VLC on host")).toBeVisible();
+  await captureControlCenterVisual(page, testInfo, "desktop-system-status");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("complementary", { name: "System status" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: /Switch to Admin Panel/ }).click();
+  await expect(page).toHaveURL(`${baseURL}admin/overview`);
+  await expect(page.getByText("92", { exact: true })).toBeVisible();
+  await expect(page.getByText("PRIVATE", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+  await captureControlCenterVisual(page, testInfo, "desktop-admin");
+  await page.goBack();
+  await expect(page).toHaveURL(`${baseURL}settings/appearance`);
 });
 
 
@@ -1707,7 +1758,7 @@ test("third-party VLC stays in a separate tab while the Elvern route remains hea
   );
 
   await page.goto("install");
-  const originalUrl = `${baseURL}settings?section=install`;
+  const originalUrl = `${baseURL}settings/playback-apps`;
   await expect(page).toHaveURL(originalUrl);
   const vlcLink = page.getByRole("link", { name: "Download VLC" });
   await expect(vlcLink).toHaveAttribute("target", "_blank");
@@ -2118,12 +2169,14 @@ test("malformed 401 body clears protected Library cache without exposing parser 
   });
   await page.getByRole("button", { name: /Account:/ }).click();
   await page.getByRole("menuitem", { name: "Settings" }).click();
-  await page.getByRole("tab", { name: "Install" }).click();
-  await expect(page).toHaveURL(/\/settings\?section=install$/);
+  await page.getByRole("link", { name: "Playback & Apps" }).click();
+  await expect(page).toHaveURL(/\/settings\/playback-apps$/);
   await expect(page.getByText("Elvern received an unreadable response from the server.")).toBeVisible();
   await expect(page.getByText(/SyntaxError|Unexpected end|NetworkError when attempting/i)).toHaveCount(0);
 
-  await page.getByRole("link", { name: "Library" }).click();
+  await page.locator(".control-center-desktop__sidebar")
+    .getByRole("button", { name: "Library" })
+    .click();
   await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
   expect(state.pathRequestCounts?.["/api/library/v2/summary"] || 0).toBe(2);
 });
@@ -2144,7 +2197,9 @@ test("a poster error before recovery retries exactly once", async ({ page }) => 
       detail: { classification: "transport", requestClass: "library" },
     }));
   });
-  await page.getByRole("link", { name: "Library" }).click();
+  await page.locator(".control-center-desktop__sidebar")
+    .getByRole("button", { name: "Library" })
+    .click();
   await expect(page).toHaveURL(/\/library\?category=movies$/);
   await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
   await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);
@@ -2179,7 +2234,9 @@ test("a recovered attach-time poster incident still retries a late onError once"
       detail: { classification: "transport", requestClass: "library" },
     }));
   });
-  await page.getByRole("link", { name: "Library" }).click();
+  await page.locator(".control-center-desktop__sidebar")
+    .getByRole("button", { name: "Library" })
+    .click();
   await expect(page).toHaveURL(/\/library\?category=movies$/);
   await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);
 
@@ -2217,7 +2274,9 @@ test("consecutive poster incidents each retain their own single recovery retry",
       detail: { classification: "transport", requestClass: "library" },
     }));
   });
-  await page.getByRole("link", { name: "Library" }).click();
+  await page.locator(".control-center-desktop__sidebar")
+    .getByRole("button", { name: "Library" })
+    .click();
   await expect(page).toHaveURL(/\/library\?category=movies$/);
   await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);
 
@@ -2267,7 +2326,9 @@ test("poster recovery stays authoritative while no MediaCard subscriber exists",
   await page.evaluate(() => window.dispatchEvent(new Event("online")));
   await expect.poll(() => page.evaluate(() => window.__posterRecoveryEvents)).toBe(1);
 
-  await page.getByRole("link", { name: "Library" }).click();
+  await page.locator(".control-center-desktop__sidebar")
+    .getByRole("button", { name: "Library" })
+    .click();
   await expect(page).toHaveURL(/\/library\?category=movies$/);
   await expect(page.locator(".media-card__poster-image--loaded").first()).toBeVisible();
   expect(state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);
@@ -2293,7 +2354,9 @@ test("an active poster incident remains recoverable beyond the former 30 second 
       detail: { classification: "transport", requestClass: "library" },
     }));
   });
-  await page.getByRole("link", { name: "Library" }).click();
+  await page.locator(".control-center-desktop__sidebar")
+    .getByRole("button", { name: "Library" })
+    .click();
   await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);
   await page.waitForTimeout(30_100);
 

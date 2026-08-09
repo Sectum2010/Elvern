@@ -9,6 +9,7 @@ import {
 import { clearProtectedQueryCache } from "../lib/queryClient";
 import { prepareAuthViewportExit } from "../lib/authViewportNavigation.js";
 import { PAGE_RESUME_EVENT } from "../lib/pageResume.js";
+import { clearControlCenterSessionState } from "../lib/controlCenterSession.js";
 
 
 const AuthContext = createContext(null);
@@ -42,8 +43,13 @@ export function AuthProvider({ children }) {
   const userRef = useRef(null);
 
   const applyAuthenticatedUser = useCallback((nextUser) => {
-    if (getProtectedCacheIdentity(userRef.current) !== getProtectedCacheIdentity(nextUser)) {
+    const previousIdentity = getProtectedCacheIdentity(userRef.current);
+    const nextIdentity = getProtectedCacheIdentity(nextUser);
+    if (previousIdentity !== nextIdentity) {
       clearProtectedQueryCache();
+      if (previousIdentity) {
+        clearControlCenterSessionState();
+      }
     }
     userRef.current = nextUser;
     setUser(nextUser);
@@ -146,9 +152,11 @@ export function AuthProvider({ children }) {
       throw error;
     }
     if (payload?.session === "pending_totp") {
+      clearControlCenterSessionState();
       return payload;
     }
     if (payload?.user) {
+      clearControlCenterSessionState();
       await prepareAuthViewportExit();
       applyAuthenticatedUser(payload.user);
       setLoading(false);
@@ -159,6 +167,7 @@ export function AuthProvider({ children }) {
 
   async function logout() {
     clearProtectedQueryCache();
+    clearControlCenterSessionState();
     try {
       await apiRequest("/api/auth/logout", { method: "POST" });
     } finally {

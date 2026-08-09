@@ -87,6 +87,11 @@
   --app-page-background: var(--app-background-solid-color, #151a21);
 }
 
+:root[data-elvern-background-custom-model="hue_v2"][data-elvern-background-mode="gradient"],
+:root[data-elvern-background-custom-model="hue_v2"][data-elvern-background-mode="solid"] {
+  --app-page-background: var(--app-background-custom);
+}
+
 :root[data-elvern-background-mode="photo"] {
   --app-page-background:
     linear-gradient(135deg, rgba(5, 9, 14, 0.48), rgba(7, 10, 18, 0.66)),

@@ -4,6 +4,7 @@ import { AuthProvider } from "./auth/AuthContext";
 import { ProviderAuthProvider } from "./auth/ProviderAuthContext";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { CanonicalSpaRouteGuard } from "./components/CanonicalSpaRouteGuard";
+import { ControlCenterRouteGate } from "./components/ControlCenterRouteGate";
 import { LegacyInstallRedirect } from "./components/LegacyInstallRedirect";
 import { LegacyLibrarySourceRedirect } from "./components/LegacyLibrarySourceRedirect";
 import { ShellLayout } from "./components/ShellLayout";
@@ -82,14 +83,6 @@ export default function App() {
               />
               <Route path="/attachments/:attachmentId/view" element={<AssistantAttachmentViewerPage />} />
               <Route
-                path="/admin"
-                element={(
-                  <ProtectedRoute requireAdmin>
-                    <AdminPage />
-                  </ProtectedRoute>
-                )}
-              />
-              <Route
                 path="/admin/assistant"
                 element={(
                   <ProtectedRoute requireAdmin>
@@ -105,7 +98,17 @@ export default function App() {
                   </ProtectedRoute>
                 )}
               />
-              <Route path="/settings" element={<SettingsPage />} />
+              <Route element={<ControlCenterRouteGate />}>
+                <Route path="/settings/*" element={<SettingsPage />} />
+                <Route
+                  path="/admin/*"
+                  element={(
+                    <ProtectedRoute requireAdmin>
+                      <AdminPage />
+                    </ProtectedRoute>
+                  )}
+                />
+              </Route>
             </Route>
             <Route path="*" element={<Navigate to="/library" replace />} />
           </Routes>
