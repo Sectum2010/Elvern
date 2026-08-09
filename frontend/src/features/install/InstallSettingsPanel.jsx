@@ -471,7 +471,7 @@ function verifyMobileAppInstall({ openUrl, statusKey, onStatusChange }) {
   }, 2200);
 }
 
-export function InstallSettingsPanel() {
+export function InstallSettingsPanel({ presentation = "default" }) {
   const platform = useMemo(() => detectInstallPlatform(), []);
   const iosStoreRegion = useMemo(() => detectIosStoreRegion(), []);
   const isDesktop = isDesktopPlatform(platform);
@@ -928,6 +928,59 @@ export function InstallSettingsPanel() {
     : platform === "linux"
       ? "Download for Linux"
       : "Download for Windows";
+
+  if (presentation === "meridian") {
+    return (
+      <article className="meridian-card meridian-helper-card">
+        <div className="meridian-helper-card__header">
+          <span aria-hidden="true" className="meridian-icon-tile meridian-icon-tile--play">▶</span>
+          <span className="meridian-row-copy">
+            <strong>Elvern VLC Opener</strong>
+            <small>{requiredSection.description || "Open media in VLC through the verified Elvern desktop handoff."}</small>
+          </span>
+          <span className="meridian-status-pill meridian-status-pill--neutral">Detected platform: {platformLabel(platform)}</span>
+          <span className={`meridian-status-pill meridian-status-pill--${status?.vlc_detection_state === "installed" ? "success" : "neutral"}`}>
+            {loading ? "Checking" : helperStatusCopy(status)}
+          </span>
+        </div>
+        {error ? <p className="meridian-inline-error" role="alert">{error}</p> : null}
+        {reconnecting ? <p className="meridian-muted-copy">Reconnecting…</p> : null}
+        <div className="meridian-actions">
+          <button
+            className="meridian-pill-button meridian-pill-button--primary"
+            disabled={desktopVerifyPending}
+            onClick={handleDesktopVlcVerify}
+            type="button"
+          >
+            {desktopVerifyPending ? "Checking…" : desktopHelperTestButtonLabel(platform, status)}
+          </button>
+          {requiredSection.recommendedRelease && status?.helper_required !== false ? (
+            <a className="meridian-pill-button" href={requiredSection.recommendedRelease.download_url}>{helperDownloadLabel}</a>
+          ) : desktopRecommendedApp ? (
+            <a className="meridian-pill-button" href={desktopRecommendedApp.primary_url} rel="noopener noreferrer" target="_blank">Download VLC</a>
+          ) : null}
+        </div>
+        <p className="meridian-helper-card__notes">
+          {desktopHelperTestCopy(platform, status)}<br />
+          {desktopVlc?.copy}<br />
+          Last checked: {formatLastChecked(status?.vlc_detection_checked_at)}
+        </p>
+        {desktopVerifyFeedback ? <p aria-live="polite" className="meridian-inline-feedback" role="status">{desktopVerifyFeedback}</p> : null}
+        <details className="meridian-details">
+          <summary>Details</summary>
+          <dl>
+            <div><dt>Package version</dt><dd>{requiredSection.recommendedRelease?.version || "Unavailable"}</dd></div>
+            <div><dt>Last seen helper version</dt><dd>{status?.last_seen_helper_version || "Unknown"}</dd></div>
+            <div><dt>Last callback</dt><dd>{formatLastChecked(status?.last_seen_helper_at)}</dd></div>
+            <div><dt>Reported architecture</dt><dd>{status?.last_seen_helper_arch || "Unknown"}</dd></div>
+            <div><dt>Package target</dt><dd>{requiredSection.recommendedRelease?.package_target || "Unavailable"}</dd></div>
+            <div><dt>Runtime</dt><dd>{status?.runtime_included ? "Included" : "Not reported"}</dd></div>
+            <div><dt>Device ID</dt><dd>{status?.device_id || deviceId || "Unknown"}</dd></div>
+          </dl>
+        </details>
+      </article>
+    );
+  }
 
   return (
     <section className="page-section">

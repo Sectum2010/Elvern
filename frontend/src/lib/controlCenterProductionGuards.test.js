@@ -55,4 +55,21 @@ describe("Control Center production guards", () => {
 
     expect(unscopedSelectors).toEqual([]);
   });
+
+  test("does not restyle retained legacy flows through broad desktop selectors", () => {
+    const css = readFileSync(controlCenterCssPath, "utf8");
+    for (const forbiddenSelector of [
+      ".control-center-desktop .settings-card",
+      ".control-center-desktop .admin-card",
+      ".control-center-desktop .ghost-button",
+      ".control-center-desktop .primary-button",
+      ".control-center-desktop input",
+      ".meridian-control-center .settings-card",
+      ".meridian-control-center .admin-card",
+      ".meridian-control-center .ghost-button",
+      ".meridian-control-center input",
+    ]) {
+      expect(css).not.toContain(forbiddenSelector);
+    }
+  });
 });

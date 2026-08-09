@@ -257,16 +257,19 @@ export function normalizeUserBackgroundSettings(payload = {}) {
     DEFAULT_BACKGROUND_SETTINGS.background_solid_color,
   );
   const customModel = payload.background_custom_model === "hue_v2" ? "hue_v2" : "legacy_v1";
+  const legacyGradientStartHue = Math.round(rgbToHsl(hexToRgb(gradientStart)).h * 360) % 360;
+  const legacyGradientEndHue = Math.round(rgbToHsl(hexToRgb(gradientEnd)).h * 360) % 360;
+  const legacySolidHue = Math.round(rgbToHsl(hexToRgb(solidColor)).h * 360) % 360;
   const gradientStartHue = normalizeHue(
-    payload.background_gradient_start_hue,
+    customModel === "legacy_v1" ? legacyGradientStartHue : payload.background_gradient_start_hue,
     DEFAULT_BACKGROUND_SETTINGS.background_gradient_start_hue,
   );
   const gradientEndHue = normalizeHue(
-    payload.background_gradient_end_hue,
+    customModel === "legacy_v1" ? legacyGradientEndHue : payload.background_gradient_end_hue,
     DEFAULT_BACKGROUND_SETTINGS.background_gradient_end_hue,
   );
   const solidHue = normalizeHue(
-    payload.background_solid_hue,
+    customModel === "legacy_v1" ? legacySolidHue : payload.background_solid_hue,
     DEFAULT_BACKGROUND_SETTINGS.background_solid_hue,
   );
   return {

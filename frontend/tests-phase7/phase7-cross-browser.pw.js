@@ -1,6 +1,8 @@
-import { expect, test } from "@playwright/test";
+import { chromium, expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { pathToFileURL } from "node:url";
 
 
 const PUBLIC_PROBES = [
@@ -10,6 +12,7 @@ const PUBLIC_PROBES = [
 ];
 const LOCAL_FAULT_ORIGINS = new Set();
 const NETWORK_GUARD_STATE = new WeakMap();
+const MERIDIAN_DEMO_PATH = process.env.ELVERN_MERIDIAN_DEMO_PATH || "";
 
 
 async function captureControlCenterVisual(page, testInfo, name) {
@@ -25,6 +28,62 @@ async function captureControlCenterVisual(page, testInfo, name) {
       path: `${outputDirectory}/${testInfo.project.name}-${name}.png`,
     });
   }
+}
+
+
+async function comparePngPixels(page, reference, actual) {
+  return page.evaluate(async ({ referenceBase64, actualBase64 }) => {
+    function loadImage(base64) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = reject;
+        image.src = `data:image/png;base64,${base64}`;
+      });
+    }
+    const [referenceImage, actualImage] = await Promise.all([
+      loadImage(referenceBase64),
+      loadImage(actualBase64),
+    ]);
+    if (referenceImage.width !== actualImage.width || referenceImage.height !== actualImage.height) {
+      return {
+        dimensions_match: false,
+        reference: [referenceImage.width, referenceImage.height],
+        actual: [actualImage.width, actualImage.height],
+      };
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = referenceImage.width;
+    canvas.height = referenceImage.height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.drawImage(referenceImage, 0, 0);
+    const referencePixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(actualImage, 0, 0);
+    const actualPixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let changedPixels = 0;
+    let channelDeltaTotal = 0;
+    for (let index = 0; index < referencePixels.length; index += 4) {
+      const delta = (
+        Math.abs(referencePixels[index] - actualPixels[index])
+        + Math.abs(referencePixels[index + 1] - actualPixels[index + 1])
+        + Math.abs(referencePixels[index + 2] - actualPixels[index + 2])
+      ) / 3;
+      channelDeltaTotal += delta;
+      if (delta > 32) changedPixels += 1;
+    }
+    const pixelCount = referencePixels.length / 4;
+    return {
+      dimensions_match: true,
+      width: canvas.width,
+      height: canvas.height,
+      changed_pixel_ratio: changedPixels / pixelCount,
+      mean_channel_delta: channelDeltaTotal / pixelCount,
+    };
+  }, {
+    referenceBase64: reference.toString("base64"),
+    actualBase64: actual.toString("base64"),
+  });
 }
 
 
@@ -991,7 +1050,7 @@ test("@settings-navigation delayed Libraries data survives the production Strict
   await page.unrouteAll({ behavior: "wait" });
   await installFixture(page, [], state);
   await page.goto("settings/hidden-titles");
-  await expect(page.getByText("Hidden for me", { exact: true })).toBeVisible();
+  await expect(page.getByRole("radio", { name: /For me \(1\)/ })).toBeVisible();
   await expect(page.getByText("Delayed Hidden Copy")).toBeVisible();
   expect(state.pathRequestCounts?.["/api/user-hidden-items"] || 0).toBeGreaterThanOrEqual(1);
 });
@@ -1036,8 +1095,8 @@ test("@settings-navigation Preferences and Advanced use the approved desktop inf
   ]);
   await expect(page.getByText("Your account", { exact: true })).toHaveCount(0);
 
-  const posterHeading = page.getByRole("heading", { name: "Poster appearance" });
-  const floatingHeading = page.getByRole("heading", { name: "Floating Island Position" });
+  const posterHeading = page.getByText("Poster appearance", { exact: true });
+  const floatingHeading = page.getByText("Floating island position", { exact: true });
   const backgroundHeading = page.getByRole("heading", { name: "Background" });
   await expect(posterHeading).toBeVisible();
   await expect(floatingHeading).toBeVisible();
@@ -1045,22 +1104,21 @@ test("@settings-navigation Preferences and Advanced use the approved desktop inf
 
   const posterCard = posterHeading.locator("xpath=ancestor::section[1]");
   await expect(posterCard.getByRole("combobox")).toHaveCount(0);
+  await expect(posterCard.getByRole("radio", { name: "1400 px" })).toBeVisible();
   const posterBox = await posterHeading.boundingBox();
   const floatingBox = await floatingHeading.boundingBox();
   const backgroundBox = await backgroundHeading.boundingBox();
   expect(floatingBox.x).toBe(posterBox.x);
-  expect(backgroundBox.x).toBeGreaterThan(posterBox.x);
+  expect(backgroundBox.x).toBe(posterBox.x);
 
   const libraryLink = page.getByRole("link", { name: "Library" });
   await libraryLink.click();
   await expect(page).toHaveURL(/\/settings\/library$/);
   await expect(libraryLink).toHaveAttribute("aria-current", "page");
-  const libraryHeading = page.locator("#settings-panel-preferences")
-    .getByRole("heading", { name: "Library", exact: true });
+  const libraryHeading = page.getByRole("heading", { name: "Library", exact: true });
   await expect(libraryHeading).toBeVisible();
-  const libraryCard = libraryHeading.locator("xpath=ancestor::section[1]");
-  await expect(libraryCard.getByRole("checkbox", { name: /Hide Recently added/ })).toBeVisible();
-  await expect(libraryCard.getByRole("checkbox", { name: /Hide duplicate copies/ })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /Hide.*Recently added/ })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /Hide duplicate copies/ })).toBeVisible();
 });
 
 
@@ -1139,7 +1197,7 @@ test("@settings-navigation desktop Settings and Admin use their dock Back to Lib
   await page.getByRole("button", { name: /Account:/ }).click();
   await page.getByRole("menuitem", { name: "Settings" }).click();
   await expect(page.getByRole("navigation", { name: "Library controls" })).toHaveCount(0);
-  const settingsDock = page.locator(".control-center-desktop__sidebar");
+  const settingsDock = page.locator(".meridian-sidebar");
   await expect(settingsDock.getByRole("button", { name: "Library" })).toBeVisible();
   await settingsDock.getByRole("button", { name: "Library" }).click();
   await expect(page).toHaveURL(libraryUrl);
@@ -1147,7 +1205,7 @@ test("@settings-navigation desktop Settings and Admin use their dock Back to Lib
   await page.getByRole("button", { name: /Account:/ }).click();
   await page.getByRole("menuitem", { name: "Admin Panel" }).click();
   await expect(page.getByRole("navigation", { name: "Library controls" })).toHaveCount(0);
-  const adminDock = page.locator(".control-center-desktop__sidebar");
+  const adminDock = page.locator(".meridian-sidebar");
   await expect(adminDock.getByRole("button", { name: "Library" })).toBeVisible();
   await adminDock.getByRole("button", { name: "Library" }).click();
   await expect(page).toHaveURL(libraryUrl);
@@ -1180,6 +1238,235 @@ test("@settings-navigation admin Control Center shares state, status, and real r
   await captureControlCenterVisual(page, testInfo, "desktop-admin");
   await page.goBack();
   await expect(page).toHaveURL(`${baseURL}settings/appearance`);
+});
+
+
+test("@settings-navigation @control-center-visual production Control Center stays within the Meridian demo pixel budget", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    !MERIDIAN_DEMO_PATH || !existsSync(MERIDIAN_DEMO_PATH),
+    "Set ELVERN_MERIDIAN_DEMO_PATH to the private local Meridian demo for parity validation.",
+  );
+
+  const demoBrowser = await chromium.launch({ headless: true });
+  let referenceScreenshot;
+  let referenceAdminScreenshot;
+  try {
+    const demoContext = await demoBrowser.newContext({ viewport: { width: 1400, height: 920 } });
+    const demoPage = await demoContext.newPage();
+    await demoPage.goto(pathToFileURL(MERIDIAN_DEMO_PATH).href, { waitUntil: "load" });
+    const demoRoot = demoPage.locator("[data-mer]");
+    await expect(demoRoot).toBeVisible({ timeout: 30_000 });
+    await demoPage.evaluate(() => document.fonts?.ready);
+    referenceScreenshot = await demoRoot.screenshot({ animations: "disabled" });
+    await demoPage.getByText("Admin Panel", { exact: true }).first().click();
+    await expect(demoPage.getByText("Overview", { exact: true }).first()).toBeVisible();
+    await demoPage.waitForTimeout(600);
+    referenceAdminScreenshot = await demoRoot.screenshot({ animations: "disabled" });
+    await demoContext.close();
+  } finally {
+    await demoBrowser.close();
+  }
+
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], { role: "admin" });
+  await page.setViewportSize({ width: 1360, height: 880 });
+  await page.goto("settings/appearance");
+  const productionRoot = page.locator(".meridian-control-center");
+  await expect(productionRoot).toBeVisible();
+  await page.evaluate(() => document.fonts?.ready);
+  const productionScreenshot = await productionRoot.screenshot({ animations: "disabled" });
+  const comparison = await comparePngPixels(page, referenceScreenshot, productionScreenshot);
+
+  await page.goto("admin/overview");
+  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+  const productionAdminScreenshot = await productionRoot.screenshot({ animations: "disabled" });
+  const adminComparison = await comparePngPixels(
+    page,
+    referenceAdminScreenshot,
+    productionAdminScreenshot,
+  );
+
+  await testInfo.attach("meridian-demo-appearance", {
+    body: referenceScreenshot,
+    contentType: "image/png",
+  });
+  await testInfo.attach("meridian-production-appearance", {
+    body: productionScreenshot,
+    contentType: "image/png",
+  });
+  await testInfo.attach("meridian-appearance-pixel-report", {
+    body: Buffer.from(JSON.stringify(comparison, null, 2)),
+    contentType: "application/json",
+  });
+  await testInfo.attach("meridian-demo-admin-overview", {
+    body: referenceAdminScreenshot,
+    contentType: "image/png",
+  });
+  await testInfo.attach("meridian-production-admin-overview", {
+    body: productionAdminScreenshot,
+    contentType: "image/png",
+  });
+  await testInfo.attach("meridian-admin-overview-pixel-report", {
+    body: Buffer.from(JSON.stringify(adminComparison, null, 2)),
+    contentType: "application/json",
+  });
+  const screenshotDirectory = process.env.ELVERN_CONTROL_CENTER_SCREENSHOT_DIR;
+  if (screenshotDirectory) {
+    mkdirSync(screenshotDirectory, { recursive: true });
+    writeFileSync(`${screenshotDirectory}/meridian-demo-appearance.png`, referenceScreenshot);
+    writeFileSync(`${screenshotDirectory}/meridian-production-appearance.png`, productionScreenshot);
+    writeFileSync(`${screenshotDirectory}/meridian-demo-admin-overview.png`, referenceAdminScreenshot);
+    writeFileSync(`${screenshotDirectory}/meridian-production-admin-overview.png`, productionAdminScreenshot);
+    writeFileSync(
+      `${screenshotDirectory}/meridian-appearance-pixel-report.json`,
+      `${JSON.stringify(comparison, null, 2)}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      `${screenshotDirectory}/meridian-admin-overview-pixel-report.json`,
+      `${JSON.stringify(adminComparison, null, 2)}\n`,
+      "utf8",
+    );
+  }
+
+  expect(comparison.dimensions_match).toBe(true);
+  expect(comparison.changed_pixel_ratio).toBeLessThan(0.28);
+  expect(comparison.mean_channel_delta).toBeLessThan(35);
+  expect(adminComparison.dimensions_match).toBe(true);
+  expect(adminComparison.changed_pixel_ratio).toBeLessThan(0.35);
+  expect(adminComparison.mean_channel_delta).toBeLessThan(45);
+});
+
+
+test("@settings-navigation @control-center-visual Meridian page and theme matrix stays within the demo pixel budget", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    !MERIDIAN_DEMO_PATH || !existsSync(MERIDIAN_DEMO_PATH),
+    "Set ELVERN_MERIDIAN_DEMO_PATH to the private local Meridian demo for parity validation.",
+  );
+
+  const demoBrowser = await chromium.launch({ headless: true });
+  const demoContext = await demoBrowser.newContext({ viewport: { width: 1400, height: 920 } });
+  const demoPage = await demoContext.newPage();
+  const reports = [];
+  try {
+    await demoPage.goto(pathToFileURL(MERIDIAN_DEMO_PATH).href, { waitUntil: "load" });
+    const demoRoot = demoPage.locator("[data-mer]");
+    const productionRoot = page.locator(".meridian-control-center");
+    await expect(demoRoot).toBeVisible({ timeout: 30_000 });
+
+    await page.unrouteAll({ behavior: "wait" });
+    await installFixture(page, [], { role: "admin" });
+    await page.setViewportSize({ width: 1360, height: 880 });
+
+    const clickDemoNav = async (label) => {
+      const clicked = await demoPage.getByText(label, { exact: true }).evaluateAll((nodes) => {
+        const target = nodes.find((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.left < 280 && rect.top >= 180 && rect.top < 520;
+        });
+        target?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        return Boolean(target);
+      });
+      expect(clicked, `Meridian demo navigation item ${label}`).toBe(true);
+      await demoPage.waitForTimeout(150);
+    };
+    const clickDemoControl = async (label) => {
+      const clicked = await demoPage.getByText(label, { exact: true }).evaluateAll((nodes) => {
+        const target = nodes.find((node) => node.getBoundingClientRect().left >= 280);
+        target?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        return Boolean(target);
+      });
+      expect(clicked, `Meridian demo control ${label}`).toBe(true);
+      await demoPage.waitForTimeout(150);
+    };
+    const compareState = async (name, { changed = 0.32, delta = 42 } = {}) => {
+      await Promise.all([
+        demoPage.evaluate(() => document.fonts?.ready),
+        page.evaluate(() => document.fonts?.ready),
+      ]);
+      const reference = await demoRoot.screenshot({ animations: "disabled" });
+      const actual = await productionRoot.screenshot({ animations: "disabled" });
+      const comparison = await comparePngPixels(page, reference, actual);
+      reports.push({ name, ...comparison });
+      expect(comparison.dimensions_match, `${name} dimensions`).toBe(true);
+      expect(comparison.changed_pixel_ratio, `${name} changed pixel ratio`).toBeLessThan(changed);
+      expect(comparison.mean_channel_delta, `${name} mean channel delta`).toBeLessThan(delta);
+    };
+
+    await page.goto("settings/appearance");
+    await expect(page.getByRole("heading", { name: "Appearance", exact: true })).toBeVisible();
+    await compareState("appearance-presets");
+    for (const mode of ["Gradient", "Solid", "Photo"]) {
+      await clickDemoControl(mode);
+      await page.getByRole("radio", { name: mode, exact: true }).click();
+      await compareState(`appearance-${mode.toLowerCase()}`);
+    }
+
+    for (const settingsCase of [
+      ["Library", "settings/library"],
+      ["Cloud & Sharing", "settings/cloud-sharing"],
+      ["Hidden titles", "settings/hidden-titles"],
+      ["Playback & Apps", "settings/playback-apps"],
+      ["Server & Storage", "settings/server-storage"],
+    ]) {
+      await clickDemoNav(settingsCase[0]);
+      await page.goto(settingsCase[1]);
+      await expect(page.getByRole("heading", { name: settingsCase[0], exact: true })).toBeVisible();
+      await compareState(`settings-${settingsCase[1].split("/").at(-1)}`, { changed: 0.38, delta: 50 });
+    }
+
+    await demoPage.getByText("Admin Panel", { exact: true }).first().click();
+    await demoPage.waitForTimeout(700);
+    for (const adminCase of [
+      ["Overview", "admin/overview"],
+      ["Users & Invites", "admin/users-invites"],
+      ["Security", "admin/security"],
+      ["Logs", "admin/logs"],
+    ]) {
+      if (adminCase[0] !== "Overview") await clickDemoNav(adminCase[0]);
+      await page.goto(adminCase[1]);
+      await expect(page.getByRole("heading", { name: adminCase[0], exact: true })).toBeVisible();
+      await compareState(`admin-${adminCase[1].split("/").at(-1)}`, { changed: 0.4, delta: 55 });
+    }
+
+    await clickDemoNav("Overview");
+    await page.goto("admin/overview");
+    await demoRoot.click({ position: { x: 1322, y: 38 } });
+    await page.getByRole("button", { name: "System status" }).click();
+    await expect(page.getByRole("complementary", { name: "System status" })).toBeVisible();
+    await demoPage.waitForTimeout(500);
+    await compareState("admin-system-status", { changed: 0.42, delta: 58 });
+
+    await page.getByRole("button", { name: /Theme:/ }).click();
+    await demoRoot.click({ position: { x: 1320, y: 840 } });
+    await demoPage.waitForTimeout(500);
+    await compareState("admin-mixed-theme", { changed: 0.42, delta: 58 });
+    await page.getByRole("button", { name: /Theme:/ }).click();
+    await demoRoot.click({ position: { x: 1320, y: 840 } });
+    await demoPage.waitForTimeout(500);
+    await compareState("admin-dark-theme", { changed: 0.42, delta: 58 });
+
+    await testInfo.attach("meridian-page-theme-matrix-report", {
+      body: Buffer.from(JSON.stringify(reports, null, 2)),
+      contentType: "application/json",
+    });
+    const screenshotDirectory = process.env.ELVERN_CONTROL_CENTER_SCREENSHOT_DIR;
+    if (screenshotDirectory) {
+      mkdirSync(screenshotDirectory, { recursive: true });
+      writeFileSync(
+        `${screenshotDirectory}/meridian-page-theme-matrix-report.json`,
+        `${JSON.stringify(reports, null, 2)}\n`,
+        "utf8",
+      );
+    }
+  } finally {
+    await demoContext.close();
+    await demoBrowser.close();
+  }
 });
 
 
@@ -2174,7 +2461,7 @@ test("malformed 401 body clears protected Library cache without exposing parser 
   await expect(page.getByText("Elvern received an unreadable response from the server.")).toBeVisible();
   await expect(page.getByText(/SyntaxError|Unexpected end|NetworkError when attempting/i)).toHaveCount(0);
 
-  await page.locator(".control-center-desktop__sidebar")
+  await page.locator(".meridian-sidebar")
     .getByRole("button", { name: "Library" })
     .click();
   await expect(page.getByText("Phase Seven Alpha", { exact: true })).toBeVisible();
@@ -2197,7 +2484,7 @@ test("a poster error before recovery retries exactly once", async ({ page }) => 
       detail: { classification: "transport", requestClass: "library" },
     }));
   });
-  await page.locator(".control-center-desktop__sidebar")
+  await page.locator(".meridian-sidebar")
     .getByRole("button", { name: "Library" })
     .click();
   await expect(page).toHaveURL(/\/library\?category=movies$/);
@@ -2234,7 +2521,7 @@ test("a recovered attach-time poster incident still retries a late onError once"
       detail: { classification: "transport", requestClass: "library" },
     }));
   });
-  await page.locator(".control-center-desktop__sidebar")
+  await page.locator(".meridian-sidebar")
     .getByRole("button", { name: "Library" })
     .click();
   await expect(page).toHaveURL(/\/library\?category=movies$/);
@@ -2274,7 +2561,7 @@ test("consecutive poster incidents each retain their own single recovery retry",
       detail: { classification: "transport", requestClass: "library" },
     }));
   });
-  await page.locator(".control-center-desktop__sidebar")
+  await page.locator(".meridian-sidebar")
     .getByRole("button", { name: "Library" })
     .click();
   await expect(page).toHaveURL(/\/library\?category=movies$/);
@@ -2326,7 +2613,7 @@ test("poster recovery stays authoritative while no MediaCard subscriber exists",
   await page.evaluate(() => window.dispatchEvent(new Event("online")));
   await expect.poll(() => page.evaluate(() => window.__posterRecoveryEvents)).toBe(1);
 
-  await page.locator(".control-center-desktop__sidebar")
+  await page.locator(".meridian-sidebar")
     .getByRole("button", { name: "Library" })
     .click();
   await expect(page).toHaveURL(/\/library\?category=movies$/);
@@ -2354,7 +2641,7 @@ test("an active poster incident remains recoverable beyond the former 30 second 
       detail: { classification: "transport", requestClass: "library" },
     }));
   });
-  await page.locator(".control-center-desktop__sidebar")
+  await page.locator(".meridian-sidebar")
     .getByRole("button", { name: "Library" })
     .click();
   await expect.poll(() => state.posterRequestCounts?.["/api/posters/1"] || 0).toBe(1);

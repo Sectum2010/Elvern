@@ -214,6 +214,22 @@ function FeedbackBanner({ banner }) {
 }
 
 
+function MeridianFeedbackToast({ banner }) {
+  if (!banner?.text) {
+    return null;
+  }
+  return (
+    <div
+      aria-live="polite"
+      className={banner.tone === "error" ? "meridian-toast meridian-toast--error" : "meridian-toast"}
+      role={banner.tone === "error" ? "alert" : "status"}
+    >
+      {banner.text}
+    </div>
+  );
+}
+
+
 function InlineFeedback({ feedback }) {
   if (!feedback?.text) {
     return null;
@@ -3076,7 +3092,7 @@ export function AdminPage() {
   }
 
   const usersCard = (
-    <section className="settings-card settings-card--wide">
+    <section className={`settings-card settings-card--wide${desktopControlCenter ? " meridian-card meridian-users-card" : ""}`}>
       <div className="settings-inline-header">
         <div>
           <h2>Users</h2>
@@ -3317,15 +3333,6 @@ export function AdminPage() {
                             </div>
                           );
 		        })}
-        {usersPayload.length > 6 ? (
-          <button
-            className="ghost-button ghost-button--inline control-center-user-expander"
-            onClick={() => setShowAllUsers((current) => !current)}
-            type="button"
-          >
-            {showAllUsers ? "Show fewer" : `Show all ${usersPayload.length}`}
-          </button>
-        ) : null}
                         {workerGroup.nativeItems
                           .filter((nativePlayback) => !dismissedPlaybackStatusKeys[buildPlaybackStatusDismissKey(nativePlayback)])
                           .map((nativePlayback) => {
@@ -3398,7 +3405,16 @@ export function AdminPage() {
               ) : null}
             </div>
           );
-	        })}
+		        })}
+        {usersPayload.length > 6 ? (
+          <button
+            className="ghost-button ghost-button--inline control-center-user-expander"
+            onClick={() => setShowAllUsers((current) => !current)}
+            type="button"
+          >
+            {showAllUsers ? "Show fewer" : `Show all ${usersPayload.length}`}
+          </button>
+        ) : null}
         <div
           className={[
             "admin-list__row admin-user-row admin-create-user-row",
@@ -4286,19 +4302,92 @@ export function AdminPage() {
     : exposureFinalizeProfileSource?.private_origin || "Not required";
   const exposureFinalizeVerificationStatus = exposureVerificationStatusLabel;
   const adminOverviewSummary = desktopControlCenter ? (
-    <div className="control-center-overview-summary">
-      <section className="control-center-score-card" aria-label="Security score 92, private">
-        <span className="control-center-score-card__eyebrow">Security score</span>
-        <strong>92</strong>
-        <span className="control-center-score-card__label">PRIVATE</span>
-        <p>Presentation score only. Operational controls below remain authoritative.</p>
-      </section>
-      <section className="settings-card control-center-overview-facts">
-        <h2>Current posture</h2>
-        <StatusRow label="Users" value={String(statusPayload?.total_users ?? usersPayload.length)} />
-        <StatusRow label="Active auth sessions" value={String(sessionsPayload.length)} />
-        <StatusRow label="Titles indexed" value={String(statusPayload?.total_media_items ?? 0)} />
-        <StatusRow label="Multi-user" value={statusPayload?.security?.multiuser_enabled ? "Enabled" : "Disabled"} />
+    <div className="meridian-overview">
+      <div className="meridian-overview__grid">
+        <section className="meridian-card meridian-security-gauge" aria-label="Security score 92, private">
+          <svg aria-hidden="true" className="meridian-security-gauge__dial" viewBox="0 0 150 150">
+            <circle className="meridian-security-gauge__track" cx="75" cy="75" r="64" />
+            <circle className="meridian-security-gauge__value" cx="75" cy="75" r="64" pathLength="100" />
+          </svg>
+          <span className="meridian-security-gauge__score">92</span>
+          <span className="meridian-security-gauge__mode">PRIVATE</span>
+          <span className="meridian-security-gauge__label">SECURITY POSTURE</span>
+        </section>
+        <section className="meridian-card meridian-posture-card">
+          <div className="meridian-posture-card__header">
+            <span>
+              <strong>Security posture</strong>
+              <small>Current server-authoritative exposure and account state.</small>
+            </span>
+            <button className="meridian-pill-button meridian-pill-button--primary" onClick={handleOpenExposurePlanner} type="button">
+              Manage Exposure Mode
+            </button>
+          </div>
+          <dl className="meridian-posture-grid">
+            {[
+              ["Exposure Mode", exposureModeStatus],
+              ["Finalized profile", exposureFinalizedProfileStatus],
+              ["Runtime posture", exposureRuntimePostureStatus],
+              ["Pending draft", exposurePendingDraft ? "Saved" : "None"],
+              ["Maintenance Mode", exposureMaintenanceLockStatus],
+              ["Prepared switch", exposurePreparedSwitchStatus],
+              ["Current request origin", formatExposureValue(exposureActive.current_request_origin)],
+              ["Multi-user", statusPayload.security.multiuser_enabled ? "Enabled" : "Disabled"],
+              ["Users", String(statusPayload.total_users)],
+              ["Active auth sessions", String(sessionsPayload.length)],
+              ["Session TTL", `${statusPayload.security.session_ttl_hours} hour(s)`],
+            ].map(([label, value]) => (
+              <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
+            ))}
+          </dl>
+        </section>
+      </div>
+      <section className="meridian-card meridian-maintenance-card">
+        <div className="meridian-maintenance-card__header">
+          <span className="meridian-row-copy">
+            <strong>Maintenance Mode</strong>
+            <small>Enabling logs out non-admin users and blocks non-admin logins without disabling accounts.</small>
+          </span>
+          <ExposureSegmentedControl
+            ariaLabel="Maintenance Mode target"
+            className="exposure-maintenance-switch exposure-maintenance-switch--summary"
+            onChange={setExposureMaintenanceTargetMode}
+            options={EXPOSURE_MAINTENANCE_SEGMENTS}
+            value={exposureMaintenanceTargetValue}
+          />
+        </div>
+        {!exposureMaintenanceTargetMatchesCurrent ? (
+          <div className="meridian-maintenance-card__confirmation">
+            {exposureMaintenanceTargetEnabled ? (
+              <label className="settings-toggle settings-toggle--compact">
+                <input
+                  checked={exposureMaintenanceForm.acknowledgement}
+                  onChange={(event) => setExposureMaintenanceForm((current) => ({ ...current, acknowledgement: event.target.checked }))}
+                  type="checkbox"
+                />
+                <span><strong>Maintenance Mode acknowledgement</strong><small>{EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT}</small></span>
+              </label>
+            ) : null}
+            <label className="settings-field">
+              <span><strong>Current admin password</strong><small>Required to enable or disable Maintenance Mode.</small></span>
+              <NonLoginSecretInput
+                autoComplete="new-password"
+                onChange={(event) => setExposureMaintenanceForm((current) => ({ ...current, currentAdminPassword: event.target.value }))}
+                placeholder="Current admin password"
+                value={exposureMaintenanceForm.currentAdminPassword}
+              />
+            </label>
+            <InlineFeedback feedback={exposureMaintenanceFeedback} />
+            <button
+              className="meridian-pill-button meridian-pill-button--primary"
+              disabled={exposurePending}
+              onClick={() => handleSetExposureMaintenanceLock(exposureMaintenanceTargetEnabled)}
+              type="button"
+            >
+              {exposureMaintenanceActionLabel}
+            </button>
+          </div>
+        ) : <p className="meridian-muted-copy">Already matches the current state.</p>}
       </section>
     </div>
   ) : null;
@@ -4310,7 +4399,7 @@ export function AdminPage() {
         ["Titles indexed", statusPayload?.total_media_items ?? 0],
         ["Live invites", liveInviteCount],
       ].map(([label, value]) => (
-        <section className="control-center-admin-kpi" key={label}>
+        <section className="control-center-admin-kpi meridian-admin-kpi" key={label}>
           <span>{label}</span>
           <strong>{String(value)}</strong>
         </section>
@@ -4318,7 +4407,9 @@ export function AdminPage() {
     </div>
   ) : null;
   const securitySection = statusPayload ? (
-    <div className="admin-section-grid">
+    <div className={`admin-section-grid${desktopControlCenter ? " meridian-admin-sections" : ""}`}>
+      {!desktopControlCenter ? (
+        <>
       <section className="settings-card control-center-admin-library-status">
         <h2>Library status</h2>
         <StatusRow label="Indexed movies" value={String(statusPayload.total_media_items)} />
@@ -4417,8 +4508,10 @@ export function AdminPage() {
             </div>
           </div>
 	      </section>
+        </>
+      ) : null}
 
-      {urlPrefixStatus?.rotation_reminder_due && !urlPrefixReminderDismissed ? (
+      {(!desktopControlCenter || desktopAdminTab === "security") && urlPrefixStatus?.rotation_reminder_due && !urlPrefixReminderDismissed ? (
         <section className="settings-card settings-card--wide control-center-admin-url-reminder">
           <div className="settings-inline-header">
             <div>
@@ -4450,7 +4543,7 @@ export function AdminPage() {
         </section>
       ) : null}
 
-      <section className="settings-card control-center-admin-url-prefix">
+      {!desktopControlCenter || desktopAdminTab === "security" ? <section className="settings-card meridian-card control-center-admin-url-prefix">
         <div className="settings-inline-header">
           <div>
             <h2>URL Prefix</h2>
@@ -4486,9 +4579,9 @@ export function AdminPage() {
             {urlPrefixPending ? "Refreshing..." : "Refresh status"}
           </RefreshSweepButton>
         </div>
-      </section>
+      </section> : null}
 
-      <section className="settings-card admin-totp-summary-card">
+      {!desktopControlCenter || desktopAdminTab === "security" ? <section className="settings-card meridian-card admin-totp-summary-card">
         <div className="settings-inline-header">
           <div>
             <h2>Two-factor authentication</h2>
@@ -4513,9 +4606,9 @@ export function AdminPage() {
             Disable 2FA
           </button>
         ) : null}
-      </section>
+      </section> : null}
 
-      <section className="settings-card settings-card--wide control-center-admin-manage-user-totp">
+      {!desktopControlCenter || desktopAdminTab === "security" ? <section className="settings-card meridian-card settings-card--wide control-center-admin-manage-user-totp">
         <div className="settings-inline-header">
           <div>
             <h2>Manage user 2FA</h2>
@@ -4557,9 +4650,9 @@ export function AdminPage() {
             );
           })}
         </div>
-      </section>
+      </section> : null}
 
-      <section className="settings-card settings-card--wide control-center-admin-password-help">
+      {!desktopControlCenter || desktopAdminTab === "users-invites" ? <section className="settings-card meridian-card settings-card--wide control-center-admin-password-help">
         <div className="settings-inline-header">
           <div>
             <h2>Password help requests</h2>
@@ -4647,14 +4740,14 @@ export function AdminPage() {
             <p className="page-subnote">No pending password help requests.</p>
           )}
         </div>
-      </section>
+      </section> : null}
 	    </div>
 	  ) : null;
 
   const logsSection = (
     <>
       {desktopControlCenter ? (
-        <div className="control-center-live-audit" aria-label="Live audit design ticker">
+        <div className="control-center-live-audit meridian-live-audit" aria-label="Live audit design ticker">
           <span className="control-center-live-audit__label"><i aria-hidden="true" />LIVE AUDIT</span>
           <div className="control-center-live-audit__track">
             <span>{ADMIN_LIVE_AUDIT_TICKER_LINE}</span>
@@ -4663,7 +4756,7 @@ export function AdminPage() {
         </div>
       ) : null}
       <div className="admin-activity-grid">
-      <section className="settings-card admin-activity-card">
+      <section className={`settings-card admin-activity-card${desktopControlCenter ? " meridian-card" : ""}`}>
         <div className="settings-inline-header">
           <div>
             <h2>Active sessions</h2>
@@ -4711,7 +4804,7 @@ export function AdminPage() {
         </div>
       </section>
 
-      <section className="settings-card admin-activity-card">
+      <section className={`settings-card admin-activity-card${desktopControlCenter ? " meridian-card" : ""}`}>
         <div className="settings-inline-header">
           <div>
             <h2>Recent audit log</h2>
@@ -5094,7 +5187,7 @@ export function AdminPage() {
     <div
       aria-labelledby="admin-exposure-planner-modal-title"
       aria-modal="true"
-      className="browser-resume-modal exposure-planner-modal-shell"
+      className={`browser-resume-modal exposure-planner-modal-shell${desktopControlCenter ? " meridian-exposure-modal-shell" : ""}`}
       role="dialog"
     >
       <button
@@ -5104,7 +5197,7 @@ export function AdminPage() {
         onClick={handleCloseExposurePlanner}
         type="button"
       />
-      <div className="browser-resume-modal__card detail-info-modal__card exposure-planner-modal">
+      <div className={`browser-resume-modal__card detail-info-modal__card exposure-planner-modal${desktopControlCenter ? " meridian-exposure-modal" : ""}`}>
         <div className="detail-info-modal__header exposure-planner-modal__header">
           <div className="detail-info-modal__copy">
             <p className="detail-info-modal__eyebrow">Security</p>
@@ -5860,7 +5953,10 @@ export function AdminPage() {
   ) : null;
 
   return (
-    <section className="page-section">
+    <section
+      className={`page-section${desktopControlCenter ? " meridian-admin-view" : ""}`}
+      data-admin-tab={desktopAdminTab || undefined}
+    >
       {!desktopControlCenter ? (
         <div className="admin-nav-card" aria-label="Admin sections">
         <div className="admin-nav-card__actions">
@@ -5901,10 +5997,12 @@ export function AdminPage() {
         </div>
       ) : null}
 
-      <FeedbackBanner banner={banner} />
+      {desktopControlCenter
+        ? <MeridianFeedbackToast banner={banner} />
+        : <FeedbackBanner banner={banner} />}
 
       {statusPayload ? (
-        <div className="admin-section-stack">
+        <div className={`admin-section-stack${desktopControlCenter ? " meridian-admin-stack" : ""}`}>
 		          {desktopAdminTab === "overview" ? adminOverviewSummary : null}
 		          {desktopAdminTab === "security" ? adminSecurityKpis : null}
 		              {activeSection === "panel" ? (
@@ -5919,10 +6017,10 @@ export function AdminPage() {
 
           {activeSection === "logs" ? logsSection : null}
 
-          {activeSection === "recovery" ? recoverySection : null}
+          {activeSection === "recovery" ? <div className={desktopControlCenter ? "meridian-legacy-flow" : undefined}>{recoverySection}</div> : null}
 
 	          {activeSection === "panel" ? (
-	              <section className="settings-card">
+		              <section className={`settings-card${desktopControlCenter ? " meridian-card meridian-invite-card" : ""}`}>
 	                <div className="settings-inline-header admin-invite-code-header">
 	                  <button
 	                    aria-controls="admin-invite-code-list"
@@ -5932,7 +6030,7 @@ export function AdminPage() {
 	                    type="button"
 	                  >
 	                    <div>
-	                      <h2>Generate invite code</h2>
+		                      <h2>{desktopControlCenter ? "Inviting New Users" : "Generate invite code"}</h2>
 	                      <p className="page-subnote">
 	                        Codes expire after 30 minutes and can be used once. Invite codes are shown only when generated.
 	                        Copy them now; they cannot be revealed again after this page is closed.

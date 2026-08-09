@@ -31,6 +31,7 @@ import {
 import {
   buildBackgroundPreviewStyle,
   deriveGradientEndFromSingleColor,
+  normalizeUserBackgroundSettings,
 } from "../lib/userBackground";
 import { SettingsPage } from "./SettingsPage";
 import { queryClient } from "../lib/queryClient";
@@ -70,6 +71,8 @@ vi.mock("../lib/platformDetection", async (importOriginal) => ({
 
 const pagesDir = path.dirname(fileURLToPath(import.meta.url));
 const settingsPagePath = path.resolve(pagesDir, "SettingsPage.jsx");
+const meridianSettingsPath = path.resolve(pagesDir, "../components/meridian/MeridianSettingsView.jsx");
+const controlCenterStylesPath = path.resolve(pagesDir, "../controlCenter.css");
 const shellLayoutPath = path.resolve(pagesDir, "../components/ShellLayout.jsx");
 const stylesPath = path.resolve(pagesDir, "../styles.css");
 
@@ -1822,47 +1825,19 @@ describe("SettingsPage Hidden scope transfer", () => {
 });
 
 describe("SettingsPage Preferences controls", () => {
-  test("Preferences keeps the approved desktop columns and narrow-screen card order", () => {
+  test("desktop Appearance uses the Meridian single-card controls instead of the obsolete columns", () => {
     const source = fs.readFileSync(settingsPagePath, "utf8");
-    const styles = fs.readFileSync(stylesPath, "utf8");
+    const meridianSource = fs.readFileSync(meridianSettingsPath, "utf8");
+    const controlCenterStyles = fs.readFileSync(controlCenterStylesPath, "utf8");
 
-    expect(source).toContain("settings-card settings-display-card");
-    expect(source).toContain("settings-card settings-background-card");
-    expect(source).toContain("settings-card settings-display-interface-card");
-    expect(source).toContain("settings-card settings-display-library-card");
-    expect(source).toContain("settings-grid--compact-columns");
-    expect(source).toContain("settings-grid--preferences");
-    expect(source).toContain("settings-grid__column");
-    expect(source).toContain("{ value: \"clean\", label: \"Clean\" }");
-    expect(source).not.toContain("settings-card settings-card--wide settings-display-card");
-    expect(source).not.toContain("Customize your Elvern background for this account.");
-    expect(source).not.toContain("Gradient start color");
-    expect(source).not.toContain("Remove photo");
-    expect(styles).not.toContain(".settings-grid--display");
-    expect(styles).toMatch(/\.settings-grid__column\s*\{[^}]*align-content:\s*start;/s);
-    expect(styles).toMatch(/\.settings-preferences-poster-card\s*\{[^}]*order:\s*1;/s);
-    expect(styles).toMatch(/\.settings-preferences-background-card\s*\{[^}]*order:\s*2;/s);
-    expect(styles).toMatch(/\.settings-preferences-library-card\s*\{[^}]*order:\s*4;/s);
-    expect(styles).not.toMatch(/\.settings-background-card\s*\{[^}]*grid-row:\s*1 \/ span 2;/s);
-    expect(styles).not.toMatch(/\.settings-display-interface-card\s*\{[^}]*grid-row:\s*2;/s);
-    expect(styles).toMatch(/data-elvern-background-preset="basic"\]\s*\{[^}]*#202832/s);
-    expect(styles).toMatch(/\.settings-background-color-picker\s*\{[^}]*min-block-size:\s*18rem;/s);
-    expect(styles).toContain("settings-segmented-control__indicator");
-    expect(styles).toContain("settings-segmented-control__button--current");
-    expect(source).toContain("settings-segmented-control--dragging");
-    expect(source).toContain("const isCurrentLabel = dragging ? isPreviewSelected : isSelected;");
-    expect(source).toContain("isCurrentLabel ? \"settings-segmented-control__button--current\" : \"\"");
-    expect(styles).toMatch(/\.settings-segmented-control--dragging \.settings-segmented-control__button:not\(\.settings-segmented-control__button--active\)\s*\{[^}]*color:\s*var\(--text-muted\);/s);
-    expect(styles).toContain("app-shell--poster-card-clean");
-    expect(styles).toMatch(/\.app-shell--poster-card-clean[\s\S]*\.media-card__body[\s\S]*display:\s*none;/);
-    expect(styles).toMatch(/\.detail-grid,\s*\.settings-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
-    expect(styles).toMatch(/@media \(max-width:\s*640px\) and \(orientation:\s*portrait\)[\s\S]*--app-shell-inline-gutter:\s*clamp\(1\.15rem,\s*5\.5vw,\s*1\.55rem\);/);
-    expect(styles).toMatch(/\.settings-card \.settings-segmented-control\s*\{[^}]*inline-size:\s*100%;/s);
-    expect(styles).toMatch(/\.settings-card \.settings-segmented-control__button\s*\{[^}]*min-width:\s*0;/s);
-    expect(styles).toMatch(/\.detail-info-modal__body\s*\{[^}]*scrollbar-width:\s*none;/s);
-    expect(styles).toContain(".detail-info-modal__body::-webkit-scrollbar");
-    expect(styles).not.toMatch(/\.detail-info-modal__body\s*\{[^}]*scrollbar-color:/s);
-    expect(styles).toMatch(/\.settings-directory-picker__body\s*\{[^}]*scrollbar-width:\s*none;/s);
+    expect(source).toContain("<MeridianSettingsView model={meridianModel} tab={desktopSettingsTab} />");
+    expect(meridianSource).toContain("Poster appearance");
+    expect(meridianSource).toContain("Floating island position");
+    expect(meridianSource).toContain("Maximum poster width");
+    expect(meridianSource).toContain("model.posterWidthOptions.map");
+    expect(meridianSource).not.toContain("<select");
+    expect(controlCenterStyles).toMatch(/\.meridian-preset-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3,/s);
+    expect(controlCenterStyles).toMatch(/\.meridian-card-header,\s*\.meridian-setting-row,[^}]*\{[^}]*display:\s*flex;/s);
   });
 
   test("floating island drag is gated off for phone and tablet while settings segments stay draggable", () => {
@@ -1892,7 +1867,7 @@ describe("SettingsPage Preferences controls", () => {
     const panel = screen.getByRole("tabpanel", { name: "Preferences" });
     const libraryHeading = within(panel).getByRole("heading", { name: "Library" });
     const libraryCard = libraryHeading.closest("section");
-    expect(within(libraryCard).getByRole("checkbox", { name: /Hide Recently added/ }))
+    expect(within(libraryCard).getByRole("checkbox", { name: /Hide.*Recently added/ }))
       .toBeInTheDocument();
     expect(within(libraryCard).getByRole("checkbox", { name: /Hide duplicate copies/ }))
       .toBeInTheDocument();
@@ -1910,7 +1885,7 @@ describe("SettingsPage Preferences controls", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByRole("checkbox", { name: /Hide Recently added/ }))
+    expect(await screen.findByRole("checkbox", { name: /Hide.*Recently added/ }))
       .toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: /Hide duplicate copies/ }))
       .toBeInTheDocument();
@@ -2277,8 +2252,9 @@ describe("SettingsPage Preferences controls", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Reset" }));
-    expect(startHue).toHaveValue("210");
-    expect(endHue).toHaveValue("330");
+    const normalizedLegacySettings = normalizeUserBackgroundSettings(defaultSettings);
+    expect(startHue).toHaveValue(String(normalizedLegacySettings.background_gradient_start_hue));
+    expect(endHue).toHaveValue(String(normalizedLegacySettings.background_gradient_end_hue));
     expect(apiRequest).not.toHaveBeenCalledWith(
       "/api/user-settings",
       expect.objectContaining({ method: "PATCH" }),

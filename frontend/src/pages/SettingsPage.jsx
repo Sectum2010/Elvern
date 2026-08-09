@@ -28,6 +28,7 @@ import { NonLoginSecretInput } from "../components/NonLoginSecretInput";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { DesktopBackToLibraryButton } from "../components/DesktopBackToLibraryButton";
 import { InstallSettingsPanel } from "../features/install/InstallSettingsPanel";
+import { MeridianSettingsView } from "../components/meridian/MeridianSettingsView.jsx";
 import {
   CONNECTIVITY_RECOVERED_EVENT,
   getConnectivityIncidentRecoveryGeneration,
@@ -2568,12 +2569,13 @@ export function SettingsPage() {
   }
 
   function resetDesktopHueDraft() {
+    const savedBackground = normalizeUserBackgroundSettings(settings);
     setBackgroundDraft((current) => ({
       ...current,
       background_custom_model: "hue_v2",
-      background_gradient_start_hue: 210,
-      background_gradient_end_hue: 330,
-      background_solid_hue: 210,
+      background_gradient_start_hue: savedBackground.background_gradient_start_hue,
+      background_gradient_end_hue: savedBackground.background_gradient_end_hue,
+      background_solid_hue: savedBackground.background_solid_hue,
     }));
     setBackgroundError("");
   }
@@ -3549,6 +3551,173 @@ export function SettingsPage() {
       ?.querySelector(`#settings-tab-${nextSection.key}`);
     nextTab?.focus();
     activateSettingsPanel(nextSection.key);
+  }
+
+  if (showDesktopControlCenter) {
+    const meridianModel = {
+      error: userSettingsLoadError || error,
+      message,
+      resourceErrors: activeResourceErrors,
+      appearance: {
+        backgroundDraft,
+        backgroundError,
+        backgroundSaving,
+        loading,
+        saving,
+        settings: {
+          ...settings,
+          poster_card_appearance: normalizePosterCardAppearance(settings.poster_card_appearance),
+          poster_card_display_max_width: normalizePosterDisplayWidth(settings.poster_card_display_max_width),
+        },
+        posterAppearanceOptions: POSTER_CARD_APPEARANCE_OPTIONS,
+        posterWidthOptions: POSTER_DISPLAY_WIDTH_OPTIONS,
+        onPosterAppearanceChange: handlePosterCardAppearanceChange,
+        onIslandPositionChange: handleDesktopFloatingIslandPositionChange,
+        onPosterWidthChange: handlePosterDisplayWidthChange,
+        onBackgroundModeChange: handleBackgroundModeChange,
+        onBackgroundPresetSelect: handleBackgroundPresetSelect,
+        onBackgroundDraftChange(key, value) {
+          setBackgroundDraft((current) => ({
+            ...current,
+            background_custom_model: "hue_v2",
+            [key]: value,
+          }));
+          setBackgroundError("");
+        },
+        onHueSave: handleDesktopHueSave,
+        onHueReset: resetDesktopHueDraft,
+        onPhotoUpload: handleBackgroundPhotoUpload,
+        onBackgroundResetRequest: requestBackgroundReset,
+      },
+      library: {
+        settings,
+        saving,
+        isAdmin: user?.role === "admin",
+        ageGroupsLoading,
+        ageBuckets: restrictedAgeBuckets,
+        onDuplicateToggle: handleDuplicateToggle,
+        onRecentlyAddedToggle: handleRecentlyAddedToggle,
+        onRefreshAgeGroups: refreshAgeGroups,
+        onOpenAgeBucket: handleOpenAgeBucket,
+      },
+      cloud: {
+        isAdmin: user?.role === "admin",
+        username: user?.username,
+        cloudLibraries,
+        cloudBusyKey,
+        myLibraryDraft,
+        sharedLibraryDraft,
+        setMyLibraryDraft,
+        setSharedLibraryDraft,
+        onGoogleConnect: handleGoogleDriveConnect,
+        onAddCloudSource: handleAddCloudSource,
+        onMoveCloudSource: handleMoveCloudSource,
+        onSharedVisibilityToggle: handleSharedLibraryVisibilityToggle,
+        formatCloudTimestamp,
+      },
+      hidden: {
+        isAdmin: user?.role === "admin",
+        hiddenItems,
+        globalHiddenItems,
+        hiddenLoading,
+        hiddenExpanded: hiddenListsExpanded,
+        onHiddenExpandedChange(scope, expanded) {
+          setHiddenListsExpanded((current) => ({
+            ...current,
+            [scope === "personal" ? "personal" : "global"]: expanded,
+          }));
+        },
+        onShowAgain: handleShowAgain,
+        onShowForEveryone: handleShowForEveryone,
+        onHideForEveryone: handleHideUniversally,
+        onHideForMe: handleHideForMe,
+      },
+      playbackPanel: <InstallSettingsPanel presentation="meridian" />,
+      server: {
+        googleSetup: googleDriveSetup,
+        googleSetupDraft: googleDriveSetupDraft,
+        setGoogleSetupDraft: setGoogleDriveSetupDraft,
+        googleSetupSaving: googleDriveSetupSaving,
+        googleSetupBadgeLabel,
+        googleConnectionHealth: formatGoogleConnectionHealthLabel(cloudLibraries.google),
+        sourceHealth: visibleCloudSourceHealthLabel,
+        onGoogleSetupSave: handleGoogleDriveSetupSave,
+        onCopyGoogleCallback: handleCopyGoogleDriveCallback,
+        secretInput: (
+          <NonLoginSecretInput
+            disabled={googleDriveSetupSaving}
+            onChange={(event) => setGoogleDriveSetupDraft((current) => ({ ...current, client_secret: event.target.value }))}
+            placeholder={googleDriveSetup.client_secret_configured ? "Leave blank to keep the saved secret" : "Enter the Google OAuth client secret"}
+            purpose="google-oauth-client-secret"
+            value={googleDriveSetupDraft.client_secret}
+          />
+        ),
+        sharedReference: sharedMediaLibraryReference,
+        sharedReferenceInput: sharedMediaLibraryReferenceInput,
+        sharedReferenceSaving: sharedMediaLibraryReferenceSaving,
+        setSharedReferenceInput: setSharedMediaLibraryReferenceInput,
+        onSharedReferenceSave: handleSharedMediaLibraryReferenceSave,
+        posterReference,
+        posterReferenceInput,
+        posterReferenceSaving,
+        setPosterReferenceInput,
+        onPosterReferenceSave: handlePosterReferenceSave,
+        onOpenDirectoryPicker: handleOpenDirectoryPicker,
+      },
+    };
+    return (
+      <section className="meridian-page meridian-settings-page">
+        <DirectoryPickerModal
+          currentPath={directoryPicker.current_path}
+          directories={directoryPicker.directories}
+          error={directoryPicker.error}
+          loading={directoryPicker.loading}
+          onClose={handleCloseDirectoryPicker}
+          onNavigate={(path) => loadDirectoryPicker(directoryPicker.target, path)}
+          onUseCurrent={handleUseDirectoryPickerCurrent}
+          open={directoryPicker.open}
+          parentPath={directoryPicker.parent_path}
+          title={directoryPicker.title}
+        />
+        <BackgroundResetConfirmModal
+          onCancel={() => setBackgroundResetConfirmOpen(false)}
+          onConfirm={handleBackgroundReset}
+          open={backgroundResetConfirmOpen}
+          pending={backgroundSaving}
+        />
+        <AgeGroupManagerModal
+          ageRequirementValue={ageGroupManager.ageRequirementValue}
+          error={ageGroupManager.error}
+          group={ageGroupManager.group}
+          loading={ageGroupManager.loading}
+          onAgeRequirementChange={(value) => setAgeGroupManager((current) => ({ ...current, ageRequirementValue: value }))}
+          onClose={() => setAgeGroupManager((current) => ({ ...current, open: false }))}
+          onLinkItem={handleLinkAgeGroupItem}
+          onSaveAgeRequirement={handleSaveAgeGroupRequirement}
+          onSearch={handleSearchAgeGroupCandidates}
+          onSearchQueryChange={(value) => setAgeGroupManager((current) => ({ ...current, searchQuery: value }))}
+          onUnlinkItem={handleUnlinkAgeGroupItem}
+          open={ageGroupManager.open}
+          saving={ageGroupManager.saving}
+          searchQuery={ageGroupManager.searchQuery}
+          searchResults={ageGroupManager.searchResults}
+          searching={ageGroupManager.searching}
+        />
+        <AgeBucketManagerModal
+          bucket={activeAgeBucket}
+          error={ageBucketManager.error}
+          onClose={() => setAgeBucketManager((current) => ({ ...current, open: false, savingKey: "", error: "" }))}
+          onManageGroup={handleOpenAgeGroupFromBucket}
+          onRemoveRequirement={handleRemoveAgeRequirementFromBucket}
+          open={ageBucketManager.open}
+          savingKey={ageBucketManager.savingKey}
+        />
+        {totpStatus?.setup_available && !totpStatus?.enabled ? (
+          <div className="meridian-notice" role="status"><span>Two-factor setup is still required for this account.</span><button onClick={() => navigate("/setup/totp")} type="button">Set up 2FA</button></div>
+        ) : null}
+        <MeridianSettingsView model={meridianModel} tab={desktopSettingsTab} />
+      </section>
+    );
   }
 
   if (settingsSectionResolution.shouldReplace) {

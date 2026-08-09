@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from backend.app.db import ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME, get_connection, init_db, utcnow_iso
 from backend.app.security import TOKEN_HASH_PREFIX
-from backend.app.services import cloud_provider_auth_service
+from backend.app.services import cloud_provider_auth_service, cloud_source_sync_service
 from backend.app.services.app_settings_service import update_google_drive_setup
 
 
@@ -120,3 +120,123 @@ def test_account_short_token_hmac_migration_deletes_legacy_plaintext_google_oaut
         ).fetchone()[0]
     assert state_count == 0
     assert marker_count == 1
+
+
+def test_google_reconnect_rebinds_only_the_owners_orphaned_google_sources(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    _configure_google_drive(initialized_settings)
+    now = utcnow_iso()
+    with get_connection(initialized_settings) as connection:
+        other_user_id = int(connection.execute(
+            """
+            INSERT INTO users (username, password_hash, role, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, 1, ?, ?)
+            """,
+            ("other-user", "test-hash", "standard_user", now, now),
+        ).lastrowid)
+        source_rows = [
+            (1, "google_drive", "folder", "owner-google", "Owner Google", "stale owner error"),
+            (other_user_id, "google_drive", "folder", "other-google", "Other Google", "stale other error"),
+            (1, "local", "folder", "owner-local", "Owner Local", "stale local error"),
+        ]
+        connection.executemany(
+            """
+            INSERT INTO library_sources (
+                owner_user_id, provider, google_drive_account_id, resource_type,
+                resource_id, display_name, is_shared, created_at, updated_at, last_error
+            ) VALUES (?, ?, NULL, ?, ?, ?, 0, ?, ?, ?)
+            """,
+            [(*row[:5], now, now, row[5]) for row in source_rows],
+        )
+        connection.commit()
+
+    response = cloud_provider_auth_service.build_google_drive_connect_response(
+        initialized_settings,
+        user_id=1,
+    )
+    state_payload = _state_from_authorization_url(response["authorization_url"])
+    monkeypatch.setattr(
+        cloud_provider_auth_service,
+        "exchange_google_oauth_code",
+        lambda *args, **kwargs: {
+            "access_token": "reconnected-access-token",
+            "refresh_token": "reconnected-refresh-token",
+            "expires_in": 3600,
+        },
+    )
+    monkeypatch.setattr(
+        cloud_provider_auth_service,
+        "fetch_google_userinfo",
+        lambda _access_token: {
+            "sub": "reconnected-google-account",
+            "email": "admin@example.com",
+            "name": "Admin",
+        },
+    )
+
+    cloud_provider_auth_service.complete_google_drive_connect(
+        initialized_settings,
+        state_token=state_payload,
+        code="oauth-code",
+    )
+
+    with get_connection(initialized_settings) as connection:
+        account_id = int(connection.execute(
+            "SELECT id FROM google_drive_accounts WHERE user_id = 1",
+        ).fetchone()["id"])
+        owner_source_id = int(connection.execute(
+            "SELECT id FROM library_sources WHERE resource_id = 'owner-google'",
+        ).fetchone()["id"])
+        sources = {
+            row["resource_id"]: dict(row)
+            for row in connection.execute(
+                """
+                SELECT resource_id, google_drive_account_id, last_error
+                FROM library_sources
+                WHERE resource_id IN ('owner-google', 'other-google', 'owner-local')
+                """
+            )
+        }
+
+    assert sources["owner-google"]["google_drive_account_id"] == account_id
+    assert sources["owner-google"]["last_error"] is None
+    assert sources["other-google"]["google_drive_account_id"] is None
+    assert sources["other-google"]["last_error"] == "stale other error"
+    assert sources["owner-local"]["google_drive_account_id"] is None
+    assert sources["owner-local"]["last_error"] == "stale local error"
+    assert cloud_provider_auth_service.get_google_drive_account_access_token_by_account_id(
+        initialized_settings,
+        google_account_id=account_id,
+    ) == "reconnected-access-token"
+
+    monkeypatch.setattr(
+        cloud_source_sync_service,
+        "fetch_drive_resource_metadata",
+        lambda *args, **kwargs: {
+            "resource_id": "owner-google",
+            "display_name": "Owner Google",
+        },
+    )
+    monkeypatch.setattr(
+        cloud_source_sync_service,
+        "list_drive_media_files",
+        lambda *args, **kwargs: [],
+    )
+    assert cloud_source_sync_service._sync_google_drive_library_source(
+        initialized_settings,
+        source_id=owner_source_id,
+        raise_on_error=True,
+        provider="google_drive",
+        get_access_token_by_account_id=(
+            cloud_provider_auth_service.get_google_drive_account_access_token_by_account_id
+        ),
+    ) == 0
+    with get_connection(initialized_settings) as connection:
+        synced_source = connection.execute(
+            "SELECT last_synced_at, last_error FROM library_sources WHERE id = ?",
+            (owner_source_id,),
+        ).fetchone()
+    assert synced_source["last_synced_at"] is not None
+    assert synced_source["last_error"] is None

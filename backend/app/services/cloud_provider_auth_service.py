@@ -261,6 +261,25 @@ def complete_google_drive_connect(
                 now,
             ),
         )
+        account_row = connection.execute(
+            "SELECT id FROM google_drive_accounts WHERE user_id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if account_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Google Drive account could not be saved.",
+            )
+        connection.execute(
+            """
+            UPDATE library_sources
+            SET google_drive_account_id = ?, last_error = NULL, updated_at = ?
+            WHERE owner_user_id = ?
+              AND provider = 'google_drive'
+              AND google_drive_account_id IS NULL
+            """,
+            (int(account_row["id"]), now, user_id),
+        )
         connection.execute("DELETE FROM google_oauth_states WHERE state_token = ?", (resolved_state_token_hash,))
         connection.commit()
         if upgraded_columns and existing_account_id is not None:

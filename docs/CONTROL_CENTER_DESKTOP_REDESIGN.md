@@ -180,14 +180,25 @@ collapse.
 ## Local fonts
 
 Archivo, Sora, and Space Grotesk are bundled as local WOFF2 assets with their OFL
-license files. They are scoped to `.control-center-desktop`. No Google Fonts or
+license files. They are scoped to `.meridian-control-center`. No Google Fonts or
 other font network request is used.
 
 ## Visual and device review
 
-The Chromium Settings navigation run can optionally save deterministic visual
-review captures by setting `ELVERN_CONTROL_CENTER_SCREENSHOT_DIR`. This round's
-ignored local captures are under `tmp/control-center-visual-review/` and cover:
+The Chromium Settings navigation run can optionally compare the production
+Control Center directly with the private local Meridian demo by setting
+`ELVERN_MERIDIAN_DEMO_PATH`. Setting
+`ELVERN_CONTROL_CENTER_SCREENSHOT_DIR` also saves deterministic review captures
+and machine-readable pixel reports under the ignored local
+`tmp/control-center-visual-review/` directory.
+
+The verified 1360 x 880 comparisons cover a 16-state matrix: all four Appearance
+modes, every Settings destination, Admin Overview/Users/Security/Logs, the open
+System Status rail, and Mixed/Dark themes. Every state matched dimensions.
+Changed-pixel ratios ranged from `0.02940` to `0.18396`; mean RGB-channel deltas
+ranged from `5.10` to `36.40`. The representative Appearance Presets result was
+`0.04244` / `7.50`, while Admin Overview was `0.05778` / `8.93`.
+Additional deterministic captures cover:
 
 - desktop Settings;
 - desktop Settings with the System Status rail;
@@ -218,12 +229,17 @@ Android device review is still required before release.
 
 ## Rollback
 
-Revert the phase commits in reverse order. The old Settings/Admin components and
-legacy route contracts remain in the source, so removing the desktop route gate
-and shared shell restores the old desktop surface without changing mobile. If
-backend rollback occurs after migrations, the additional user-setting keys are
-ignored by older code; encrypted OAuth secrets require the matching decrypting
-service before DB overrides can be used.
+This implementation is intentionally left as visible, unstaged working-tree
+changes until the owner reviews and commits it. Before a commit, rollback means
+reviewing and removing only this documented patch; no agent-created stash,
+temporary branch, hidden commit, or alternate worktree is involved. After an
+owner-created commit, use the repository's normal reviewed revert process for
+that commit. The old Settings/Admin components and legacy route contracts remain
+in the source, so removing the desktop route gate and shared shell restores the
+old desktop surface without changing mobile. If backend rollback occurs after
+migrations, the additional user-setting keys are ignored by older code;
+encrypted OAuth secrets require the matching decrypting service before DB
+overrides can be used.
 
 ## Validation
 

@@ -168,7 +168,7 @@ describe("AdminPage exposure mode planner guards", () => {
   test("security card uses Exposure Mode wording and keeps planner form out of the default layout", () => {
     const source = readAdminPage();
     const start = source.indexOf("<section className=\"settings-card exposure-summary-card\">");
-    const end = source.indexOf("{urlPrefixStatus?.rotation_reminder_due", start);
+    const end = source.indexOf("urlPrefixStatus?.rotation_reminder_due", start);
     expect(start).toBeGreaterThan(0);
     expect(end).toBeGreaterThan(start);
     const securityCardSource = source.slice(start, end);
@@ -393,13 +393,26 @@ describe("AdminPage desktop Control Center contracts", () => {
   test("keeps approved synthetic display isolated from real admin state", () => {
     const source = readAdminPage();
 
-    expect(source).toContain("<strong>92</strong>");
-    expect(source).toContain(">PRIVATE</span>");
+    expect(source).toContain('className="meridian-security-gauge__score">92</span>');
+    expect(source).toContain('className="meridian-security-gauge__mode">PRIVATE</span>');
+    expect(source).toContain('r="64"');
+    expect(source).toContain('className="meridian-security-gauge__value"');
     expect(source).toContain("ADMIN_LIVE_AUDIT_TICKER_LINE");
     expect(source).toContain("statusPayload?.total_users");
     expect(source).toContain("sessionsPayload.length");
     expect(source).toContain("statusPayload?.total_media_items");
     expect(source).toContain("liveInviteCount");
+  });
+
+  test("places the users expander once after all playback worker groups", () => {
+    const source = readAdminPage();
+    const expander = source.indexOf("control-center-user-expander");
+    const nativeWorkers = source.indexOf("workerGroup.nativeItems");
+    const createUser = source.indexOf("admin-create-user-row", nativeWorkers);
+
+    expect(source.match(/control-center-user-expander/g)).toHaveLength(1);
+    expect(expander).toBeGreaterThan(nativeWorkers);
+    expect(expander).toBeLessThan(createUser);
   });
 
   test("uses route-owned loading and single polling owners", () => {

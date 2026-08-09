@@ -1,4 +1,3 @@
-import { PanelRightClose, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAuth } from "../auth/AuthContext.jsx";
@@ -34,9 +33,10 @@ function countItems(payload) {
 
 function helperVlcValue(helper) {
   if (!helper) return "Unavailable";
+  if (helper.helper_required === false) return "Not required";
   if (helper.vlc_detection_state === "installed") return "Detected";
   if (helper.vlc_detection_state === "not_detected") return "Not found";
-  return helper.helper_required === false ? "Not detected" : "Not verified";
+  return "Not verified";
 }
 
 function googleDriveValue(cloudLibraries) {
@@ -60,7 +60,7 @@ export function buildSystemStatusRailRows({ payloads, platform, deviceId }) {
   const globalCount = countItems(payloads.globalHidden);
   const hiddenCount = personalCount === null || globalCount === null
     ? "Unavailable"
-    : `${personalCount} personal + ${globalCount} global`;
+    : String(personalCount + globalCount);
   const helper = payloads.desktopHelper;
   const helperLabel = platform === "linux" && helper?.same_host
     ? "VLC on host"
@@ -82,8 +82,6 @@ export function buildSystemStatusRailRows({ payloads, platform, deviceId }) {
     ["Island", payloads.userSettings
       ? (payloads.userSettings.desktop_floating_island_position === "bottom" ? "Bottom" : "Top")
       : "Unavailable"],
-    ["Device ID", deviceId || "Unavailable"],
-    ["Last callback", formatCallback(helper)],
   ];
 }
 
@@ -183,30 +181,44 @@ export function SystemStatusRail() {
   if (user?.role !== "admin" || !statusRailOpen) return null;
 
   const rows = buildSystemStatusRailRows({ payloads, platform, deviceId });
+  const resourceForLabel = {
+    "Google Drive": "cloudLibraries",
+    "OAuth setup": "googleDriveSetup",
+    "VLC on host": "desktopHelper",
+    "VLC on device": "desktopHelper",
+    Platform: "desktopHelper",
+    "Titles indexed": "system",
+    "Hidden titles": staleResources.includes("personalHidden") ? "personalHidden" : "globalHidden",
+    "Poster width": "userSettings",
+    Island: "userSettings",
+  };
   return (
     <aside aria-label="System status" className="control-center-status-rail">
       <header className="control-center-status-rail__header">
-        <div><span>System</span><h2>Status</h2></div>
-        <div className="control-center-status-rail__actions">
-          <button aria-label="Refresh system status" disabled={loading} onClick={() => void load({ force: true })} type="button">
-            <RefreshCw aria-hidden="true" className={loading ? "is-spinning" : ""} size={16} />
-          </button>
-          <button aria-label="Close system status" onClick={() => setStatusRailOpen(false)} type="button">
-            <X aria-hidden="true" size={18} />
-          </button>
-        </div>
+        <span>SYSTEM STATUS</span>
+        {loading ? <i aria-label="Refreshing system status" className="control-center-status-rail__loading" /> : null}
       </header>
-      {staleResources.length > 0 ? (
-        <p aria-live="polite" className="control-center-status-rail__stale">
-          Some values are stale. Last known values are preserved.
-        </p>
-      ) : null}
       <dl className="control-center-status-rail__list">
         {rows.map(([label, value]) => (
-          <div key={label}><dt>{label}</dt><dd title={value}>{value}</dd></div>
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd title={value}>
+              <i
+                aria-label={staleResources.includes(resourceForLabel[label]) ? "Last known value" : undefined}
+                className={staleResources.includes(resourceForLabel[label]) ? "is-stale" : ""}
+              />
+              {value}
+            </dd>
+          </div>
         ))}
       </dl>
-      <PanelRightClose aria-hidden="true" className="control-center-status-rail__watermark" size={72} />
+      <div className="control-center-status-rail__device">
+        <span>DEVICE</span>
+        <dl>
+          <div><dt>Device ID</dt><dd title={deviceId || "Unavailable"}>{deviceId || "Unavailable"}</dd></div>
+          <div><dt>Last callback</dt><dd>{formatCallback(payloads.desktopHelper)}</dd></div>
+        </dl>
+      </div>
     </aside>
   );
 }

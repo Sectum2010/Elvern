@@ -72,17 +72,16 @@ describe("SystemStatusRail", () => {
       },
     }));
     expect(rows["Titles indexed"]).toBe("0");
-    expect(rows["Hidden titles"]).toBe("0 personal + 1 global");
+    expect(rows["Hidden titles"]).toBe("1");
     expect(rows["Google Drive"]).toBe("Unavailable");
-    expect(rows["Last callback"]).toBe("Never");
   });
 
   test("loads only when an admin opens it and closes with Escape", async () => {
     render(<SystemStatusRail />);
     expect(await screen.findByText("92")).toBeInTheDocument();
-    expect(screen.getByText("1 personal + 2 global")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
     expect(screen.getByText("VLC on host")).toBeInTheDocument();
-    expect(screen.getByText("Not required")).toBeInTheDocument();
+    expect(screen.getAllByText("Not required")).toHaveLength(2);
     expect(apiRequest).toHaveBeenCalledTimes(7);
 
     fireEvent.keyDown(window, { key: "Escape" });
@@ -97,12 +96,12 @@ describe("SystemStatusRail", () => {
   });
 
   test("preserves last known values and labels failed refreshes stale", async () => {
-    const { rerender } = render(<SystemStatusRail />);
+    render(<SystemStatusRail />);
     expect(await screen.findByText("92")).toBeInTheDocument();
     apiRequest.mockRejectedValue(new Error("offline"));
-    fireEvent.click(screen.getByRole("button", { name: "Refresh system status" }));
-    expect(await screen.findByText(/Some values are stale/i)).toBeInTheDocument();
+    fireEvent(document, new Event("visibilitychange"));
+    expect((await screen.findAllByLabelText("Last known value")).length).toBeGreaterThan(0);
     expect(screen.getByText("92")).toBeInTheDocument();
-    rerender(<SystemStatusRail />);
+    expect(screen.queryByRole("button", { name: "Refresh system status" })).not.toBeInTheDocument();
   });
 });
