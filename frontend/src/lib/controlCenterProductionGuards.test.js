@@ -72,4 +72,40 @@ describe("Control Center production guards", () => {
       expect(css).not.toContain(forbiddenSelector);
     }
   });
+
+  test("keeps the approved Meridian light and mixed surface tokens", () => {
+    const css = readFileSync(controlCenterCssPath, "utf8");
+    for (const token of [
+      "--mer-root: #f3e9d8",
+      "--mer-sidebar: #fff4e6",
+      "--mer-card: #fff4e6",
+      "--mer-card-border: rgba(20, 22, 26, 0.08)",
+      "--mer-surface: #f1e8d7",
+      "--mer-hover: #f6ecdc",
+      "--mer-input: #fcf1e2",
+      "--mer-input-border: rgba(20, 22, 26, 0.15)",
+      "--mer-divider: rgba(20, 22, 26, 0.07)",
+    ]) {
+      expect(css).toContain(token);
+    }
+  });
+
+  test("keeps the approved visual geometry fixes scoped to Meridian controls", () => {
+    const css = readFileSync(controlCenterCssPath, "utf8");
+
+    expect(css).toContain(".meridian-connection-card .meridian-row-copy { flex: 1; }");
+    expect(css).toContain(".meridian-source-list__empty { margin: 0; padding-top: 12px; }");
+    expect(css).toContain(".meridian-cloud-libraries-card { min-height: 158px; }");
+    expect(css).toContain(".meridian-hidden-scope { align-self: flex-start; }");
+    expect(css).toContain(".meridian-age-refresh:hover { color: #fff; background: linear-gradient(135deg, #3d5ef5, #2440c9);");
+    expect(css).toContain(".meridian-security-gauge__dial-wrap {");
+    expect(css).not.toContain(".meridian-security-gauge__score {\n  top:");
+    expect(css).not.toContain(".meridian-security-gauge__mode {\n  top:");
+    expect(css).toContain(".meridian-create-user-card {\n  box-sizing: border-box;");
+    expect(css).toContain("min-height: 144px;\n  height: auto;");
+    expect(css).not.toContain("\n  height: 144px;");
+    expect(css).toContain(".meridian-invite-card .admin-invite-code-header > .primary-button {");
+    expect(css).toContain(".meridian-invite-card .admin-invite-code-list > .page-subnote:only-child {");
+    expect(css).toContain(".meridian-invite-card .admin-invite-code-list:has(> .page-subnote:only-child) {");
+  });
 });

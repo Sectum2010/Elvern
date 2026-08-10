@@ -9,6 +9,14 @@ export const ADMIN_LIVE_AUDIT_TICKER_LINE = [
   "caleb · auth.login · Jul 29, 12:06 PM",
 ].join("      ●      ");
 
+export const MERIDIAN_ENTRY_PROGRESS_INTERVAL_MS = 40;
+export const MERIDIAN_ENTRY_PROGRESS_STEP = 0.05;
+
+export function easeMeridianEntryProgress(progress) {
+  const boundedProgress = Math.max(0, Math.min(1, Number(progress) || 0));
+  return 1 - Math.pow(1 - boundedProgress, 3);
+}
+
 const DESKTOP_ADMIN_RESOURCES = Object.freeze({
   overview: ["system", "users", "sessions", "exposure"],
   "users-invites": ["system", "users", "invites", "passwordHelp"],

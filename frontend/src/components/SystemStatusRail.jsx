@@ -211,25 +211,32 @@ export function SystemStatusRail() {
             const stale = staleResources.includes(resourceForLabel[label]);
             return (
               <div key={label}>
-                <dt>{label}</dt>
-                <dd title={value}>
+                <dt>
                   <i
                     aria-label={stale ? "Last known value" : undefined}
                     className={stale ? "is-stale" : `is-${statusTone(label, value)}`}
                   />
-                  {value}
-                </dd>
+                  <span>{label}</span>
+                </dt>
+                <dd title={value}>{value}</dd>
               </div>
             );
           })}
         </dl>
-        <div className="control-center-status-rail__device">
+        <section className="control-center-status-rail__device">
           <span>DEVICE</span>
-          <dl>
-            <div><dt>Device ID</dt><dd title={deviceId || "Unavailable"}>{deviceId || "Unavailable"}</dd></div>
-            <div><dt>Last callback</dt><dd>{formatCallback(payloads.desktopHelper)}</dd></div>
-          </dl>
-        </div>
+          <div className="control-center-status-rail__device-card">
+            <dl>
+              <div>
+                <dt>Device ID</dt>
+                <dd className="control-center-status-rail__device-id" title={deviceId || "Unavailable"}>
+                  {deviceId || "Unavailable"}
+                </dd>
+              </div>
+              <div><dt>Last callback</dt><dd>{formatCallback(payloads.desktopHelper)}</dd></div>
+            </dl>
+          </div>
+        </section>
       </div>
     </aside>
   );

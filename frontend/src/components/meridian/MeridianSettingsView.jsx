@@ -17,9 +17,9 @@ function MeridianCard({ children, className = "", ...props }) {
   return <section className={`meridian-card${className ? ` ${className}` : ""}`} {...props}>{children}</section>;
 }
 
-function Segmented({ ariaLabel, disabled = false, onChange, options, value }) {
+function Segmented({ ariaLabel, className = "", disabled = false, onChange, options, value }) {
   return (
-    <div aria-label={ariaLabel} className="meridian-segmented" role="radiogroup">
+    <div aria-label={ariaLabel} className={`meridian-segmented${className ? ` ${className}` : ""}`} role="radiogroup">
       {options.map((option) => (
         <button
           aria-checked={option.value === value}
@@ -54,8 +54,8 @@ function PillButton({ children, className = "", ...props }) {
   return <button className={`meridian-pill-button${className ? ` ${className}` : ""}`} type="button" {...props}>{children}</button>;
 }
 
-function StatusPill({ children, tone = "neutral" }) {
-  return <span className={`meridian-status-pill meridian-status-pill--${tone}`}>{children}</span>;
+function StatusPill({ children, tone = "neutral", withDot = false }) {
+  return <span className={`meridian-status-pill meridian-status-pill--${tone}${withDot ? " meridian-status-pill--with-dot" : ""}`}>{children}</span>;
 }
 
 function SettingsFeedback({ error, message }) {
@@ -99,7 +99,7 @@ function getCloudConnectionPresentation(google) {
   }
   if (google.connected) {
     const accountLabel = google.account_name || google.account_email || "Google account";
-    return { label: "Connected", message: `Connected as ${accountLabel}.`, tone: "success" };
+    return { label: "Connected", message: `Connected as ${accountLabel} · cloud libraries ready to refresh.`, tone: "success" };
   }
   return { label: "Not connected", message: "Connect Google Drive to add cloud libraries.", tone: "neutral" };
 }
@@ -303,7 +303,7 @@ function CloudPanel({ model }) {
           <strong>Google Drive</strong>
           <small>{connection.message}</small>
         </span>
-        <StatusPill tone={connection.tone}>{connection.label}</StatusPill>
+        <StatusPill tone={connection.tone} withDot={connected}>{connection.label}</StatusPill>
         <PillButton disabled={operationPending} onClick={model.onGoogleConnect}>{operationPending ? "Connecting…" : connected || google.reconnect_required ? "Reconnect" : "Connect"}</PillButton>
       </MeridianCard>
       {model.authTransaction?.state === "account_mismatch" ? (
@@ -330,7 +330,7 @@ function CloudPanel({ model }) {
           <label className="meridian-cloud-form__id"><span>GOOGLE DRIVE RESOURCE ID</span><span><input disabled={!connected || operationPending} onChange={(event) => setDraft((current) => ({ ...current, resource_id: event.target.value }))} placeholder="Paste the folder or shared drive ID" value={draft.resource_id} /><button disabled={addDisabled} onClick={() => model.onAddCloudSource(destination)} type="button">Add</button></span></label>
         </div>
       </MeridianCard>
-      <MeridianCard>
+      <MeridianCard className="meridian-cloud-libraries-card">
         <strong>Cloud libraries</strong>
         <div className="meridian-source-list">
           {sources.map((source) => (
@@ -343,7 +343,7 @@ function CloudPanel({ model }) {
               {source.meridianScope === "Everyone" ? <PillButton disabled={model.cloudBusyKey === `shared-visibility-${source.id}`} onClick={() => model.onSharedVisibilityToggle(source)}>{model.cloudBusyKey === `shared-visibility-${source.id}` ? (source.hidden_for_user ? "Showing…" : "Hiding…") : source.hidden_for_user ? "Show in Library" : "Hide for me"}</PillButton> : null}
             </article>
           ))}
-          {!(model.cloudLibraries.my_libraries || []).length ? <p className="meridian-muted-copy">No personal cloud libraries added yet.</p> : null}
+          {!(model.cloudLibraries.my_libraries || []).length ? <p className="meridian-muted-copy meridian-source-list__empty">No personal cloud libraries added yet.</p> : null}
         </div>
       </MeridianCard>
     </div>
@@ -361,7 +361,7 @@ function HiddenPanel({ model }) {
   const refreshingWithData = status.loading && status.loaded;
   return (
     <div className="meridian-panel-stack">
-      <Segmented ariaLabel="Hidden title scope" onChange={setScope} options={model.isAdmin ? [{ value: "personal", label: `For me (${model.hiddenItems.length})` }, { value: "global", label: `For everyone (${model.globalHiddenItems.length})` }] : [{ value: "personal", label: `For me (${model.hiddenItems.length})` }]} value={scope} />
+      <Segmented className="meridian-hidden-scope" ariaLabel="Hidden title scope" onChange={setScope} options={model.isAdmin ? [{ value: "personal", label: `For me (${model.hiddenItems.length})` }, { value: "global", label: `For everyone (${model.globalHiddenItems.length})` }] : [{ value: "personal", label: `For me (${model.hiddenItems.length})` }]} value={scope} />
       <MeridianCard className="meridian-hidden-card" id="hidden-list">
         {initialLoading ? <div aria-label="Loading hidden titles" className="meridian-hidden-skeleton"><i /><i /><i /></div> : null}
         {refreshingWithData ? <span className="meridian-resource-refresh" role="status">Refreshing…</span> : null}

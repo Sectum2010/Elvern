@@ -32,7 +32,7 @@ function baseModel() {
       isAdmin: true,
       username: "admin",
       cloudLibraries: {
-        google: { connected: true, account_name: "Connected account" },
+        google: { enabled: true, connected: true, account_name: "Connected account" },
         my_libraries: [{
           id: 11,
           display_name: "Personal source",
@@ -122,11 +122,51 @@ function serverModel(overrides = {}) {
 }
 
 describe("MeridianSettingsView contracts", () => {
+  test("Library keeps the dedicated age refresh control and real refresh action", () => {
+    const onRefreshAgeGroups = vi.fn();
+    const model = {
+      ...baseModel(),
+      library: {
+        settings: {
+          hide_recently_added: false,
+          hide_duplicate_movies: false,
+        },
+        saving: false,
+        isAdmin: true,
+        ageGroupsLoading: false,
+        ageBuckets: [],
+        onRecentlyAddedToggle: vi.fn(),
+        onDuplicateToggle: vi.fn(),
+        onRefreshAgeGroups,
+        onOpenAgeBucket: vi.fn(),
+      },
+    };
+    render(<MeridianSettingsView model={model} tab="library" />);
+
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    expect(refresh).toHaveClass("meridian-age-refresh");
+    fireEvent.click(refresh);
+    expect(onRefreshAgeGroups).toHaveBeenCalledTimes(1);
+  });
+
+  test("Cloud connection and empty personal-library copy use the Meridian layout hooks", () => {
+    const model = baseModel();
+    model.cloud.cloudLibraries.my_libraries = [];
+    render(<MeridianSettingsView model={model} tab="cloud-sharing" />);
+
+    expect(screen.getByText("Connected as Connected account · cloud libraries ready to refresh.")).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toHaveClass("meridian-status-pill--with-dot");
+    expect(screen.getByText("No personal cloud libraries added yet.")).toHaveClass("meridian-source-list__empty");
+    expect(screen.getByText("Cloud libraries").closest("section")).toHaveClass("meridian-cloud-libraries-card");
+  });
+
   test("standard users see the personal hidden scope without poster thumbnails", () => {
     const model = baseModel();
     render(<MeridianSettingsView model={model} tab="hidden-titles" />);
 
-    expect(screen.getByRole("radio", { name: "For me (1)" })).toBeChecked();
+    const personalScope = screen.getByRole("radio", { name: "For me (1)" });
+    expect(personalScope).toBeChecked();
+    expect(personalScope.closest("[role='radiogroup']")).toHaveClass("meridian-hidden-scope");
     expect(screen.queryByRole("radio", { name: /For everyone/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
     expect(screen.getByText("H")).toBeInTheDocument();

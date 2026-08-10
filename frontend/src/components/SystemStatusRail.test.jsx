@@ -102,9 +102,27 @@ describe("SystemStatusRail", () => {
     const { container } = render(<SystemStatusRail />);
     expect(await screen.findByText("92")).toBeInTheDocument();
 
-    expect(screen.getByText("Connected").closest("dd").querySelector("i")).toHaveClass("is-success");
-    expect(screen.getByText("3").closest("dd").querySelector("i")).toHaveClass("is-hidden");
+    expect(screen.getByText("Google Drive").closest("dt").querySelector("i")).toHaveClass("is-success");
+    expect(screen.getByText("Hidden titles").closest("dt").querySelector("i")).toHaveClass("is-hidden");
     expect(container.querySelector(".control-center-status-rail__device"))
+      .toHaveTextContent("device-test");
+  });
+
+  test("uses the demo row order and keeps the Device heading outside its value card", async () => {
+    const { container } = render(<SystemStatusRail />);
+    expect(await screen.findByText("92")).toBeInTheDocument();
+
+    const googleRow = screen.getByText("Google Drive").closest("div");
+    expect(googleRow.children).toHaveLength(2);
+    expect(googleRow.firstElementChild.tagName).toBe("DT");
+    expect(googleRow.firstElementChild.querySelector("i")).toBeInTheDocument();
+    expect(googleRow.lastElementChild.tagName).toBe("DD");
+
+    const deviceSection = container.querySelector(".control-center-status-rail__device");
+    const deviceCard = container.querySelector(".control-center-status-rail__device-card");
+    expect(deviceSection.firstElementChild).toHaveTextContent("DEVICE");
+    expect(deviceCard).not.toContainElement(deviceSection.firstElementChild);
+    expect(deviceCard.querySelector(".control-center-status-rail__device-id"))
       .toHaveTextContent("device-test");
   });
 

@@ -9,6 +9,9 @@ import { apiRequest } from "../lib/api";
 import {
   ADMIN_LIVE_AUDIT_TICKER_LINE,
   desktopAdminResourcesForTab,
+  easeMeridianEntryProgress,
+  MERIDIAN_ENTRY_PROGRESS_INTERVAL_MS,
+  MERIDIAN_ENTRY_PROGRESS_STEP,
   shouldPollDesktopPlaybackWorkers,
   shouldRefreshDesktopRealtimeResource,
 } from "../lib/adminControlCenter.js";
@@ -227,6 +230,34 @@ function MeridianFeedbackToast({ banner }) {
       {banner.text}
     </div>
   );
+}
+
+
+function MeridianEntryMotion({ children }) {
+  const reducedMotion = typeof window !== "undefined"
+    && window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  const [progress, setProgress] = useState(reducedMotion ? 1 : 0);
+
+  useEffect(() => {
+    if (reducedMotion) {
+      setProgress(1);
+      return undefined;
+    }
+
+    let currentProgress = 0;
+    setProgress(0);
+    const intervalId = window.setInterval(() => {
+      currentProgress = Math.min(1, currentProgress + MERIDIAN_ENTRY_PROGRESS_STEP);
+      setProgress(currentProgress);
+      if (currentProgress >= 1) {
+        window.clearInterval(intervalId);
+      }
+    }, MERIDIAN_ENTRY_PROGRESS_INTERVAL_MS);
+
+    return () => window.clearInterval(intervalId);
+  }, [reducedMotion]);
+
+  return children(easeMeridianEntryProgress(progress));
 }
 
 
@@ -3311,6 +3342,14 @@ export function AdminPage() {
     });
   }
 
+  const playbackWorkerSummaryElement = playbackWorkerSummary.length > 0 ? (
+    <div className="admin-workers-summary meridian-users-card__workers-summary" aria-label="Playback worker summary">
+      {playbackWorkerSummary.map((entry) => (
+        <span className="admin-workers-summary__pill" key={entry}>{entry}</span>
+      ))}
+    </div>
+  ) : null;
+
   const usersCard = (
     <section className={`settings-card settings-card--wide${desktopControlCenter ? " meridian-card meridian-users-card" : ""}`}>
       <div className="settings-inline-header">
@@ -3318,14 +3357,9 @@ export function AdminPage() {
           <h2>Users</h2>
           <p className="page-subnote">Role changes and password updates require your current admin password.</p>
         </div>
+        {desktopControlCenter ? playbackWorkerSummaryElement : null}
       </div>
-      {playbackWorkerSummary.length > 0 ? (
-        <div className="admin-workers-summary" aria-label="Playback worker summary">
-          {playbackWorkerSummary.map((entry) => (
-            <span className="admin-workers-summary__pill" key={entry}>{entry}</span>
-          ))}
-        </div>
-      ) : null}
+      {!desktopControlCenter ? playbackWorkerSummaryElement : null}
       {playbackWorkersWarning ? (
         <p className="page-subnote admin-workers-summary__warning">
           Playback workers warning: {playbackWorkersWarning}
@@ -4619,15 +4653,27 @@ export function AdminPage() {
     : exposureFinalizeProfileSource?.private_origin || "Not required";
   const exposureFinalizeVerificationStatus = exposureVerificationStatusLabel;
   const adminOverviewSummary = desktopControlCenter ? (
-    <div className="meridian-overview">
+    <MeridianEntryMotion>
+      {(entryProgress) => <div className="meridian-overview">
       <div className="meridian-overview__grid">
         <section className="meridian-card meridian-security-gauge" aria-label="Security score 92, private">
-          <svg aria-hidden="true" className="meridian-security-gauge__dial" viewBox="0 0 150 150">
-            <circle className="meridian-security-gauge__track" cx="75" cy="75" r="64" />
-            <circle className="meridian-security-gauge__value" cx="75" cy="75" r="64" pathLength="100" />
-          </svg>
-          <span className="meridian-security-gauge__score">92</span>
-          <span className="meridian-security-gauge__mode">PRIVATE</span>
+          <div className="meridian-security-gauge__dial-wrap">
+            <svg aria-hidden="true" className="meridian-security-gauge__dial" viewBox="0 0 150 150">
+              <circle className="meridian-security-gauge__track" cx="75" cy="75" r="64" />
+              <circle
+                className="meridian-security-gauge__value"
+                cx="75"
+                cy="75"
+                r="64"
+                pathLength="100"
+                style={{ strokeDashoffset: 100 * (1 - (0.92 * entryProgress)) }}
+              />
+            </svg>
+            <span className="meridian-security-gauge__dial-copy">
+              <span className="meridian-security-gauge__score">{Math.round(92 * entryProgress)}</span>
+              <span className="meridian-security-gauge__mode">PRIVATE</span>
+            </span>
+          </div>
           <span className="meridian-security-gauge__label">SECURITY POSTURE</span>
         </section>
         <section className="meridian-card meridian-posture-card">
@@ -4676,52 +4722,61 @@ export function AdminPage() {
         {!exposureMaintenanceTargetMatchesCurrent ? (
           <div className="meridian-maintenance-card__confirmation">
             {exposureMaintenanceTargetEnabled ? (
-              <label className="settings-toggle settings-toggle--compact">
+              <label className="meridian-maintenance-card__acknowledgement">
                 <input
                   checked={exposureMaintenanceForm.acknowledgement}
                   onChange={(event) => setExposureMaintenanceForm((current) => ({ ...current, acknowledgement: event.target.checked }))}
                   type="checkbox"
                 />
-                <span><strong>Maintenance Mode acknowledgement</strong><small>{EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT}</small></span>
+                <span>{EXPOSURE_MAINTENANCE_ACKNOWLEDGEMENT}</span>
               </label>
             ) : null}
-            <label className="settings-field">
-              <span><strong>Current admin password</strong><small>Required to enable or disable Maintenance Mode.</small></span>
+            <div className="meridian-maintenance-card__controls">
               <NonLoginSecretInput
+                aria-label="Current admin password"
                 autoComplete="new-password"
                 onChange={(event) => setExposureMaintenanceForm((current) => ({ ...current, currentAdminPassword: event.target.value }))}
                 placeholder="Current admin password"
                 value={exposureMaintenanceForm.currentAdminPassword}
               />
-            </label>
+              <button
+                className="meridian-pill-button meridian-pill-button--primary"
+                disabled={exposurePending}
+                onClick={() => handleSetExposureMaintenanceLock(exposureMaintenanceTargetEnabled)}
+                type="button"
+              >
+                {exposureMaintenanceActionLabel}
+              </button>
+            </div>
             <InlineFeedback feedback={exposureMaintenanceFeedback} />
-            <button
-              className="meridian-pill-button meridian-pill-button--primary"
-              disabled={exposurePending}
-              onClick={() => handleSetExposureMaintenanceLock(exposureMaintenanceTargetEnabled)}
-              type="button"
-            >
-              {exposureMaintenanceActionLabel}
-            </button>
           </div>
         ) : <p className="meridian-muted-copy">Already matches the current state.</p>}
       </section>
-    </div>
+      </div>}
+    </MeridianEntryMotion>
   ) : null;
   const adminSecurityKpis = desktopControlCenter ? (
-    <div className="control-center-admin-kpis meridian-admin-kpis" aria-label="Security summary">
-      {[
-        ["Users", statusPayload?.total_users ?? usersPayload.length],
-        ["Active sessions", sessionsPayload.length],
-        ["Titles indexed", statusPayload?.total_media_items ?? 0],
-        ["Live invites", liveInviteCount],
-      ].map(([label, value]) => (
-        <section className="control-center-admin-kpi meridian-admin-kpi" key={label}>
-          <span>{label}</span>
-          <strong>{String(value)}</strong>
-        </section>
-      ))}
-    </div>
+    <MeridianEntryMotion>
+      {(entryProgress) => (
+        <div className="control-center-admin-kpis meridian-admin-kpis" aria-label="Security summary">
+          {[
+            ["Users", statusPayload?.total_users ?? usersPayload.length],
+            ["Active sessions", sessionsPayload.length],
+            ["Titles indexed", statusPayload?.total_media_items ?? 0],
+            ["Live invites", liveInviteCount],
+          ].map(([label, value]) => (
+            <section
+              className="control-center-admin-kpi meridian-admin-kpi"
+              key={label}
+              style={{ "--meridian-kpi-progress": entryProgress }}
+            >
+              <span>{label}</span>
+              <strong>{String(Math.round(Number(value) * entryProgress))}</strong>
+            </section>
+          ))}
+        </div>
+      )}
+    </MeridianEntryMotion>
   ) : null;
   const securitySection = statusPayload ? (
     <div className={`admin-section-grid${desktopControlCenter ? " meridian-admin-sections" : ""}`}>
@@ -5070,9 +5125,11 @@ export function AdminPage() {
       {desktopControlCenter ? (
         <div className="control-center-live-audit meridian-live-audit" aria-label="Live audit design ticker">
           <span className="control-center-live-audit__label"><i aria-hidden="true" />LIVE AUDIT</span>
-          <div className="control-center-live-audit__track">
-            <span>{ADMIN_LIVE_AUDIT_TICKER_LINE}</span>
-            <span aria-hidden="true">{ADMIN_LIVE_AUDIT_TICKER_LINE}</span>
+          <div className="control-center-live-audit__viewport">
+            <div className="control-center-live-audit__track">
+              <span>{ADMIN_LIVE_AUDIT_TICKER_LINE}</span>
+              <span aria-hidden="true">{ADMIN_LIVE_AUDIT_TICKER_LINE}</span>
+            </div>
           </div>
         </div>
       ) : null}
@@ -5100,7 +5157,12 @@ export function AdminPage() {
             visibleSessions.map((session) => (
               <div className="admin-list__row admin-list__row--card" key={session.id}>
                 <div>
-                  <strong>{session.username}</strong>
+                  <div className="meridian-session-heading">
+                    <strong>{session.username}</strong>
+                    {user?.role === "admin" && (session.user_id === user.id || session.username === user.username)
+                      ? <AdminCrownIcon />
+                      : null}
+                  </div>
                   <p className="page-subnote">
                     session #{session.id} · {session.ip_address || "unknown IP"} · last seen {formatDate(session.last_seen_at)}
                   </p>
@@ -5109,7 +5171,7 @@ export function AdminPage() {
                 </div>
                 <div className="admin-list__actions">
                   <button
-                    className="ghost-button"
+                    className="ghost-button ghost-button--danger"
                     disabled={sessionActionPending === session.id}
                     onClick={() => handleRevokeSession(session)}
                     type="button"

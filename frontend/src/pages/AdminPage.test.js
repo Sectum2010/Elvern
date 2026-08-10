@@ -393,15 +393,30 @@ describe("AdminPage desktop Control Center contracts", () => {
   test("keeps approved synthetic display isolated from real admin state", () => {
     const source = readAdminPage();
 
-    expect(source).toContain('className="meridian-security-gauge__score">92</span>');
+    expect(source).toContain("Math.round(92 * entryProgress)");
+    expect(source).toContain('className="meridian-security-gauge__dial-wrap"');
+    expect(source).toContain('className="meridian-security-gauge__dial-copy"');
     expect(source).toContain('className="meridian-security-gauge__mode">PRIVATE</span>');
     expect(source).toContain('r="64"');
     expect(source).toContain('className="meridian-security-gauge__value"');
     expect(source).toContain("ADMIN_LIVE_AUDIT_TICKER_LINE");
+    expect(source).toContain('className="control-center-live-audit__viewport"');
     expect(source).toContain("statusPayload?.total_users");
     expect(source).toContain("sessionsPayload.length");
     expect(source).toContain("statusPayload?.total_media_items");
     expect(source).toContain("liveInviteCount");
+    expect(source).toContain("Math.round(Number(value) * entryProgress)");
+  });
+
+  test("keeps real log and maintenance actions inside the demo-matched desktop structure", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain('className="meridian-session-heading"');
+    expect(source).toContain('className="ghost-button ghost-button--danger"');
+    expect(source).toContain('className="meridian-maintenance-card__acknowledgement"');
+    expect(source).toContain('className="meridian-maintenance-card__controls"');
+    expect(source).toContain('onClick={() => handleSetExposureMaintenanceLock(exposureMaintenanceTargetEnabled)}');
+    expect(source).toContain('onClick={() => handleRevokeSession(session)}');
   });
 
   test("places the users expander once after all playback worker groups", () => {
@@ -413,6 +428,15 @@ describe("AdminPage desktop Control Center contracts", () => {
     expect(source.match(/control-center-user-expander/g)).toHaveLength(1);
     expect(expander).toBeGreaterThan(nativeWorkers);
     expect(expander).toBeLessThan(createUser);
+  });
+
+  test("keeps desktop worker diagnostics in the Users header without changing their source", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain("const playbackWorkerSummaryElement = playbackWorkerSummary.length > 0");
+    expect(source).toContain('className="admin-workers-summary meridian-users-card__workers-summary"');
+    expect(source).toContain("{desktopControlCenter ? playbackWorkerSummaryElement : null}");
+    expect(source).toContain("{!desktopControlCenter ? playbackWorkerSummaryElement : null}");
   });
 
   test("uses route-owned loading and single polling owners", () => {
