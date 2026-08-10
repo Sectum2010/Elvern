@@ -11,6 +11,9 @@ import {
 import { registerElvernServiceWorker } from "./lib/serviceWorkerRegistration.js";
 import { installIOSViewportCoordinator } from "./lib/iosViewportCoordinator.js";
 import { installPageResumeCoordinator } from "./lib/pageResume.js";
+import { applyControlCenterPaint } from "./lib/controlCenterPaint.js";
+import { classifyControlCenterPath, isDesktopControlCenterDevice } from "./lib/controlCenterRoutes.js";
+import { detectClientDeviceClass, detectClientPlatform } from "./lib/platformDetection.js";
 
 
 window.__elvernAppBootstrapStarted = true;
@@ -20,6 +23,13 @@ installPageResumeCoordinator();
 
 const basename = detectSpaBasename();
 applyInitialSpaCanonicalization(window, { basename });
+const initialRelativePath = basename === "/"
+  ? window.location.pathname
+  : window.location.pathname.slice(basename.length) || "/";
+applyControlCenterPaint({
+  active: isDesktopControlCenterDevice(detectClientDeviceClass(), detectClientPlatform())
+    && Boolean(classifyControlCenterPath(initialRelativePath).area),
+});
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {

@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from fastapi import HTTPException, status
 
 from ..config import Settings
-from ..db import get_connection, utcnow_iso
+from ..db import get_connection, normalize_google_provider_identity_rows, utcnow_iso
 from ..media_scan import scan_media_library
 from .local_library_source_service import (
     MEDIA_LIBRARY_REFERENCE_KEY,
@@ -286,6 +286,8 @@ def get_google_drive_setup_payload(
     connection: sqlite3.Connection | None = None,
 ) -> dict[str, object]:
     def _build_payload(db: sqlite3.Connection) -> dict[str, object]:
+        normalize_google_provider_identity_rows(db, settings=settings)
+        db.commit()
         client_id = get_effective_google_oauth_client_id(settings, connection=db)
         configured_secret = get_global_app_setting(
             settings,
@@ -303,9 +305,10 @@ def get_google_drive_setup_payload(
         https_origin = get_effective_google_drive_https_origin(settings, connection=db)
         account_row = db.execute(
             """
-            SELECT email, display_name
-            FROM google_drive_accounts
-            WHERE user_id = ?
+            SELECT identity.display_label_encrypted
+            FROM google_drive_accounts account
+            JOIN provider_identities identity ON identity.id = account.provider_identity_id
+            WHERE account.user_id = ?
             LIMIT 1
             """,
             (user_id,),
@@ -335,6 +338,12 @@ def get_google_drive_setup_payload(
             if callback_source == "unconfigured"
             else None
         )
+        account_label = None
+        if account_row and account_row["display_label_encrypted"]:
+            try:
+                account_label, _ = decrypt_at_rest(str(account_row["display_label_encrypted"]), settings)
+            except ValueError:
+                account_label = None
         return {
             "https_origin": https_origin or "",
             "client_id": client_id or "",
@@ -349,8 +358,8 @@ def get_google_drive_setup_payload(
             "status_message": status_message,
             "missing_fields": missing_fields,
             "connected": account_row is not None,
-            "account_email": str(account_row["email"]) if account_row and account_row["email"] else None,
-            "account_name": str(account_row["display_name"]) if account_row and account_row["display_name"] else None,
+            "account_email": None,
+            "account_name": str(account_label or "").strip() or None,
             "instructions": google_drive_setup_instructions(settings),
         }
 
@@ -441,9 +450,10 @@ def disconnect_google_drive_account(
     user_id: int,
 ) -> dict[str, object]:
     with get_connection(settings) as connection:
+        normalize_google_provider_identity_rows(connection, settings=settings)
         account_row = connection.execute(
             """
-            SELECT id, google_account_id, email, display_name
+            SELECT id, provider_identity_id
             FROM google_drive_accounts
             WHERE user_id = ?
             LIMIT 1
@@ -456,17 +466,17 @@ def disconnect_google_drive_account(
             connection.execute(
                 """
                 UPDATE library_sources
-                SET expected_google_account_subject_hash = ?,
-                    expected_google_account_email = ?,
-                    expected_google_account_name = ?,
+                SET google_drive_account_id = NULL,
+                    provider_identity_id = COALESCE(provider_identity_id, ?),
+                    expected_google_account_subject_hash = NULL,
+                    expected_google_account_email = NULL,
+                    expected_google_account_name = NULL,
                     last_error = ?,
                     updated_at = ?
                 WHERE google_drive_account_id = ?
                 """,
                 (
-                    _hash_google_account_subject(settings, str(account_row["google_account_id"])),
-                    account_row["email"],
-                    account_row["display_name"],
+                    account_row["provider_identity_id"],
                     "Google Drive account disconnected. Reconnect to refresh this source.",
                     utcnow_iso(),
                     int(account_row["id"]),
@@ -478,6 +488,7 @@ def disconnect_google_drive_account(
             )
         connection.execute("DELETE FROM google_oauth_states WHERE user_id = ?", (user_id,))
         connection.execute("DELETE FROM google_oauth_account_candidates WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM google_oauth_operations WHERE user_id = ?", (user_id,))
         connection.commit()
         return get_google_drive_setup_payload(settings, user_id=user_id, connection=connection)
 

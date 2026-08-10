@@ -14,6 +14,7 @@ from .db_hidden_movie_keys import (
     preserve_hidden_movie_keys_for_media_item,
 )
 from .services.at_rest_encryption import CIPHERTEXT_PREFIX, encrypt_at_rest
+from .security import hash_token_hmac
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,8 @@ ACCOUNT_SHORT_TOKEN_HMAC_MIGRATION_NAME = "account_short_token_hmac1_v1"
 FLOATING_POSITION_RETIREMENT_MIGRATION = "floating_controls_position_retired_v1"
 POSTER_WIDTH_CONTROL_CENTER_MIGRATION = "poster_width_control_center_1400_v1"
 GOOGLE_OAUTH_SECRET_ENCRYPTION_MIGRATION = "google_oauth_secret_fernet1_v1"
+GOOGLE_PROVIDER_IDENTITY_MIGRATION = "google_provider_identity_v1"
+GOOGLE_ACCOUNT_SUBJECT_HASH_PURPOSE = "google.account_subject"
 TOKEN_HASH_MIGRATION_REVOKE_REASON = "token_hash_migration"
 TOKEN_HASH_PREFIX = "hmac1$"
 TOTP_PENDING_SECRET_TTL_SECONDS = 10 * 60
@@ -383,18 +386,31 @@ TABLE_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS provider_identities (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        subject_hash TEXT NOT NULL,
+        display_label_encrypted TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (provider, subject_hash)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS google_drive_accounts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL UNIQUE,
         google_account_id TEXT NOT NULL,
         email TEXT,
         display_name TEXT,
+        provider_identity_id INTEGER,
         refresh_token TEXT NOT NULL,
         access_token TEXT,
         access_token_expires_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (provider_identity_id) REFERENCES provider_identities (id) ON DELETE RESTRICT
     )
     """,
     """
@@ -418,6 +434,8 @@ TABLE_STATEMENTS = (
         google_account_id TEXT NOT NULL,
         email TEXT,
         display_name TEXT,
+        provider_subject_hash TEXT,
+        display_label_encrypted TEXT,
         refresh_token TEXT NOT NULL,
         access_token TEXT NOT NULL,
         access_token_expires_at TEXT,
@@ -427,6 +445,28 @@ TABLE_STATEMENTS = (
         cancelled_at TEXT,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
         FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS google_oauth_operations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        auth_session_id INTEGER NOT NULL,
+        operation_id_hash TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        candidate_id INTEGER,
+        error_code TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        completed_at TEXT,
+        cancelled_at TEXT,
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE CASCADE,
+        FOREIGN KEY (candidate_id) REFERENCES google_oauth_account_candidates (id) ON DELETE SET NULL,
+        UNIQUE (user_id, auth_session_id, operation_id_hash),
+        CHECK (status IN ('pending', 'connected', 'account_mismatch', 'cancelled', 'error', 'expired'))
     )
     """,
     """
@@ -441,6 +481,7 @@ TABLE_STATEMENTS = (
         expected_google_account_subject_hash TEXT,
         expected_google_account_email TEXT,
         expected_google_account_name TEXT,
+        provider_identity_id INTEGER,
         local_path TEXT,
         is_shared INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
@@ -448,7 +489,8 @@ TABLE_STATEMENTS = (
         last_synced_at TEXT,
         last_error TEXT,
         FOREIGN KEY (owner_user_id) REFERENCES users (id) ON DELETE CASCADE,
-        FOREIGN KEY (google_drive_account_id) REFERENCES google_drive_accounts (id) ON DELETE SET NULL
+        FOREIGN KEY (google_drive_account_id) REFERENCES google_drive_accounts (id) ON DELETE SET NULL,
+        FOREIGN KEY (provider_identity_id) REFERENCES provider_identities (id) ON DELETE RESTRICT
     )
     """,
     """
@@ -481,8 +523,10 @@ TABLE_STATEMENTS = (
         display_title TEXT NOT NULL,
         year INTEGER NOT NULL,
         edition_identity TEXT NOT NULL DEFAULT 'standard',
+        representative_media_item_id INTEGER,
         hidden_at TEXT NOT NULL,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (representative_media_item_id) REFERENCES media_items (id) ON DELETE SET NULL,
         UNIQUE (user_id, movie_key)
     )
     """,
@@ -503,9 +547,11 @@ TABLE_STATEMENTS = (
         display_title TEXT NOT NULL,
         year INTEGER NOT NULL,
         edition_identity TEXT NOT NULL DEFAULT 'standard',
+        representative_media_item_id INTEGER,
         hidden_by_user_id INTEGER NOT NULL,
         hidden_at TEXT NOT NULL,
-        FOREIGN KEY (hidden_by_user_id) REFERENCES users (id) ON DELETE CASCADE
+        FOREIGN KEY (hidden_by_user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (representative_media_item_id) REFERENCES media_items (id) ON DELETE SET NULL
     )
     """,
     """
@@ -891,7 +937,7 @@ def _library_revision_trigger_statements() -> tuple[str, ...]:
         ("global_hidden_media_items", "permission", "global", "0", _changed_columns("media_item_id")),
         (
             "global_hidden_movie_keys", "permission", "global", "0",
-            _changed_columns("movie_key", "display_title", "year", "edition_identity"),
+            _changed_columns("movie_key", "display_title", "year", "edition_identity", "representative_media_item_id"),
         ),
         ("users", "permission", "user", "{alias}.id", _changed_columns("id", "role", "enabled", "age_credential")),
         (
@@ -913,7 +959,7 @@ def _library_revision_trigger_statements() -> tuple[str, ...]:
         ),
         (
             "user_hidden_movie_keys", "user_overlay", "user", "{alias}.user_id",
-            _changed_columns("user_id", "movie_key", "display_title", "year", "edition_identity"),
+            _changed_columns("user_id", "movie_key", "display_title", "year", "edition_identity", "representative_media_item_id"),
         ),
         (
             "playback_progress", "progress", "user", "{alias}.user_id",
@@ -1050,8 +1096,14 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_download_sessions_user_media ON download_sessions (user_id, media_item_id)",
     "CREATE INDEX IF NOT EXISTS idx_download_sessions_expires_at ON download_sessions (expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_google_drive_accounts_user_id ON google_drive_accounts (user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_google_drive_accounts_identity ON google_drive_accounts (provider_identity_id)",
+    "CREATE INDEX IF NOT EXISTS idx_provider_identities_provider_subject ON provider_identities (provider, subject_hash)",
     "CREATE INDEX IF NOT EXISTS idx_google_oauth_states_expires_at ON google_oauth_states (expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_google_oauth_operations_lookup ON google_oauth_operations (user_id, auth_session_id, operation_id_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_google_oauth_operations_cleanup ON google_oauth_operations (status, expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_google_oauth_candidates_cleanup ON google_oauth_account_candidates (auth_session_id, expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_library_sources_owner_user_id ON library_sources (owner_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_library_sources_provider_identity ON library_sources (provider_identity_id)",
     "CREATE INDEX IF NOT EXISTS idx_library_sources_provider_resource ON library_sources (provider, resource_type, resource_id)",
     "CREATE INDEX IF NOT EXISTS idx_library_sources_shared ON library_sources (is_shared, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_user_hidden_library_sources_user_id ON user_hidden_library_sources (user_id)",
@@ -1060,10 +1112,12 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_user_hidden_media_items_media_item_id ON user_hidden_media_items (media_item_id)",
     "CREATE INDEX IF NOT EXISTS idx_user_hidden_movie_keys_user_id ON user_hidden_movie_keys (user_id)",
     "CREATE INDEX IF NOT EXISTS idx_user_hidden_movie_keys_movie_key ON user_hidden_movie_keys (movie_key)",
+    "CREATE INDEX IF NOT EXISTS idx_user_hidden_movie_keys_lookup ON user_hidden_movie_keys (user_id, hidden_at DESC, representative_media_item_id)",
     "CREATE INDEX IF NOT EXISTS idx_global_hidden_media_items_hidden_by_user_id ON global_hidden_media_items (hidden_by_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_global_hidden_media_items_hidden_at ON global_hidden_media_items (hidden_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_global_hidden_movie_keys_hidden_by_user_id ON global_hidden_movie_keys (hidden_by_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_global_hidden_movie_keys_hidden_at ON global_hidden_movie_keys (hidden_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_global_hidden_movie_keys_representative ON global_hidden_movie_keys (representative_media_item_id)",
     "CREATE INDEX IF NOT EXISTS idx_native_playback_expires_at ON native_playback_sessions (expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_native_playback_user_item ON native_playback_sessions (user_id, media_item_id)",
     "CREATE INDEX IF NOT EXISTS idx_native_playback_auth_session ON native_playback_sessions (auth_session_id)",
@@ -1243,8 +1297,14 @@ def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings
     _ensure_column(connection, "library_sources", "expected_google_account_subject_hash", "TEXT")
     _ensure_column(connection, "library_sources", "expected_google_account_email", "TEXT")
     _ensure_column(connection, "library_sources", "expected_google_account_name", "TEXT")
+    _ensure_column(connection, "library_sources", "provider_identity_id", "INTEGER")
+    _ensure_column(connection, "google_drive_accounts", "provider_identity_id", "INTEGER")
     _ensure_column(connection, "google_oauth_states", "auth_session_id", "INTEGER")
     _ensure_column(connection, "google_oauth_states", "operation_id_hash", "TEXT")
+    _ensure_column(connection, "google_oauth_account_candidates", "provider_subject_hash", "TEXT")
+    _ensure_column(connection, "google_oauth_account_candidates", "display_label_encrypted", "TEXT")
+    _ensure_column(connection, "user_hidden_movie_keys", "representative_media_item_id", "INTEGER")
+    _ensure_column(connection, "global_hidden_movie_keys", "representative_media_item_id", "INTEGER")
     _ensure_column(connection, "assistant_change_records", "request_id", "INTEGER")
     _ensure_column(connection, "password_help_requests", "requester_ip_address", "TEXT")
     _ensure_column(connection, "password_help_requests", "requester_user_agent", "TEXT")
@@ -1253,6 +1313,21 @@ def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings
     _run_floating_position_retirement_migration(connection)
     _run_poster_width_control_center_migration(connection)
     _run_google_oauth_secret_encryption_migration(connection, settings=settings)
+    _run_google_provider_identity_migration(connection, settings=settings)
+    now = utcnow_iso()
+    connection.execute(
+        """
+        UPDATE google_oauth_operations
+        SET status = 'expired', updated_at = ?, completed_at = COALESCE(completed_at, ?)
+        WHERE status IN ('pending', 'account_mismatch') AND expires_at <= ?
+        """,
+        (now, now, now),
+    )
+    connection.execute("DELETE FROM google_oauth_states WHERE expires_at <= ?", (now,))
+    connection.execute(
+        "DELETE FROM google_oauth_account_candidates WHERE expires_at <= ?",
+        (now,),
+    )
 
     _backfill_playback_watch_history(connection)
     _backfill_session_activity_columns(connection)
@@ -1331,6 +1406,159 @@ def _run_google_oauth_secret_encryption_migration(
         "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
         (GOOGLE_OAUTH_SECRET_ENCRYPTION_MIGRATION, utcnow_iso()),
     )
+
+
+def _upsert_google_provider_identity(
+    connection: sqlite3.Connection,
+    *,
+    subject_hash: str,
+    display_label: str,
+    settings: Settings,
+) -> int:
+    now = utcnow_iso()
+    encrypted_label = encrypt_at_rest(display_label or "Google account", settings)
+    connection.execute(
+        """
+        INSERT INTO provider_identities (
+            provider, subject_hash, display_label_encrypted, created_at, updated_at
+        ) VALUES ('google_drive', ?, ?, ?, ?)
+        ON CONFLICT(provider, subject_hash) DO UPDATE SET
+            display_label_encrypted = excluded.display_label_encrypted,
+            updated_at = excluded.updated_at
+        """,
+        (subject_hash, encrypted_label, now, now),
+    )
+    row = connection.execute(
+        "SELECT id FROM provider_identities WHERE provider = 'google_drive' AND subject_hash = ?",
+        (subject_hash,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Google provider identity migration failed")
+    return int(row["id"])
+
+
+def _run_google_provider_identity_migration(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+) -> None:
+    account_rows = connection.execute(
+        """
+        SELECT id, google_account_id, email, display_name
+        FROM google_drive_accounts
+        WHERE provider_identity_id IS NULL
+        """
+    ).fetchall()
+    for row in account_rows:
+        subject = str(row["google_account_id"] or "").strip()
+        if not subject:
+            continue
+        subject_hash = hash_token_hmac(
+            settings,
+            purpose=GOOGLE_ACCOUNT_SUBJECT_HASH_PURPOSE,
+            token=subject,
+        )
+        identity_id = _upsert_google_provider_identity(
+            connection,
+            subject_hash=subject_hash,
+            display_label=str(row["display_name"] or row["email"] or "Google account"),
+            settings=settings,
+        )
+        connection.execute(
+            """
+            UPDATE google_drive_accounts
+            SET provider_identity_id = ?, google_account_id = '', email = NULL, display_name = NULL
+            WHERE id = ?
+            """,
+            (identity_id, int(row["id"])),
+        )
+        connection.execute(
+            """
+            UPDATE library_sources
+            SET provider_identity_id = ?,
+                expected_google_account_subject_hash = NULL,
+                expected_google_account_email = NULL,
+                expected_google_account_name = NULL
+            WHERE google_drive_account_id = ?
+            """,
+            (identity_id, int(row["id"])),
+        )
+
+    source_rows = connection.execute(
+        """
+        SELECT id, expected_google_account_subject_hash, expected_google_account_email,
+               expected_google_account_name
+        FROM library_sources
+        WHERE provider = 'google_drive'
+          AND provider_identity_id IS NULL
+          AND expected_google_account_subject_hash IS NOT NULL
+        """
+    ).fetchall()
+    for row in source_rows:
+        identity_id = _upsert_google_provider_identity(
+            connection,
+            subject_hash=str(row["expected_google_account_subject_hash"]),
+            display_label=str(row["expected_google_account_name"] or row["expected_google_account_email"] or "Google account"),
+            settings=settings,
+        )
+        connection.execute(
+            """
+            UPDATE library_sources
+            SET provider_identity_id = ?,
+                expected_google_account_subject_hash = NULL,
+                expected_google_account_email = NULL,
+                expected_google_account_name = NULL
+            WHERE id = ?
+            """,
+            (identity_id, int(row["id"])),
+        )
+
+    candidate_rows = connection.execute(
+        """
+        SELECT id, google_account_id, email, display_name
+        FROM google_oauth_account_candidates
+        WHERE provider_subject_hash IS NULL
+        """
+    ).fetchall()
+    for row in candidate_rows:
+        subject = str(row["google_account_id"] or "").strip()
+        if not subject:
+            continue
+        connection.execute(
+            """
+            UPDATE google_oauth_account_candidates
+            SET provider_subject_hash = ?, display_label_encrypted = ?,
+                google_account_id = '', email = NULL, display_name = NULL
+            WHERE id = ?
+            """,
+            (
+                hash_token_hmac(
+                    settings,
+                    purpose=GOOGLE_ACCOUNT_SUBJECT_HASH_PURPOSE,
+                    token=subject,
+                ),
+                encrypt_at_rest(str(row["display_name"] or row["email"] or "Google account"), settings),
+                int(row["id"]),
+            ),
+        )
+
+    if connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE name = ? LIMIT 1",
+        (GOOGLE_PROVIDER_IDENTITY_MIGRATION,),
+    ).fetchone() is None:
+        connection.execute(
+            "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+            (GOOGLE_PROVIDER_IDENTITY_MIGRATION, utcnow_iso()),
+        )
+
+
+def normalize_google_provider_identity_rows(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+) -> None:
+    """Normalize legacy Google identity rows inserted after the schema migration."""
+    _run_google_provider_identity_migration(connection, settings=settings)
 
 
 def _harden_totp_at_rest_values(connection: sqlite3.Connection, *, settings: Settings) -> None:

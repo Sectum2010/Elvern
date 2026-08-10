@@ -20,6 +20,9 @@ from .cloud_provider_auth_service import (
     complete_google_drive_connect as _complete_google_drive_connect_impl,
     confirm_google_account_candidate as _confirm_google_account_candidate_impl,
     get_google_account_candidate_payload as _get_google_account_candidate_payload_impl,
+    get_google_oauth_operation_payload as _get_google_oauth_operation_payload_impl,
+    cancel_google_oauth_operation as _cancel_google_oauth_operation_impl,
+    fail_google_drive_connect as _fail_google_drive_connect_impl,
     get_google_drive_account_access_token as _get_google_drive_account_access_token_impl,
     get_google_drive_account_access_token_by_account_id as _get_google_drive_account_access_token_by_account_id_impl,
     resolve_google_connect_state as _resolve_google_connect_state_impl,
@@ -84,6 +87,40 @@ def build_google_drive_connect_response(
 
 def cancel_google_drive_connect(settings: Settings, *, state_token: str) -> None:
     _cancel_google_drive_connect_impl(settings, state_token=state_token)
+
+
+def fail_google_drive_connect(settings: Settings, *, state_token: str, message: str) -> None:
+    _fail_google_drive_connect_impl(settings, state_token=state_token, message=message)
+
+
+def get_google_oauth_operation_payload(
+    settings: Settings,
+    *,
+    user_id: int,
+    auth_session_id: int,
+    operation_id: str,
+) -> dict[str, object]:
+    return _get_google_oauth_operation_payload_impl(
+        settings,
+        user_id=user_id,
+        auth_session_id=auth_session_id,
+        operation_id=operation_id,
+    )
+
+
+def cancel_google_oauth_operation(
+    settings: Settings,
+    *,
+    user_id: int,
+    auth_session_id: int,
+    operation_id: str,
+) -> dict[str, object]:
+    return _cancel_google_oauth_operation_impl(
+        settings,
+        user_id=user_id,
+        auth_session_id=auth_session_id,
+        operation_id=operation_id,
+    )
 
 
 def get_google_account_candidate_payload(

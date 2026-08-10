@@ -18,8 +18,8 @@ const STATIC_RESOURCE_PATHS = Object.freeze({
   backups: "/api/admin/backups",
   cloudLibraries: "/api/cloud-libraries",
   googleDriveSetup: "/api/admin/google-drive-setup",
-  personalHidden: "/api/user-hidden-items",
-  globalHidden: "/api/admin/global-hidden-items",
+  ageGroups: "/api/library/age-groups",
+  hiddenTitles: "/api/settings/hidden-titles",
   userSettings: "/api/user-settings",
 });
 
@@ -93,5 +93,20 @@ export function setControlCenterResourceData({
     buildControlCenterResourceQueryKey({ userId, role, resource, platform, deviceId }),
     payload,
   );
-  return payload;
+  return queryClient.getQueryData(
+    buildControlCenterResourceQueryKey({ userId, role, resource, platform, deviceId }),
+  );
+}
+
+export function invalidateControlCenterResource({
+  userId,
+  role,
+  resource,
+  platform = "",
+  deviceId = "",
+} = {}) {
+  return queryClient.invalidateQueries({
+    queryKey: buildControlCenterResourceQueryKey({ userId, role, resource, platform, deviceId }),
+    exact: true,
+  });
 }

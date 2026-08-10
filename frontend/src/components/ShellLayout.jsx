@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { PosterContextMenuProvider } from "./PosterContextMenu";
@@ -30,6 +30,8 @@ import {
   resolveAssistantNavigationTarget,
 } from "../lib/assistantAccess.js";
 import { classifyControlCenterPath, isDesktopControlCenterDevice } from "../lib/controlCenterRoutes.js";
+import { applyControlCenterPaint } from "../lib/controlCenterPaint.js";
+import { readControlCenterTheme } from "../lib/controlCenterSession.js";
 
 function normalizePosterCardAppearance(value) {
   if (value === "modern" || value === "clean") {
@@ -113,6 +115,14 @@ function ShellLayoutContent({ children }) {
     && isDesktopClientPlatform(clientPlatform);
   const desktopControlCenter = isDesktopControlCenterDevice(clientDeviceClass, clientPlatform)
     && Boolean(classifyControlCenterPath(location.pathname).area);
+
+  useLayoutEffect(() => {
+    applyControlCenterPaint({
+      active: desktopControlCenter,
+      theme: readControlCenterTheme(),
+    });
+    return () => applyControlCenterPaint({ active: false });
+  }, [desktopControlCenter, location.pathname]);
   const showDesktopLibraryIsland = desktopLibraryClient
     && libraryPath.kind === "root";
   const protectedDesktopLibraryState = (

@@ -4,12 +4,14 @@ import { LoadingView } from "../components/LoadingView";
 import { NonLoginSecretInput } from "../components/NonLoginSecretInput";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { DesktopBackToLibraryButton } from "../components/DesktopBackToLibraryButton";
+import { MeridianScanIcon } from "../components/meridian/MeridianScanIcon.jsx";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
 import {
   ADMIN_LIVE_AUDIT_TICKER_LINE,
   desktopAdminResourcesForTab,
   easeMeridianEntryProgress,
+  getDeterministicUserAvatarPalette,
   MERIDIAN_ENTRY_PROGRESS_INTERVAL_MS,
   MERIDIAN_ENTRY_PROGRESS_STEP,
   shouldPollDesktopPlaybackWorkers,
@@ -701,10 +703,57 @@ function formatBackupProtectionLabel(checkpoint) {
 
 function UserStatusIndicator({ color, label }) {
   return (
-    <span className="user-status-pill" title={label}>
-      <span aria-hidden="true" className={`user-status-indicator user-status-indicator--${color}`} />
+    <span className={`user-status-pill user-status-pill--${color}`} title={label}>
+      <span aria-hidden="true" className={`user-status-indicator user-status-indicator--${color}`} data-visual-landmark="user-status-indicator" />
       <span className="user-status-pill__label">{label}</span>
     </span>
+  );
+}
+
+function MeridianPostureValue({ label, value }) {
+  const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef(0);
+
+  useEffect(() => () => {
+    if (copiedTimerRef.current) {
+      window.clearTimeout(copiedTimerRef.current);
+    }
+  }, []);
+
+  async function copyValue() {
+    if (!navigator.clipboard?.writeText) {
+      setCopied(false);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(String(value));
+      setCopied(true);
+      if (copiedTimerRef.current) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+      copiedTimerRef.current = window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <dd className="meridian-posture-value" data-visual-landmark={label === "Current request origin" ? "current-request-origin" : undefined}>
+      <button
+        aria-label={`${copied ? "Copied" : "Copy"} ${label}: ${value}`}
+        className="meridian-posture-value__copy"
+        onClick={copyValue}
+        title={String(value)}
+        type="button"
+      >
+        <span>{value}</span>
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <rect height="12" rx="2" width="12" x="8" y="8" />
+          <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+        </svg>
+      </button>
+      <span aria-live="polite" className="meridian-visually-hidden">{copied ? `${label} copied.` : ""}</span>
+    </dd>
   );
 }
 
@@ -947,6 +996,11 @@ export function AdminPage() {
   const [inviteAgeModalOpen, setInviteAgeModalOpen] = useState(false);
   const [inviteAssignedAge, setInviteAssignedAge] = useState(18);
   const [passwordHelpRequests, setPasswordHelpRequests] = useState([]);
+  const [passwordHelpStatus, setPasswordHelpStatus] = useState({
+    error: "",
+    loaded: false,
+    loading: false,
+  });
   const [passwordHelpPendingId, setPasswordHelpPendingId] = useState(null);
   const [expandedPasswordHelpRequestId, setExpandedPasswordHelpRequestId] = useState(null);
   const [adminConfirmModal, setAdminConfirmModal] = useState({
@@ -1062,6 +1116,9 @@ export function AdminPage() {
   const ownTotpDialogRef = useRef(null);
   const ownTotpReturnFocusRef = useRef(null);
   const ownTotpPendingRef = useRef(false);
+  const inviteAgeSelectRef = useRef(null);
+  const passwordHelpRequestInFlightRef = useRef(false);
+  const passwordHelpRequestGenerationRef = useRef(0);
   ownTotpPendingRef.current = ownTotpModal.pending;
   const initialControlCenterPath = classifyControlCenterPath(location.pathname);
   const desktopControlCenter = isDesktopControlCenterDevice(
@@ -1210,6 +1267,7 @@ export function AdminPage() {
       setInviteCodes(payload.invite_codes || []);
     } else if (resource === "passwordHelp") {
       setPasswordHelpRequests(payload.requests || []);
+      setPasswordHelpStatus({ error: "", loaded: true, loading: false });
     } else if (resource === "exposure") {
       setExposureStatus(payload);
       setExposurePlan(payload);
@@ -1241,6 +1299,9 @@ export function AdminPage() {
     desktopRequestGenerationRef.current = generation;
     setLoading(true);
     const resources = desktopAdminResourcesForTab(tab);
+    if (resources.includes("passwordHelp")) {
+      setPasswordHelpStatus((current) => ({ ...current, error: "", loading: true }));
+    }
     const results = await Promise.allSettled(
       resources.map((resource) => desktopAdminResourceRequest(resource, { force })),
     );
@@ -1255,6 +1316,13 @@ export function AdminPage() {
       }
       if (result.reason?.name !== "AbortError") {
         failures.push(result.reason?.message || `Failed to load ${resources[index]}`);
+        if (resources[index] === "passwordHelp") {
+          setPasswordHelpStatus((current) => ({
+            ...current,
+            error: result.reason?.message || "Failed to load password help requests",
+            loading: false,
+          }));
+        }
       }
     });
     if (failures.length > 0) {
@@ -1318,14 +1386,39 @@ export function AdminPage() {
   }
 
   async function loadPasswordHelpRequests() {
+    if (passwordHelpRequestInFlightRef.current) {
+      return { outcome: "in_flight" };
+    }
+    passwordHelpRequestInFlightRef.current = true;
+    const generation = passwordHelpRequestGenerationRef.current + 1;
+    passwordHelpRequestGenerationRef.current = generation;
+    setPasswordHelpStatus((current) => ({ ...current, error: "", loading: true }));
     try {
-      const payload = await apiRequest("/api/admin/password-help-requests");
+      const payload = desktopControlCenter
+        ? await desktopAdminResourceRequest("passwordHelp", { force: true })
+        : await apiRequest("/api/admin/password-help-requests");
+      if (generation !== passwordHelpRequestGenerationRef.current) {
+        passwordHelpRequestInFlightRef.current = false;
+        return { outcome: "superseded" };
+      }
       setPasswordHelpRequests(payload.requests || []);
+      setPasswordHelpStatus({ error: "", loaded: true, loading: false });
+      return { outcome: "applied", payload };
     } catch (requestError) {
-      setBanner({
-        tone: "error",
-        text: requestError.message || "Failed to load password help requests",
-      });
+      if (generation !== passwordHelpRequestGenerationRef.current) {
+        passwordHelpRequestInFlightRef.current = false;
+        return { outcome: "superseded" };
+      }
+      const message = requestError.message || "Failed to load password help requests";
+      setPasswordHelpStatus((current) => ({ ...current, error: message, loading: false }));
+      if (!desktopControlCenter) {
+        setBanner({ tone: "error", text: message });
+      }
+      return { outcome: "failed", error: requestError };
+    } finally {
+      if (generation === passwordHelpRequestGenerationRef.current) {
+        passwordHelpRequestInFlightRef.current = false;
+      }
     }
   }
 
@@ -2078,6 +2171,28 @@ export function AdminPage() {
       }
     };
   }, [desktopAdminTab, desktopControlCenter, user?.id, user?.role]);
+
+  useEffect(() => {
+    passwordHelpRequestGenerationRef.current += 1;
+    passwordHelpRequestInFlightRef.current = false;
+    setPasswordHelpRequests([]);
+    setPasswordHelpStatus({ error: "", loaded: false, loading: false });
+  }, [user?.id, user?.role]);
+
+  useEffect(() => {
+    if (!desktopControlCenter || !inviteAgeModalOpen) {
+      return undefined;
+    }
+    inviteAgeSelectRef.current?.focus();
+    function handleInviteAgeKeyDown(event) {
+      if (event.key === "Escape" && !invitePending) {
+        event.preventDefault();
+        setInviteAgeModalOpen(false);
+      }
+    }
+    window.addEventListener("keydown", handleInviteAgeKeyDown);
+    return () => window.removeEventListener("keydown", handleInviteAgeKeyDown);
+  }, [desktopControlCenter, inviteAgeModalOpen, invitePending]);
 
   useEffect(() => {
     if (desktopControlCenter || activeSection !== "recovery" || recoveryLoaded || recoveryLoading) {
@@ -3351,7 +3466,7 @@ export function AdminPage() {
   ) : null;
 
   const usersCard = (
-    <section className={`settings-card settings-card--wide${desktopControlCenter ? " meridian-card meridian-users-card" : ""}`}>
+    <section className={desktopControlCenter ? "meridian-card meridian-users-card" : "settings-card settings-card--wide"} data-visual-landmark={desktopControlCenter ? "users-card" : undefined}>
       <div className="settings-inline-header">
         <div>
           <h2>Users</h2>
@@ -3380,12 +3495,13 @@ export function AdminPage() {
           const workerGroup = playbackWorkersByUserId.get(entry.id) || null;
           const isWorkerGroupCollapsed = collapsedWorkerUserIds[entry.id] === true;
           return (
-            <div className="admin-list__row admin-user-row" key={entry.id}>
+            <div className="admin-list__row admin-user-row" data-visual-landmark="user-row" key={entry.id}>
               <button
                 aria-expanded={isActionsModalOpen}
                 aria-haspopup="dialog"
                 aria-label={`Open user actions for ${entry.username}`}
-                className="user-avatar-button"
+                className={`user-avatar-button ${getDeterministicUserAvatarPalette(entry.id)}`}
+                data-visual-landmark="user-avatar"
                 onClick={() => openUserActionsModal(entry)}
                 type="button"
               >
@@ -3784,7 +3900,7 @@ export function AdminPage() {
   );
 
   const desktopCreateUserCard = desktopControlCenter ? (
-    <section className={`meridian-card meridian-create-user-card${createUserExpanded ? " meridian-create-user-card--expanded" : ""}`}>
+    <section className={`meridian-card meridian-create-user-card${createUserExpanded ? " meridian-create-user-card--expanded" : ""}`} data-visual-landmark="create-user-card">
       <div className="meridian-create-user-card__header">
         <button
           aria-expanded={createUserExpanded}
@@ -3897,7 +4013,7 @@ export function AdminPage() {
           <div className="detail-info-modal__copy">
             <p className="eyebrow detail-info-modal__eyebrow">User actions</p>
             <div className="admin-user-actions-modal__title-row">
-              <div className="user-avatar-button user-avatar-button--static" aria-hidden="true">
+              <div className={`user-avatar-button user-avatar-button--static ${getDeterministicUserAvatarPalette(selectedUserActionsEntry.id)}`} aria-hidden="true">
                 <span className="user-avatar-button__initials">
                   {getUserAvatarInitials(selectedUserActionsEntry.username)}
                 </span>
@@ -4656,7 +4772,7 @@ export function AdminPage() {
     <MeridianEntryMotion>
       {(entryProgress) => <div className="meridian-overview">
       <div className="meridian-overview__grid">
-        <section className="meridian-card meridian-security-gauge" aria-label="Security score 92, private">
+        <section className="meridian-card meridian-security-gauge" aria-label="Security score 92, private" data-visual-landmark="admin-overview-gauge">
           <div className="meridian-security-gauge__dial-wrap">
             <svg aria-hidden="true" className="meridian-security-gauge__dial" viewBox="0 0 150 150">
               <circle className="meridian-security-gauge__track" cx="75" cy="75" r="64" />
@@ -4676,7 +4792,7 @@ export function AdminPage() {
           </div>
           <span className="meridian-security-gauge__label">SECURITY POSTURE</span>
         </section>
-        <section className="meridian-card meridian-posture-card">
+        <section className="meridian-card meridian-posture-card" data-visual-landmark="admin-posture-card">
           <div className="meridian-posture-card__header">
             <span>
               <strong>Security posture</strong>
@@ -4700,7 +4816,12 @@ export function AdminPage() {
               ["Active auth sessions", String(sessionsPayload.length)],
               ["Session TTL", `${statusPayload.security.session_ttl_hours} hour(s)`],
             ].map(([label, value]) => (
-              <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
+              <div key={label}>
+                <dt>{label}</dt>
+                {label === "Current request origin"
+                  ? <MeridianPostureValue label={label} value={value} />
+                  : <dd title={value}>{value}</dd>}
+              </div>
             ))}
           </dl>
         </section>
@@ -5028,22 +5149,43 @@ export function AdminPage() {
         </div>
       </section> : null}
 
-      {!desktopControlCenter || desktopAdminTab === "users-invites" ? <section className={`settings-card meridian-card settings-card--wide control-center-admin-password-help${passwordHelpRequests.length === 0 ? " control-center-admin-password-help--empty" : ""}`}>
+      {!desktopControlCenter || desktopAdminTab === "users-invites" ? <section className={`${desktopControlCenter ? "meridian-card" : "settings-card settings-card--wide"} control-center-admin-password-help${passwordHelpStatus.loaded && passwordHelpRequests.length === 0 ? " control-center-admin-password-help--empty" : ""}`} data-visual-landmark={desktopControlCenter ? "password-help-card" : undefined}>
         <div className="settings-inline-header">
           <div>
             <h2>Password help requests</h2>
             <p className="page-subnote">Pending requests stay visible for 30 days unless dismissed.</p>
           </div>
-          <RefreshSweepButton
-            className="ghost-button ghost-button--inline"
-            onClick={handlePasswordHelpRefresh}
-            type="button"
-          >
-            Refresh
-          </RefreshSweepButton>
+          {desktopControlCenter ? (
+            <button
+              className="meridian-password-help-refresh"
+              data-visual-landmark="password-help-refresh"
+              disabled={passwordHelpStatus.loading}
+              onClick={handlePasswordHelpRefresh}
+              type="button"
+            >
+              <MeridianScanIcon spinning={passwordHelpStatus.loading} />
+              {passwordHelpStatus.loading ? "Refreshing…" : "Refresh"}
+            </button>
+          ) : (
+            <RefreshSweepButton
+              className="ghost-button ghost-button--inline"
+              onClick={handlePasswordHelpRefresh}
+              type="button"
+            >
+              Refresh
+            </RefreshSweepButton>
+          )}
         </div>
+        {desktopControlCenter && passwordHelpStatus.error ? (
+          <div className="meridian-resource-error meridian-password-help__error" role="alert">
+            <span>{passwordHelpStatus.error}</span>
+            <button className="meridian-pill-button" disabled={passwordHelpStatus.loading} onClick={handlePasswordHelpRefresh} type="button">Retry</button>
+          </div>
+        ) : null}
         <div className="admin-list admin-list--dense password-help-request-list">
-          {passwordHelpRequests.length > 0 ? (
+          {desktopControlCenter && !passwordHelpStatus.loaded && !passwordHelpStatus.error ? (
+            <div aria-label="Loading password help requests" className="meridian-password-help__skeleton"><i /><i /></div>
+          ) : passwordHelpRequests.length > 0 ? (
 	            passwordHelpRequests.map((requestEntry) => {
 	              const detailsOpen = expandedPasswordHelpRequestId === requestEntry.id;
 	              const requestUser = usersPayload.find((entry) => entry.id === requestEntry.user_id) || null;
@@ -5112,9 +5254,9 @@ export function AdminPage() {
                 </div>
               );
             })
-          ) : (
+          ) : !desktopControlCenter || passwordHelpStatus.loaded ? (
             <p className="page-subnote">No pending password help requests.</p>
-          )}
+          ) : null}
         </div>
       </section> : null}
 	    </div>
@@ -6459,7 +6601,7 @@ export function AdminPage() {
 	          {activeSection === "panel" ? desktopCreateUserCard : null}
 
 		          {activeSection === "panel" ? (
-		              <section className={`settings-card${desktopControlCenter ? " meridian-card meridian-invite-card" : ""}`}>
+		              <section className={desktopControlCenter ? "meridian-card meridian-invite-card" : "settings-card"} data-visual-landmark={desktopControlCenter ? "invite-card" : undefined}>
 	                <div className="settings-inline-header admin-invite-code-header">
 	                  <button
 	                    aria-controls="admin-invite-code-list"
@@ -6475,7 +6617,9 @@ export function AdminPage() {
 		                      </p>
 	                    </div>
 	                  </button>
-	                  <button
+	                  {!desktopControlCenter || !inviteAgeModalOpen ? <button
+	                    aria-controls={desktopControlCenter ? "admin-invite-age-panel" : undefined}
+	                    aria-expanded={desktopControlCenter ? inviteAgeModalOpen : undefined}
 	                    className="primary-button"
 	                    disabled={invitePending}
 	                    onClick={() => {
@@ -6485,8 +6629,35 @@ export function AdminPage() {
 	                    type="button"
 	                  >
 	                    {invitePending ? "Generating..." : "Generate invite code"}
-	                  </button>
+	                  </button> : null}
 	                </div>
+                {desktopControlCenter && inviteAgeModalOpen ? (
+                  <form className="meridian-invite-age-panel" data-visual-landmark="inline-invite-age-panel" id="admin-invite-age-panel" onSubmit={handleGenerateInviteCode}>
+                    <span className="meridian-invite-age-panel__eyebrow">INVITE CODE</span>
+                    <strong>Assign age credential</strong>
+                    <p>The new account created with this code receives this age credential.</p>
+                    <select
+                      aria-label="Invite age credential"
+                      className="admin-select"
+                      disabled={invitePending}
+                      onChange={(event) => setInviteAssignedAge(Number(event.target.value))}
+                      ref={inviteAgeSelectRef}
+                      value={inviteAssignedAge}
+                    >
+                      {AGE_CREDENTIAL_OPTIONS.map((age) => (
+                        <option key={age} value={age}>{formatAgeCredential(age)}</option>
+                      ))}
+                    </select>
+                    <div className="meridian-invite-age-panel__actions">
+                      <button className="meridian-pill-button meridian-pill-button--primary" disabled={invitePending} type="submit">
+                        {invitePending ? "Generating..." : "Generate invite code"}
+                      </button>
+                      <button className="meridian-pill-button" disabled={invitePending} onClick={() => setInviteAgeModalOpen(false)} type="button">
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                ) : null}
                 {inviteCodesExpanded ? (
                   <div className="admin-list admin-list--dense admin-invite-code-list" id="admin-invite-code-list">
                     {inviteCodes.length > 0 ? (
@@ -6577,7 +6748,7 @@ export function AdminPage() {
 	          ) : null}
         </div>
       ) : null}
-      {inviteAgeModalOpen ? (
+      {inviteAgeModalOpen && !desktopControlCenter ? (
         <div
           aria-labelledby="admin-invite-age-modal-title"
           aria-modal="true"

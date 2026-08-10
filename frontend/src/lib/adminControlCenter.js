@@ -11,6 +11,17 @@ export const ADMIN_LIVE_AUDIT_TICKER_LINE = [
 
 export const MERIDIAN_ENTRY_PROGRESS_INTERVAL_MS = 40;
 export const MERIDIAN_ENTRY_PROGRESS_STEP = 0.05;
+const USER_AVATAR_PALETTE_COUNT = 8;
+
+export function getDeterministicUserAvatarPalette(userId) {
+  const source = String(userId ?? "unknown");
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `meridian-user-avatar--palette-${(hash >>> 0) % USER_AVATAR_PALETTE_COUNT}`;
+}
 
 export function easeMeridianEntryProgress(progress) {
   const boundedProgress = Math.max(0, Math.min(1, Number(progress) || 0));

@@ -8,6 +8,7 @@ const networkProxy = process.env.ELVERN_PHASE7_NETWORK_PROXY;
 const guardedProxy = networkProxy
   ? { server: networkProxy, bypass: "<-loopback>" }
   : undefined;
+const desktopProductionGrepInvert = /@(assistant|settings)-navigation|@control-center-(baseline|source-generation)/;
 
 
 export default defineConfig({
@@ -32,7 +33,7 @@ export default defineConfig({
     {
       name: "chromium-desktop-production",
       testMatch: "phase7-cross-browser.pw.js",
-      grepInvert: /@(assistant|settings)-navigation/,
+      grepInvert: desktopProductionGrepInvert,
       use: {
         browserName: "chromium",
         viewport: { width: 1440, height: 900 },
@@ -42,7 +43,7 @@ export default defineConfig({
     {
       name: "firefox-desktop-production",
       testMatch: "phase7-cross-browser.pw.js",
-      grepInvert: /@(assistant|settings)-navigation/,
+      grepInvert: desktopProductionGrepInvert,
       use: {
         browserName: "firefox",
         viewport: { width: 1440, height: 900 },
@@ -57,7 +58,7 @@ export default defineConfig({
     {
       name: "webkit-desktop-production",
       testMatch: "phase7-cross-browser.pw.js",
-      grepInvert: /@(assistant|settings)-navigation/,
+      grepInvert: desktopProductionGrepInvert,
       use: {
         browserName: "webkit",
         viewport: { width: 1440, height: 900 },
@@ -119,6 +120,34 @@ export default defineConfig({
       use: {
         browserName: "chromium",
         viewport: { width: 1440, height: 900 },
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
+      },
+    },
+    {
+      name: "chromium-control-center-baseline",
+      testMatch: "phase7-cross-browser.pw.js",
+      grep: /@control-center-baseline/,
+      use: {
+        browserName: "chromium",
+        viewport: { width: 1360, height: 880 },
+        deviceScaleFactor: 1,
+        locale: "en-US",
+        timezoneId: "America/Los_Angeles",
+        reducedMotion: "reduce",
+        ...(guardedProxy ? { proxy: guardedProxy } : {}),
+      },
+    },
+    {
+      name: "chromium-control-center-source-generation",
+      testMatch: "phase7-cross-browser.pw.js",
+      grep: /@(control-center-source-generation|control-center-baseline)/,
+      use: {
+        browserName: "chromium",
+        viewport: { width: 1360, height: 880 },
+        deviceScaleFactor: 1,
+        locale: "en-US",
+        timezoneId: "America/Los_Angeles",
+        reducedMotion: "reduce",
         ...(guardedProxy ? { proxy: guardedProxy } : {}),
       },
     },

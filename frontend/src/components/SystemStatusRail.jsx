@@ -19,8 +19,7 @@ const RAIL_RESOURCES = Object.freeze([
   "system",
   "cloudLibraries",
   "googleDriveSetup",
-  "personalHidden",
-  "globalHidden",
+  "hiddenTitles",
 ]);
 
 function readablePlatform(platform) {
@@ -64,8 +63,10 @@ function statusTone(label, value) {
 }
 
 export function buildSystemStatusRailRows({ payloads, platform, deviceId }) {
-  const personalCount = countItems(payloads.personalHidden);
-  const globalCount = countItems(payloads.globalHidden);
+  const personalCount = countItems(payloads.hiddenTitles?.personal);
+  const globalCount = payloads.hiddenTitles?.global === null
+    ? 0
+    : countItems(payloads.hiddenTitles?.global);
   const hiddenCount = personalCount === null || globalCount === null
     ? "Unavailable"
     : String(personalCount + globalCount);
@@ -196,12 +197,12 @@ export function SystemStatusRail() {
     "VLC on device": "desktopHelper",
     Platform: "desktopHelper",
     "Titles indexed": "system",
-    "Hidden titles": staleResources.includes("personalHidden") ? "personalHidden" : "globalHidden",
+    "Hidden titles": "hiddenTitles",
     "Poster width": "userSettings",
     Island: "userSettings",
   };
   return (
-    <aside aria-hidden={!statusRailOpen} aria-label="System status" className="control-center-status-rail">
+    <aside aria-hidden={!statusRailOpen} aria-label="System status" className="control-center-status-rail" data-visual-landmark="system-status-rail">
       <div className="control-center-status-rail__inner">
         <header className="control-center-status-rail__header">
           <span>SYSTEM STATUS</span>

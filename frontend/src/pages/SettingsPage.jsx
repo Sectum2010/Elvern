@@ -52,6 +52,7 @@ import {
 } from "../lib/controlCenterRoutes.js";
 import {
   fetchControlCenterResource,
+  invalidateControlCenterResource,
   setControlCenterResourceData,
 } from "../lib/controlCenterQueries.js";
 
@@ -1630,21 +1631,70 @@ export function SettingsPage() {
       role: user?.role,
       force,
     };
-    const useSharedControlCenterCache = showDesktopControlCenter && user?.role === "admin";
+    const useSharedControlCenterCache = showDesktopControlCenter;
+    if (useSharedControlCenterCache) {
+      const payload = await fetchControlCenterResource({
+        ...sharedQueryOptions,
+        resource: "hiddenTitles",
+      });
+      return {
+        personalItems: payload.personal?.items || [],
+        globalItems: payload.global?.items || [],
+      };
+    }
     const [personalPayload, globalPayload] = await Promise.all([
-      useSharedControlCenterCache
-        ? fetchControlCenterResource({ ...sharedQueryOptions, resource: "personalHidden" })
-        : apiRequest("/api/user-hidden-items", { signal }),
+      apiRequest("/api/user-hidden-items", { signal }),
       user?.role === "admin"
-        ? (useSharedControlCenterCache
-          ? fetchControlCenterResource({ ...sharedQueryOptions, resource: "globalHidden" })
-          : apiRequest("/api/admin/global-hidden-items", { signal }))
+        ? apiRequest("/api/admin/global-hidden-items", { signal })
         : Promise.resolve({ items: [] }),
     ]);
     return {
       personalItems: personalPayload.items || [],
       globalItems: globalPayload.items || [],
     };
+  }, [showDesktopControlCenter, user?.id, user?.role]);
+
+  const invalidateHiddenTitlesResource = useCallback(() => {
+    if (!showDesktopControlCenter) {
+      return Promise.resolve();
+    }
+    return invalidateControlCenterResource({
+      userId: user?.id,
+      role: user?.role,
+      resource: "hiddenTitles",
+    });
+  }, [showDesktopControlCenter, user?.id, user?.role]);
+
+  const patchHiddenTitlesResource = useCallback((updater) => {
+    if (!showDesktopControlCenter) {
+      return;
+    }
+    setControlCenterResourceData({
+      userId: user?.id,
+      role: user?.role,
+      resource: "hiddenTitles",
+    }, (current) => {
+      if (!current) {
+        return current;
+      }
+      const next = updater({
+        personalItems: current.personal?.items || [],
+        globalItems: current.global?.items || [],
+      });
+      return {
+        ...current,
+        personal: {
+          ...(current.personal || {}),
+          count: next.personalItems.length,
+          items: next.personalItems,
+        },
+        global: current.global == null ? null : {
+          ...current.global,
+          count: next.globalItems.length,
+          items: next.globalItems,
+        },
+      };
+    });
   }, [showDesktopControlCenter, user?.id, user?.role]);
 
   const refreshHiddenLists = useCallback(async ({
@@ -1665,6 +1715,16 @@ export function SettingsPage() {
       startedAt: Date.now(),
     };
     hiddenReadOperationRef.current = operation;
+    if (showDesktopControlCenter && ownerKind !== "resource_load") {
+      setResourceStatus((current) => ({
+        ...current,
+        hidden: {
+          loading: true,
+          loaded: Boolean(current.hidden?.loaded),
+          error: "",
+        },
+      }));
+    }
     const abortFromParent = () => controller.abort();
     if (signal?.aborted) {
       controller.abort();
@@ -1697,7 +1757,7 @@ export function SettingsPage() {
       setResourceStatus((current) => ({
         ...current,
         hidden: {
-          loading: Boolean(request?.loading),
+          loading: false,
           loaded: true,
           error: "",
         },
@@ -1710,11 +1770,21 @@ export function SettingsPage() {
       if (isAbortError(requestError)) {
         return { outcome: "aborted", lists: null, error: requestError };
       }
+      if (showDesktopControlCenter && ownerKind !== "resource_load") {
+        setResourceStatus((current) => ({
+          ...current,
+          hidden: {
+            loading: false,
+            loaded: Boolean(current.hidden?.loaded),
+            error: requestError.message || "Failed to load hidden titles",
+          },
+        }));
+      }
       return { outcome: "failed", lists: null, error: requestError };
     } finally {
       signal?.removeEventListener("abort", abortFromParent);
     }
-  }, [fetchHiddenLists, settingsIdentity]);
+  }, [fetchHiddenLists, settingsIdentity, showDesktopControlCenter]);
 
   const reconcilePendingHiddenScope = useCallback(async (
     pending = pendingHiddenReconciliationRef.current,
@@ -1807,6 +1877,13 @@ export function SettingsPage() {
   ) => {
     const existing = resourceRequestsRef.current.get(resourceKey);
     if (
+      resourceKey === "ageGroups"
+      && existing?.identity === settingsIdentity
+      && existing.loading
+    ) {
+      return { outcome: "in_flight" };
+    }
+    if (
       !force
       && existing?.identity === settingsIdentity
       && (existing.loaded || existing.loading)
@@ -1864,7 +1941,14 @@ export function SettingsPage() {
       } else if (resourceKey === "ageGroups") {
         result = {
           outcome: "applied",
-          payload: await apiRequest("/api/library/age-groups", { signal: controller.signal }),
+          payload: showDesktopControlCenter && user?.role === "admin"
+            ? await fetchControlCenterResource({
+              userId: user?.id,
+              role: user?.role,
+              resource: "ageGroups",
+              force,
+            })
+            : await apiRequest("/api/library/age-groups", { signal: controller.signal }),
         };
       } else if (resourceKey === "googleSetup") {
         result = {
@@ -1948,6 +2032,7 @@ export function SettingsPage() {
         ...status,
         [resourceKey]: { loading: false, loaded: true, error: "" },
       }));
+      return { outcome: "applied", payload };
     } catch (requestError) {
       if (
         isAbortError(requestError)
@@ -1999,6 +2084,7 @@ export function SettingsPage() {
           });
         }
       }
+      return { outcome: "failed", error: requestError };
     } finally {
       const current = resourceRequestsRef.current.get(resourceKey);
       if (
@@ -2373,14 +2459,11 @@ export function SettingsPage() {
       setError("");
       void invalidateLibraryQueries();
       void loadSettingsResource("cloud", { force: true });
-      if (user?.role === "admin") {
-        void loadSettingsResource("googleSetup", { force: true });
-      }
       return;
     }
     setError(providerAuthTransaction.message || "Reconnect was not completed.");
     setMessage("");
-  }, [loadSettingsResource, providerAuthTransaction, user?.role]);
+  }, [loadSettingsResource, providerAuthTransaction]);
 
   function applyUserSettingsPayload(payload) {
     const resolvedSettings = resolveUserSettings(payload);
@@ -2723,6 +2806,11 @@ export function SettingsPage() {
         method: "DELETE",
       });
       setHiddenItems((current) => current.filter((item) => item.id !== itemId));
+      patchHiddenTitlesResource((current) => ({
+        ...current,
+        personalItems: current.personalItems.filter((item) => item.id !== itemId),
+      }));
+      void invalidateHiddenTitlesResource();
       setMessage(payload.message || "This movie is visible again.");
       void invalidateLibraryQueries();
     } catch (requestError) {
@@ -2747,6 +2835,11 @@ export function SettingsPage() {
         method: "DELETE",
       });
       setGlobalHiddenItems((current) => current.filter((item) => item.id !== itemId));
+      patchHiddenTitlesResource((current) => ({
+        ...current,
+        globalItems: current.globalItems.filter((item) => item.id !== itemId),
+      }));
+      void invalidateHiddenTitlesResource();
       setMessage(payload.message || "This movie is visible again.");
       void invalidateLibraryQueries();
     } catch (requestError) {
@@ -2794,7 +2887,15 @@ export function SettingsPage() {
         ];
       });
       setMessage(payload.message || successMessage);
+      patchHiddenTitlesResource((current) => ({
+        personalItems: current.personalItems.filter((item) => item.id !== hiddenItem.id),
+        globalItems: [
+          { ...hiddenItem, scope: "global", hidden_at: payload.hidden_at },
+          ...current.globalItems.filter((item) => !hiddenItemsShareIdentity(item, hiddenItem)),
+        ],
+      }));
       void invalidateLibraryQueries();
+      void invalidateHiddenTitlesResource();
       void refreshHiddenLists({ ownerKind: "mutation_refresh" });
     } catch (requestError) {
       if (isUncertainHiddenScopeError(requestError)) {
@@ -2869,7 +2970,15 @@ export function SettingsPage() {
         ];
       });
       setMessage(payload.message || successMessage);
+      patchHiddenTitlesResource((current) => ({
+        personalItems: [
+          { ...hiddenItem, scope: "personal", hidden_at: payload.hidden_at },
+          ...current.personalItems.filter((item) => !hiddenItemsShareIdentity(item, hiddenItem)),
+        ],
+        globalItems: current.globalItems.filter((item) => item.id !== hiddenItem.id),
+      }));
       void invalidateLibraryQueries();
+      void invalidateHiddenTitlesResource();
       void refreshHiddenLists({ ownerKind: "mutation_refresh" });
     } catch (requestError) {
       if (isUncertainHiddenScopeError(requestError)) {
@@ -3121,9 +3230,13 @@ export function SettingsPage() {
     if (user?.role !== "admin") {
       return { items: [], total: 0 };
     }
-    const payload = await apiRequest("/api/library/age-groups");
-    setAgeGroups(payload);
-    return payload;
+    const result = await loadSettingsResource("ageGroups", { force: true });
+    if (result?.outcome === "applied") {
+      setError("");
+      setMessage("Age restrictions refreshed.");
+      return result.payload;
+    }
+    return null;
   }
 
   async function fetchAgeGroupDetail(ageGroupKey) {
@@ -3685,6 +3798,7 @@ export function SettingsPage() {
       resourceErrors: [
         ...(userSettingsLoadError ? [{ key: "userSettings", message: userSettingsLoadError }] : []),
         ...activeResourceErrors.filter(({ key }) => ![
+          "ageGroups",
           "hidden",
           "googleSetup",
           "mediaReference",
@@ -3734,10 +3848,12 @@ export function SettingsPage() {
         saving,
         isAdmin: user?.role === "admin",
         ageGroupsLoading,
+        ageGroupsStatus: resourceStatus.ageGroups,
         ageBuckets: restrictedAgeBuckets,
         onDuplicateToggle: handleDuplicateToggle,
         onRecentlyAddedToggle: handleRecentlyAddedToggle,
         onRefreshAgeGroups: refreshAgeGroups,
+        onRetryAgeGroups: refreshAgeGroups,
         onOpenAgeBucket: handleOpenAgeBucket,
       },
       cloud: {

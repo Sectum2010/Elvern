@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from fastapi import HTTPException, status
 
 from ..config import Settings
-from ..db import get_connection, utcnow_iso
+from ..db import get_connection, normalize_google_provider_identity_rows, utcnow_iso
 from ..security import generate_session_token, hash_token_hmac
 from .at_rest_encryption import decrypt_at_rest, encrypt_at_rest
 from .app_settings_service import get_effective_google_drive_https_origin
@@ -23,14 +24,152 @@ from .google_drive_service import (
     require_google_drive_enabled,
 )
 from .security_event_service import log_security_event
+from .audit_service import write_audit_event_in_connection
 
 
 GOOGLE_STATE_TTL_MINUTES = 15
 GOOGLE_ACCOUNT_CANDIDATE_TTL_MINUTES = 10
+GOOGLE_OAUTH_OPERATION_RETENTION_HOURS = 24
 GOOGLE_OAUTH_STATE_TOKEN_HASH_PURPOSE = "google.oauth_state"
 GOOGLE_OAUTH_OPERATION_TOKEN_HASH_PURPOSE = "google.oauth_operation"
 GOOGLE_ACCOUNT_SUBJECT_HASH_PURPOSE = "google.account_subject"
 GOOGLE_CONNECT_RETURN_PATH = "/settings/cloud-sharing"
+
+
+def _cleanup_google_oauth_artifacts_in_connection(connection, *, now: str | None = None) -> None:
+    current = now or utcnow_iso()
+    retention_cutoff = (
+        datetime.fromisoformat(current).astimezone(timezone.utc)
+        - timedelta(hours=GOOGLE_OAUTH_OPERATION_RETENTION_HOURS)
+    ).isoformat()
+    connection.execute(
+        """
+        UPDATE google_oauth_operations
+        SET status = 'expired', updated_at = ?, completed_at = COALESCE(completed_at, ?)
+        WHERE status IN ('pending', 'account_mismatch') AND expires_at <= ?
+        """,
+        (current, current, current),
+    )
+    connection.execute("DELETE FROM google_oauth_states WHERE expires_at <= ?", (current,))
+    connection.execute(
+        """
+        DELETE FROM google_oauth_account_candidates
+        WHERE expires_at <= ? OR consumed_at <= ? OR cancelled_at <= ?
+        """,
+        (current, retention_cutoff, retention_cutoff),
+    )
+    connection.execute(
+        """
+        DELETE FROM google_oauth_operations
+        WHERE status != 'pending' AND updated_at <= ?
+        """,
+        (retention_cutoff,),
+    )
+
+
+def _operation_row(
+    connection,
+    *,
+    user_id: int,
+    auth_session_id: int,
+    operation_id_hash: str,
+):
+    return connection.execute(
+        """
+        SELECT operation.*
+        FROM google_oauth_operations operation
+        JOIN sessions session ON session.id = operation.auth_session_id
+        WHERE operation.user_id = ?
+          AND operation.auth_session_id = ?
+          AND operation.operation_id_hash = ?
+          AND session.user_id = operation.user_id
+          AND session.revoked_at IS NULL
+        LIMIT 1
+        """,
+        (user_id, auth_session_id, operation_id_hash),
+    ).fetchone()
+
+
+def get_google_oauth_operation_payload(
+    settings: Settings,
+    *,
+    user_id: int,
+    auth_session_id: int,
+    operation_id: str,
+) -> dict[str, object]:
+    operation_hash = _hash_google_oauth_operation(settings, str(operation_id or "").strip())
+    with get_connection(settings) as connection:
+        _cleanup_google_oauth_artifacts_in_connection(connection)
+        row = _operation_row(
+            connection,
+            user_id=user_id,
+            auth_session_id=auth_session_id,
+            operation_id_hash=operation_hash,
+        )
+        connection.commit()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Google Drive reconnect operation is no longer available.",
+        )
+    operation_status = str(row["status"])
+    return {
+        "status": operation_status,
+        "expires_at": str(row["expires_at"]),
+        "message": str(row["error_message"] or "") or None,
+        "candidate_available": operation_status == "account_mismatch" and row["candidate_id"] is not None,
+    }
+
+
+def cancel_google_oauth_operation(
+    settings: Settings,
+    *,
+    user_id: int,
+    auth_session_id: int,
+    operation_id: str,
+) -> dict[str, object]:
+    operation_hash = _hash_google_oauth_operation(settings, str(operation_id or "").strip())
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        _cleanup_google_oauth_artifacts_in_connection(connection, now=now)
+        row = _operation_row(
+            connection,
+            user_id=user_id,
+            auth_session_id=auth_session_id,
+            operation_id_hash=operation_hash,
+        )
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Google Drive reconnect operation is no longer available.",
+            )
+        if str(row["status"]) not in {"pending", "account_mismatch"}:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Google Drive reconnect operation is already complete.",
+            )
+        connection.execute(
+            """
+            UPDATE google_oauth_operations
+            SET status = 'cancelled', updated_at = ?, cancelled_at = ?, completed_at = ?
+            WHERE id = ? AND status IN ('pending', 'account_mismatch')
+            """,
+            (now, now, now, int(row["id"])),
+        )
+        connection.execute(
+            """
+            UPDATE google_oauth_account_candidates
+            SET cancelled_at = COALESCE(cancelled_at, ?)
+            WHERE id = ? AND consumed_at IS NULL
+            """,
+            (now, row["candidate_id"]),
+        )
+        connection.execute(
+            "DELETE FROM google_oauth_states WHERE auth_session_id = ? AND operation_id_hash = ?",
+            (auth_session_id, operation_hash),
+        )
+        connection.commit()
+    return {"status": "cancelled", "expires_at": str(row["expires_at"]), "message": None, "candidate_available": False}
 
 
 def _hash_google_oauth_state_token(settings: Settings, state_token: str) -> str:
@@ -55,6 +194,98 @@ def _hash_google_account_subject(settings: Settings, subject: str) -> str:
 
 def _safe_google_account_label(*, display_name: object, email: object) -> str:
     return str(display_name or email or "Google account").strip() or "Google account"
+
+
+def _decrypt_google_identity_label(stored: object, settings: Settings) -> str:
+    try:
+        label, _encrypted = decrypt_at_rest(str(stored or ""), settings)
+    except ValueError:
+        return "Google account"
+    return str(label or "Google account").strip() or "Google account"
+
+
+def _upsert_google_identity_in_connection(
+    connection,
+    *,
+    settings: Settings,
+    subject_hash: str,
+    display_label: str,
+) -> int:
+    now = utcnow_iso()
+    connection.execute(
+        """
+        INSERT INTO provider_identities (
+            provider, subject_hash, display_label_encrypted, created_at, updated_at
+        ) VALUES ('google_drive', ?, ?, ?, ?)
+        ON CONFLICT(provider, subject_hash) DO UPDATE SET
+            display_label_encrypted = excluded.display_label_encrypted,
+            updated_at = excluded.updated_at
+        """,
+        (subject_hash, encrypt_at_rest(display_label, settings), now, now),
+    )
+    row = connection.execute(
+        """
+        SELECT id
+        FROM provider_identities
+        WHERE provider = 'google_drive' AND subject_hash = ?
+        LIMIT 1
+        """,
+        (subject_hash,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Google Drive account identity could not be saved.",
+        )
+    return int(row["id"])
+
+
+def _apply_google_source_validation_results_in_connection(
+    connection,
+    *,
+    user_id: int,
+    account_id: int,
+    provider_identity_id: int,
+    validation_results: list[dict[str, object]],
+) -> None:
+    now = utcnow_iso()
+    for result in validation_results:
+        source_id = int(result["source_id"])
+        metadata = result.get("metadata")
+        if isinstance(metadata, dict):
+            connection.execute(
+                """
+                UPDATE library_sources
+                SET google_drive_account_id = ?,
+                    provider_identity_id = ?,
+                    expected_google_account_subject_hash = NULL,
+                    expected_google_account_email = NULL,
+                    expected_google_account_name = NULL,
+                    display_name = ?,
+                    last_error = NULL,
+                    updated_at = ?
+                WHERE id = ? AND owner_user_id = ? AND provider = 'google_drive'
+                """,
+                (
+                    account_id,
+                    provider_identity_id,
+                    str(metadata.get("display_name") or "Google Drive source"),
+                    now,
+                    source_id,
+                    user_id,
+                ),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE library_sources
+                SET google_drive_account_id = NULL,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE id = ? AND owner_user_id = ? AND provider = 'google_drive'
+                """,
+                (_source_validation_error_message(), now, source_id, user_id),
+            )
 
 
 def _source_validation_error_message() -> str:
@@ -162,10 +393,76 @@ def cancel_google_drive_connect(settings: Settings, *, state_token: str) -> None
     if not resolved_state_token:
         return
     with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT user_id, auth_session_id, operation_id_hash
+            FROM google_oauth_states
+            WHERE state_token = ?
+            LIMIT 1
+            """,
+            (_hash_google_oauth_state_token(settings, resolved_state_token),),
+        ).fetchone()
+        if row is not None:
+            now = utcnow_iso()
+            connection.execute(
+                """
+                UPDATE google_oauth_operations
+                SET status = 'cancelled', updated_at = ?, cancelled_at = ?, completed_at = ?
+                WHERE user_id = ? AND auth_session_id = ? AND operation_id_hash = ?
+                  AND status = 'pending'
+                """,
+                (
+                    now,
+                    now,
+                    now,
+                    int(row["user_id"]),
+                    int(row["auth_session_id"]),
+                    str(row["operation_id_hash"]),
+                ),
+            )
         connection.execute(
             "DELETE FROM google_oauth_states WHERE state_token = ?",
             (_hash_google_oauth_state_token(settings, resolved_state_token),),
         )
+        connection.commit()
+
+
+def fail_google_drive_connect(settings: Settings, *, state_token: str, message: str) -> None:
+    state_context = resolve_google_connect_state(state_token)
+    resolved_state_token = str(state_context["state_token"] or "").strip()
+    if not resolved_state_token:
+        return
+    state_hash = _hash_google_oauth_state_token(settings, resolved_state_token)
+    now = utcnow_iso()
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT user_id, auth_session_id, operation_id_hash
+            FROM google_oauth_states
+            WHERE state_token = ?
+            LIMIT 1
+            """,
+            (state_hash,),
+        ).fetchone()
+        if row is not None:
+            connection.execute(
+                """
+                UPDATE google_oauth_operations
+                SET status = 'error', error_code = 'provider_callback_failed',
+                    error_message = ?, updated_at = ?, completed_at = ?
+                WHERE user_id = ? AND auth_session_id = ? AND operation_id_hash = ?
+                  AND status = 'pending'
+                """,
+                (
+                    str(message or "Google Drive reconnect failed.")[:240],
+                    now,
+                    now,
+                    int(row["user_id"]),
+                    int(row["auth_session_id"]),
+                    str(row["operation_id_hash"]),
+                ),
+            )
+        connection.execute("DELETE FROM google_oauth_states WHERE state_token = ?", (state_hash,))
         connection.commit()
 
 
@@ -190,6 +487,7 @@ def build_google_drive_connect_response(
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=GOOGLE_STATE_TTL_MINUTES)
     with get_connection(settings) as connection:
+        _cleanup_google_oauth_artifacts_in_connection(connection, now=now.isoformat())
         session_row = connection.execute(
             """
             SELECT id
@@ -208,6 +506,28 @@ def build_google_drive_connect_response(
             """,
             (auth_session_id, operation_id_hash),
         )
+        try:
+            connection.execute(
+                """
+                INSERT INTO google_oauth_operations (
+                    user_id, auth_session_id, operation_id_hash, status,
+                    created_at, updated_at, expires_at
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    auth_session_id,
+                    operation_id_hash,
+                    now.isoformat(),
+                    now.isoformat(),
+                    expires_at.isoformat(),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Google Drive reconnect operation has already been used.",
+            ) from exc
         connection.execute(
             """
             INSERT INTO google_oauth_states (
@@ -281,11 +601,31 @@ def complete_google_drive_connect(
     subject_hash = _hash_google_account_subject(settings, google_account_subject)
     account_email = str(userinfo.get("email") or "").strip() or None
     account_name = str(userinfo.get("name") or account_email or "").strip() or None
+    display_label = _safe_google_account_label(display_name=account_name, email=account_email)
     with get_connection(settings) as connection:
+        normalize_google_provider_identity_rows(connection, settings=settings)
+        connection.commit()
+        active_operation = connection.execute(
+            """
+            SELECT id
+            FROM google_oauth_operations
+            WHERE user_id = ? AND auth_session_id = ? AND operation_id_hash = ?
+              AND status = 'pending' AND expires_at > ?
+            LIMIT 1
+            """,
+            (user_id, auth_session_id, operation_id_hash, now),
+        ).fetchone()
+        if active_operation is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Google Drive reconnect operation expired.",
+            )
         existing = connection.execute(
             """
-            SELECT id, google_account_id, email, display_name, refresh_token
-            FROM google_drive_accounts
+            SELECT account.id, account.provider_identity_id, account.refresh_token,
+                   identity.subject_hash
+            FROM google_drive_accounts account
+            LEFT JOIN provider_identities identity ON identity.id = account.provider_identity_id
             WHERE user_id = ?
             LIMIT 1
             """,
@@ -293,21 +633,21 @@ def complete_google_drive_connect(
         ).fetchone()
         historical_rows = connection.execute(
             """
-            SELECT DISTINCT expected_google_account_subject_hash
-            FROM library_sources
-            WHERE owner_user_id = ?
-              AND provider = 'google_drive'
-              AND expected_google_account_subject_hash IS NOT NULL
+            SELECT DISTINCT identity.subject_hash
+            FROM library_sources source
+            JOIN provider_identities identity ON identity.id = source.provider_identity_id
+            WHERE source.owner_user_id = ?
+              AND source.provider = 'google_drive'
             """,
             (user_id,),
         ).fetchall()
         historical_hashes = {
-            str(row["expected_google_account_subject_hash"])
+            str(row["subject_hash"])
             for row in historical_rows
-            if row["expected_google_account_subject_hash"]
+            if row["subject_hash"]
         }
         existing_subject_matches = bool(
-            existing is not None and str(existing["google_account_id"] or "") == google_account_subject
+            existing is not None and str(existing["subject_hash"] or "") == subject_hash
         )
         historical_subject_matches = not historical_hashes or historical_hashes == {subject_hash}
         is_account_mismatch = bool(
@@ -355,17 +695,17 @@ def complete_google_drive_connect(
                 """
                 INSERT INTO google_oauth_account_candidates (
                     user_id, auth_session_id, operation_id_hash, google_account_id,
-                    email, display_name, refresh_token, access_token,
+                    email, display_name, provider_subject_hash, display_label_encrypted,
+                    refresh_token, access_token,
                     access_token_expires_at, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, '', NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
                     auth_session_id,
                     operation_id_hash,
-                    google_account_subject,
-                    account_email,
-                    account_name,
+                    subject_hash,
+                    encrypt_at_rest(display_label, settings),
                     encrypted_refresh_token,
                     encrypted_access_token,
                     access_token_expires_at,
@@ -373,6 +713,21 @@ def complete_google_drive_connect(
                     candidate_expires_at,
                 ),
             )
+            candidate_id = int(connection.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+            operation_update = connection.execute(
+                """
+                UPDATE google_oauth_operations
+                SET status = 'account_mismatch', candidate_id = ?, updated_at = ?
+                WHERE user_id = ? AND auth_session_id = ? AND operation_id_hash = ?
+                  AND status = 'pending'
+                """,
+                (candidate_id, now, user_id, auth_session_id, operation_id_hash),
+            )
+            if operation_update.rowcount != 1:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Google Drive reconnect operation expired.",
+                )
             connection.execute(
                 "DELETE FROM google_oauth_states WHERE state_token = ?",
                 (resolved_state_token_hash,),
@@ -381,28 +736,53 @@ def complete_google_drive_connect(
             return {
                 "user_id": user_id,
                 "status": "account_mismatch",
-                "account_email": account_email,
-                "account_name": account_name,
+                "account_email": None,
+                "account_name": display_label,
                 "return_path": GOOGLE_CONNECT_RETURN_PATH,
             }
-
+        source_rows = connection.execute(
+            """
+            SELECT source.id, source.resource_type, source.resource_id
+            FROM library_sources source
+            LEFT JOIN provider_identities identity ON identity.id = source.provider_identity_id
+            WHERE source.owner_user_id = ?
+              AND source.provider = 'google_drive'
+              AND (identity.subject_hash = ? OR source.google_drive_account_id = ?)
+            """,
+            (user_id, subject_hash, existing_account_id),
+        ).fetchall()
+    validation_results = _validate_google_source_access(
+        access_token=access_token,
+        source_rows=[dict(row) for row in source_rows],
+    )
+    with get_connection(settings) as connection:
+        operation = connection.execute(
+            """
+            SELECT id
+            FROM google_oauth_operations
+            WHERE user_id = ? AND auth_session_id = ? AND operation_id_hash = ?
+              AND status = 'pending' AND expires_at > ?
+            LIMIT 1
+            """,
+            (user_id, auth_session_id, operation_id_hash, utcnow_iso()),
+        ).fetchone()
+        if operation is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Google Drive reconnect operation expired.")
+        provider_identity_id = _upsert_google_identity_in_connection(
+            connection,
+            settings=settings,
+            subject_hash=subject_hash,
+            display_label=display_label,
+        )
         connection.execute(
             """
             INSERT INTO google_drive_accounts (
-                user_id,
-                google_account_id,
-                email,
-                display_name,
-                refresh_token,
-                access_token,
-                access_token_expires_at,
-                created_at,
-                updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                user_id, google_account_id, email, display_name, provider_identity_id,
+                refresh_token, access_token, access_token_expires_at, created_at, updated_at
+            ) VALUES (?, '', NULL, NULL, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
-                google_account_id = excluded.google_account_id,
-                email = excluded.email,
-                display_name = excluded.display_name,
+                google_account_id = '', email = NULL, display_name = NULL,
+                provider_identity_id = excluded.provider_identity_id,
                 refresh_token = excluded.refresh_token,
                 access_token = excluded.access_token,
                 access_token_expires_at = excluded.access_token_expires_at,
@@ -410,9 +790,7 @@ def complete_google_drive_connect(
             """,
             (
                 user_id,
-                google_account_subject,
-                account_email,
-                account_name,
+                provider_identity_id,
                 encrypted_refresh_token,
                 encrypted_access_token,
                 access_token_expires_at,
@@ -425,54 +803,59 @@ def complete_google_drive_connect(
             (user_id,),
         ).fetchone()
         if account_row is None:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Google Drive account could not be saved.",
-            )
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Google Drive account could not be saved.")
         account_id = int(account_row["id"])
-        source_rows = connection.execute(
+        _apply_google_source_validation_results_in_connection(
+            connection,
+            user_id=user_id,
+            account_id=account_id,
+            provider_identity_id=provider_identity_id,
+            validation_results=validation_results,
+        )
+        operation_update = connection.execute(
             """
-            SELECT id, resource_type, resource_id
-            FROM library_sources
-            WHERE owner_user_id = ?
-              AND provider = 'google_drive'
-              AND (
-                expected_google_account_subject_hash = ?
-                OR (
-                  expected_google_account_subject_hash IS NULL
-                  AND google_drive_account_id = ?
-                )
-              )
+            UPDATE google_oauth_operations
+            SET status = 'connected', updated_at = ?, completed_at = ?
+            WHERE id = ? AND status = 'pending'
             """,
-            (user_id, subject_hash, existing_account_id),
-        ).fetchall()
-        connection.execute("DELETE FROM google_oauth_states WHERE state_token = ?", (resolved_state_token_hash,))
-        connection.commit()
-        if upgraded_columns and existing_account_id is not None:
-            _log_oauth_token_encryption_upgrade(
-                settings,
-                user_id=user_id,
-                account_id=existing_account_id,
-                columns=upgraded_columns,
+            (now, now, int(operation["id"])),
+        )
+        if operation_update.rowcount != 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Google Drive reconnect operation expired.",
             )
-    validation_results = _validate_google_source_access(
-        access_token=access_token,
-        source_rows=[dict(row) for row in source_rows],
-    )
-    _apply_google_source_validation_results(
-        settings,
-        user_id=user_id,
-        account_id=account_id,
-        subject_hash=subject_hash,
-        account_email=account_email,
-        account_name=account_name,
-        validation_results=validation_results,
-    )
+        connection.execute("DELETE FROM google_oauth_states WHERE state_token = ?", (resolved_state_token_hash,))
+        write_audit_event_in_connection(
+            connection,
+            action="cloud.google.account.connect",
+            outcome="success",
+            user_id=user_id,
+            session_id=auth_session_id,
+            target_type="google_drive_account",
+            target_id=account_id,
+            details={
+                "verified_source_count": sum(
+                    1 for result in validation_results if isinstance(result.get("metadata"), dict)
+                ),
+                "inaccessible_source_count": sum(
+                    1 for result in validation_results if not isinstance(result.get("metadata"), dict)
+                ),
+            },
+        )
+        connection.commit()
+    if upgraded_columns and existing_account_id is not None:
+        _log_oauth_token_encryption_upgrade(
+            settings,
+            user_id=user_id,
+            account_id=existing_account_id,
+            columns=upgraded_columns,
+        )
     return {
         "user_id": user_id,
         "status": "connected",
-        "account_email": account_email,
-        "account_name": account_name,
+        "account_email": None,
+        "account_name": display_label,
         "return_path": GOOGLE_CONNECT_RETURN_PATH,
     }
 
@@ -497,59 +880,6 @@ def _validate_google_source_access(
     return results
 
 
-def _apply_google_source_validation_results(
-    settings: Settings,
-    *,
-    user_id: int,
-    account_id: int,
-    subject_hash: str,
-    account_email: str | None,
-    account_name: str | None,
-    validation_results: list[dict[str, object]],
-) -> None:
-    now = utcnow_iso()
-    with get_connection(settings) as connection:
-        for result in validation_results:
-            source_id = int(result["source_id"])
-            metadata = result.get("metadata")
-            if isinstance(metadata, dict):
-                connection.execute(
-                    """
-                    UPDATE library_sources
-                    SET google_drive_account_id = ?,
-                        expected_google_account_subject_hash = ?,
-                        expected_google_account_email = ?,
-                        expected_google_account_name = ?,
-                        display_name = ?,
-                        last_error = NULL,
-                        updated_at = ?
-                    WHERE id = ? AND owner_user_id = ? AND provider = 'google_drive'
-                    """,
-                    (
-                        account_id,
-                        subject_hash,
-                        account_email,
-                        account_name,
-                        str(metadata.get("display_name") or "Google Drive source"),
-                        now,
-                        source_id,
-                        user_id,
-                    ),
-                )
-            else:
-                connection.execute(
-                    """
-                    UPDATE library_sources
-                    SET google_drive_account_id = NULL,
-                        last_error = ?,
-                        updated_at = ?
-                    WHERE id = ? AND owner_user_id = ? AND provider = 'google_drive'
-                    """,
-                    (_source_validation_error_message(), now, source_id, user_id),
-                )
-        connection.commit()
-
-
 def _load_active_google_account_candidate(
     settings: Settings,
     *,
@@ -560,17 +890,16 @@ def _load_active_google_account_candidate(
     operation_id_hash = _hash_google_oauth_operation(settings, str(operation_id or "").strip())
     now = utcnow_iso()
     with get_connection(settings) as connection:
-        connection.execute(
-            """
-            DELETE FROM google_oauth_account_candidates
-            WHERE expires_at <= ? OR consumed_at IS NOT NULL OR cancelled_at IS NOT NULL
-            """,
-            (now,),
-        )
+        _cleanup_google_oauth_artifacts_in_connection(connection, now=now)
         row = connection.execute(
             """
             SELECT candidate.*
             FROM google_oauth_account_candidates candidate
+            JOIN google_oauth_operations operation
+              ON operation.candidate_id = candidate.id
+             AND operation.user_id = candidate.user_id
+             AND operation.auth_session_id = candidate.auth_session_id
+             AND operation.operation_id_hash = candidate.operation_id_hash
             JOIN sessions session ON session.id = candidate.auth_session_id
             WHERE candidate.user_id = ?
               AND candidate.auth_session_id = ?
@@ -578,12 +907,14 @@ def _load_active_google_account_candidate(
               AND candidate.expires_at > ?
               AND candidate.consumed_at IS NULL
               AND candidate.cancelled_at IS NULL
+              AND operation.status = 'account_mismatch'
+              AND operation.expires_at > ?
               AND session.user_id = candidate.user_id
               AND session.revoked_at IS NULL
             ORDER BY candidate.id DESC
             LIMIT 1
             """,
-            (user_id, auth_session_id, operation_id_hash, now),
+            (user_id, auth_session_id, operation_id_hash, now, now),
         ).fetchone()
         connection.commit()
     if row is None:
@@ -610,9 +941,10 @@ def get_google_account_candidate_payload(
     with get_connection(settings) as connection:
         current = connection.execute(
             """
-            SELECT email, display_name
-            FROM google_drive_accounts
-            WHERE user_id = ?
+            SELECT identity.display_label_encrypted
+            FROM google_drive_accounts account
+            JOIN provider_identities identity ON identity.id = account.provider_identity_id
+            WHERE account.user_id = ?
             LIMIT 1
             """,
             (user_id,),
@@ -620,26 +952,25 @@ def get_google_account_candidate_payload(
         if current is None:
             current = connection.execute(
                 """
-                SELECT expected_google_account_email AS email,
-                       expected_google_account_name AS display_name
-                FROM library_sources
-                WHERE owner_user_id = ?
-                  AND provider = 'google_drive'
-                  AND expected_google_account_subject_hash IS NOT NULL
-                ORDER BY id ASC
+                SELECT identity.display_label_encrypted
+                FROM library_sources source
+                JOIN provider_identities identity ON identity.id = source.provider_identity_id
+                WHERE source.owner_user_id = ?
+                  AND source.provider = 'google_drive'
+                ORDER BY source.id ASC
                 LIMIT 1
                 """,
                 (user_id,),
             ).fetchone()
     return {
         "status": "account_mismatch",
-        "current_account_label": _safe_google_account_label(
-            display_name=current["display_name"] if current else None,
-            email=current["email"] if current else None,
+        "current_account_label": _decrypt_google_identity_label(
+            current["display_label_encrypted"] if current else None,
+            settings,
         ),
-        "candidate_account_label": _safe_google_account_label(
-            display_name=candidate.get("display_name"),
-            email=candidate.get("email"),
+        "candidate_account_label": _decrypt_google_identity_label(
+            candidate.get("display_label_encrypted"),
+            settings,
         ),
         "expires_at": str(candidate["expires_at"]),
     }
@@ -659,13 +990,31 @@ def cancel_google_account_candidate(
         operation_id=operation_id,
     )
     with get_connection(settings) as connection:
+        now = utcnow_iso()
         connection.execute(
             """
             UPDATE google_oauth_account_candidates
             SET cancelled_at = ?
             WHERE id = ? AND consumed_at IS NULL AND cancelled_at IS NULL
             """,
-            (utcnow_iso(), int(candidate["id"])),
+            (now, int(candidate["id"])),
+        )
+        connection.execute(
+            """
+            UPDATE google_oauth_operations
+            SET status = 'cancelled', updated_at = ?, cancelled_at = ?, completed_at = ?
+            WHERE user_id = ? AND auth_session_id = ? AND operation_id_hash = ?
+              AND candidate_id = ? AND status = 'account_mismatch'
+            """,
+            (
+                now,
+                now,
+                now,
+                user_id,
+                auth_session_id,
+                str(candidate["operation_id_hash"]),
+                int(candidate["id"]),
+            ),
         )
         connection.commit()
 
@@ -690,27 +1039,30 @@ def confirm_google_account_candidate(
             status_code=status.HTTP_409_CONFLICT,
             detail="Google Drive account replacement is no longer available.",
         )
-    subject = str(candidate["google_account_id"])
-    subject_hash = _hash_google_account_subject(settings, subject)
+    subject_hash = str(candidate.get("provider_subject_hash") or "").strip()
+    display_label = _decrypt_google_identity_label(candidate.get("display_label_encrypted"), settings)
+    if not subject_hash:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Google Drive account replacement is no longer available.",
+        )
     with get_connection(settings) as connection:
         existing = connection.execute(
-            "SELECT id FROM google_drive_accounts WHERE user_id = ? LIMIT 1",
+            "SELECT id, provider_identity_id FROM google_drive_accounts WHERE user_id = ? LIMIT 1",
             (user_id,),
         ).fetchone()
         existing_account_id = int(existing["id"]) if existing else None
+        existing_identity_id = int(existing["provider_identity_id"]) if existing and existing["provider_identity_id"] else None
         source_rows = connection.execute(
             """
             SELECT id, resource_type, resource_id
             FROM library_sources
             WHERE owner_user_id = ?
               AND provider = 'google_drive'
-              AND (
-                expected_google_account_subject_hash IS NOT NULL
-                OR google_drive_account_id = ?
-              )
+              AND (provider_identity_id = ? OR google_drive_account_id = ?)
             ORDER BY id ASC
             """,
-            (user_id, existing_account_id),
+            (user_id, existing_identity_id, existing_account_id),
         ).fetchall()
     validation_results = _validate_google_source_access(
         access_token=access_token,
@@ -720,28 +1072,56 @@ def confirm_google_account_candidate(
     with get_connection(settings) as connection:
         active_candidate = connection.execute(
             """
-            SELECT id
-            FROM google_oauth_account_candidates
-            WHERE id = ? AND expires_at > ? AND consumed_at IS NULL AND cancelled_at IS NULL
+            SELECT candidate.id, operation.id AS operation_row_id
+            FROM google_oauth_account_candidates candidate
+            JOIN google_oauth_operations operation
+              ON operation.candidate_id = candidate.id
+             AND operation.user_id = candidate.user_id
+             AND operation.auth_session_id = candidate.auth_session_id
+             AND operation.operation_id_hash = candidate.operation_id_hash
+            JOIN sessions session ON session.id = candidate.auth_session_id
+            WHERE candidate.id = ?
+              AND candidate.user_id = ?
+              AND candidate.auth_session_id = ?
+              AND candidate.operation_id_hash = ?
+              AND candidate.expires_at > ?
+              AND candidate.consumed_at IS NULL
+              AND candidate.cancelled_at IS NULL
+              AND operation.status = 'account_mismatch'
+              AND operation.expires_at > ?
+              AND session.user_id = candidate.user_id
+              AND session.revoked_at IS NULL
             LIMIT 1
             """,
-            (int(candidate["id"]), now),
+            (
+                int(candidate["id"]),
+                user_id,
+                auth_session_id,
+                str(candidate["operation_id_hash"]),
+                now,
+                now,
+            ),
         ).fetchone()
         if active_candidate is None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Google Drive account replacement is no longer available.",
             )
+        provider_identity_id = _upsert_google_identity_in_connection(
+            connection,
+            settings=settings,
+            subject_hash=subject_hash,
+            display_label=display_label,
+        )
         connection.execute(
             """
             INSERT INTO google_drive_accounts (
-                user_id, google_account_id, email, display_name, refresh_token,
-                access_token, access_token_expires_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                user_id, google_account_id, email, display_name, provider_identity_id,
+                refresh_token, access_token, access_token_expires_at, created_at, updated_at
+            ) VALUES (?, '', NULL, NULL, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
-                google_account_id = excluded.google_account_id,
-                email = excluded.email,
-                display_name = excluded.display_name,
+                google_account_id = '', email = NULL, display_name = NULL,
+                provider_identity_id = excluded.provider_identity_id,
                 refresh_token = excluded.refresh_token,
                 access_token = excluded.access_token,
                 access_token_expires_at = excluded.access_token_expires_at,
@@ -749,9 +1129,7 @@ def confirm_google_account_candidate(
             """,
             (
                 user_id,
-                subject,
-                candidate.get("email"),
-                candidate.get("display_name") or candidate.get("email"),
+                provider_identity_id,
                 encrypt_at_rest(refresh_token, settings),
                 encrypt_at_rest(access_token, settings),
                 candidate.get("access_token_expires_at"),
@@ -765,38 +1143,60 @@ def confirm_google_account_candidate(
         ).fetchone()
         if account_row is None:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Google Drive account could not be saved.")
+        _apply_google_source_validation_results_in_connection(
+            connection,
+            user_id=user_id,
+            account_id=int(account_row["id"]),
+            provider_identity_id=provider_identity_id,
+            validation_results=validation_results,
+        )
         connection.execute(
             "UPDATE google_oauth_account_candidates SET consumed_at = ? WHERE id = ?",
             (now, int(candidate["id"])),
         )
+        connection.execute(
+            """
+            UPDATE google_oauth_operations
+            SET status = 'connected', updated_at = ?, completed_at = ?, candidate_id = ?
+            WHERE id = ? AND status = 'account_mismatch'
+            """,
+            (now, now, int(candidate["id"]), int(active_candidate["operation_row_id"])),
+        )
+        write_audit_event_in_connection(
+            connection,
+            action="cloud.google.account.replace",
+            outcome="success",
+            user_id=user_id,
+            session_id=auth_session_id,
+            target_type="google_drive_account",
+            target_id=int(account_row["id"]),
+            details={
+                "migrated_source_count": sum(
+                    1 for result in validation_results if isinstance(result.get("metadata"), dict)
+                ),
+                "failed_source_count": sum(
+                    1 for result in validation_results if not isinstance(result.get("metadata"), dict)
+                ),
+            },
+        )
         connection.commit()
-    _apply_google_source_validation_results(
-        settings,
-        user_id=user_id,
-        account_id=int(account_row["id"]),
-        subject_hash=subject_hash,
-        account_email=str(candidate.get("email") or "").strip() or None,
-        account_name=str(candidate.get("display_name") or candidate.get("email") or "").strip() or None,
-        validation_results=validation_results,
-    )
     migrated = sum(1 for result in validation_results if isinstance(result.get("metadata"), dict))
     return {
         "status": "connected",
         "migrated_source_count": migrated,
         "failed_source_count": len(validation_results) - migrated,
-        "account_label": _safe_google_account_label(
-            display_name=candidate.get("display_name"),
-            email=candidate.get("email"),
-        ),
+        "account_label": display_label,
     }
 
 
 def get_google_drive_account_access_token(settings: Settings, *, user_id: int) -> tuple[str, dict[str, object]]:
     with get_connection(settings) as connection:
+        normalize_google_provider_identity_rows(connection, settings=settings)
+        connection.commit()
         row = connection.execute(
             """
-            SELECT id, user_id, google_account_id, email, display_name,
-                   refresh_token, access_token, access_token_expires_at
+            SELECT id, user_id, provider_identity_id, refresh_token,
+                   access_token, access_token_expires_at
             FROM google_drive_accounts
             WHERE user_id = ?
             LIMIT 1
@@ -819,6 +1219,8 @@ def get_google_drive_account_access_token_by_account_id(
     google_account_id: int,
 ) -> str:
     with get_connection(settings) as connection:
+        normalize_google_provider_identity_rows(connection, settings=settings)
+        connection.commit()
         row = connection.execute(
             """
             SELECT id, user_id, refresh_token, access_token, access_token_expires_at

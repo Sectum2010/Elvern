@@ -29,6 +29,7 @@ from .routes.progress import router as progress_router
 from .routes.stream import router as stream_router
 from .routes.system import router as system_router
 from .routes.user_hidden_items import router as user_hidden_items_router
+from .routes.settings_hidden_titles import router as settings_hidden_titles_router
 from .routes.user_settings import router as user_settings_router
 from .services.admin_events_service import admin_event_hub
 from .services.transcode_service import TranscodeManager
@@ -121,6 +122,7 @@ app.include_router(progress_router)
 app.include_router(stream_router)
 app.include_router(system_router)
 app.include_router(user_hidden_items_router)
+app.include_router(settings_hidden_titles_router)
 app.include_router(user_settings_router)
 
 

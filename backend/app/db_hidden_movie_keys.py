@@ -664,6 +664,7 @@ def resolve_hidden_copy_identity_payload(
         "display_title": display_title,
         "year": resolved_year if resolved_year is not None else 0,
         "edition_identity": edition_identity,
+        "representative_media_item_id": int(_row_value(row, "id")),
     }
 
 
@@ -683,9 +684,15 @@ def _insert_user_copy_key(
 ) -> int:
     cursor = connection.execute(
         """
-        INSERT OR IGNORE INTO user_hidden_movie_keys (
-            user_id, movie_key, display_title, year, edition_identity, hidden_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO user_hidden_movie_keys (
+            user_id, movie_key, display_title, year, edition_identity,
+            representative_media_item_id, hidden_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, movie_key) DO UPDATE SET
+            representative_media_item_id = COALESCE(
+                user_hidden_movie_keys.representative_media_item_id,
+                excluded.representative_media_item_id
+            )
         """,
         (
             user_id,
@@ -693,6 +700,7 @@ def _insert_user_copy_key(
             payload["display_title"],
             payload["year"],
             payload["edition_identity"],
+            payload["representative_media_item_id"],
             hidden_at,
         ),
     )
@@ -708,16 +716,22 @@ def _insert_global_copy_key(
 ) -> int:
     cursor = connection.execute(
         """
-        INSERT OR IGNORE INTO global_hidden_movie_keys (
+        INSERT INTO global_hidden_movie_keys (
             movie_key, display_title, year, edition_identity,
-            hidden_by_user_id, hidden_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            representative_media_item_id, hidden_by_user_id, hidden_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(movie_key) DO UPDATE SET
+            representative_media_item_id = COALESCE(
+                global_hidden_movie_keys.representative_media_item_id,
+                excluded.representative_media_item_id
+            )
         """,
         (
             payload["movie_key"],
             payload["display_title"],
             payload["year"],
             payload["edition_identity"],
+            payload["representative_media_item_id"],
             hidden_by_user_id,
             hidden_at,
         ),
@@ -1148,6 +1162,7 @@ def preserve_hidden_movie_keys_for_media_item(
         ),
         "year": resolved_year if resolved_year is not None else 0,
         "edition_identity": edition_identity,
+        "representative_media_item_id": int(media_item_id),
     }
 
     user_count = 0

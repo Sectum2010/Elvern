@@ -105,11 +105,49 @@ Migrations:
 
 - `poster_width_control_center_1400_v1`
 - `google_oauth_secret_fernet1_v1`
+- `google_provider_identity_v1`
+
+Google account identity is normalized through `provider_identities`. Provider
+subjects are compared by HMAC, display labels are encrypted at rest, and source
+rows reference the normalized identity instead of retaining duplicate plaintext
+account labels. Legacy subject/label columns remain schema-compatible for safe
+rollback but are cleared and are no longer the authoritative read/write path.
+
+Reconnect is a durable, server-authoritative operation bound to the Elvern user,
+auth session, HMAC of the opaque operation ID, and expiry. The browser transitions
+through starting, external navigation, and one bounded reconciliation into
+connected, incomplete/cancelled, account mismatch, error, or expiry. Status and
+cancel are authenticated POST requests with `no-store`; raw operation IDs, OAuth
+state, authorization codes, tokens, provider subjects, labels, and full provider
+URLs are not logged. Callback completion and confirmed account replacement use a
+single final database transaction so candidate consumption, normalized identity,
+account/source binding, operation completion, and audit state cannot partially
+commit.
 
 New endpoints:
 
 - `DELETE /api/admin/google-drive-setup`
 - `DELETE /api/admin/google-drive-account`
+- `POST /api/cloud-libraries/google/operation/status`
+- `POST /api/cloud-libraries/google/operation/cancel`
+
+## Settings resource ownership
+
+Age restrictions use one resource controller for initial load, forced refresh,
+cached refresh, error/retry, cancellation, and identity changes. A manual refresh
+issues one authoritative request, keeps cached rows visible, disables duplicate
+clicks, and displays `Refreshing…` with the Meridian scan icon until the real
+request settles.
+
+Hidden titles use `GET /api/settings/hidden-titles`, a versioned, private,
+no-cache response that reads only hidden-key/direct-hidden rows and never invokes
+the full Library presentation path, poster generation, or unrelated title
+parsing. The response contains personal rows and, for admins only, global rows.
+Its ETag is derived from permission/user-overlay revision plus role; a matching
+`If-None-Match` returns 304 before list materialization. The frontend keeps one
+user/role-isolated in-memory Control Center query (`30s` stale time, `4h` garbage
+collection), shows cached rows while validating, and never persists hidden-title
+contents in browser storage.
 
 ## Admin parity
 
@@ -134,6 +172,32 @@ and password-help workflow. Security keeps own/user 2FA, sessions, URL-prefix
 rotation, and the four-step Exposure workflow. Logs keeps real sessions and
 audit rows; Recovery keeps the full existing backup workflow. No destructive
 mutation was replaced with demo state.
+
+Users & Invites uses one Meridian surface hierarchy rather than stacked legacy
+and Meridian card shadows. Avatars select one of eight restrained palettes from
+a stable hash of the internal user ID; color never communicates role, age,
+presence, or risk. Active/background/pending status indicators have distinct,
+subtle motion while offline/disabled indicators remain static; reduced-motion
+mode disables all status animation. The existing User Actions modal and secure
+handlers remain unchanged. Invite age selection is an inline Meridian panel on
+desktop, and Password Help has its own stable card with real loading, refresh,
+cached-error, empty, and request states.
+
+Overview keeps the presentation-only `92 / PRIVATE` gauge. Posture rows reserve
+an explicit label column and constrain long values to their value column. Long
+origins remain right-aligned and ellipsized, with the full value available to
+tooltip, keyboard focus, and the restrained copy action.
+
+## Viewport paint policy
+
+Desktop Settings/Admin applies a synchronous route-scoped Control Center paint
+state to `html`, `body`, `#root`, the application shell, and the page shell before
+the first visible React paint. The production root fills the usable viewport and
+has no demo-frame radius or shadow; browser/OS/PWA chrome owns physical window
+rounding. The paint follows light/mixed/dark theme changes and safe-area insets,
+then is removed when leaving Control Center so the chosen Library background is
+restored. This prevents Neon or another Library preset from leaking through the
+corners during direct load, route navigation, refresh, or status-rail motion.
 
 ## Request ownership
 
@@ -185,24 +249,58 @@ other font network request is used.
 
 ## Visual and device review
 
-The Chromium Settings navigation run can optionally compare the production
-Control Center directly with the private local Meridian demo by setting
-`ELVERN_MERIDIAN_DEMO_PATH`. Setting
-`ELVERN_CONTROL_CENTER_SCREENSHOT_DIR` also saves deterministic review captures
-and machine-readable pixel reports under the ignored local
-`tmp/control-center-visual-review/` directory.
+Visual verification has two explicit modes. Local source generation requires the
+private demo path and an explicit update flag:
 
-The verified 1360 x 880 comparisons cover a 16-state matrix: all four Appearance
-modes, every Settings destination, Admin Overview/Users/Security/Logs, the open
-System Status rail, and Mixed/Dark themes. Every state matched dimensions.
-Changed-pixel ratios ranged from `0.02940` to `0.18396`; mean RGB-channel deltas
-ranged from `5.10` to `36.40`. The representative Appearance Presets result was
-`0.04244` / `7.50`, while Admin Overview was `0.05778` / `8.93`.
-Additional deterministic captures cover:
+```bash
+ELVERN_MERIDIAN_DEMO_PATH=/absolute/private/Settings-Meridian.dc.html \
+  npm run visual:update:control-center --prefix frontend
+```
+
+It renders the real local demo and production in the same Chromium runtime,
+normalizes all dynamic values to synthetic fixtures, and writes demo, production,
+diff, geometry, computed-style, and source-hash evidence. Baseline updates are a
+review action: generated files remain unstaged and must be visually inspected
+before an owner accepts them. The private HTML/support script and its absolute
+path are never copied into production, served by Elvern, or shipped in reviewed
+artifacts.
+
+Normal CI does not read the private demo. It compares stubbed production against
+the sanitized reviewed files under
+`frontend/tests-phase7/baselines/control-center`:
+
+```bash
+node frontend/scripts/run-cross-browser-playwright.mjs \
+  --use-existing-build --project chromium-control-center-baseline
+```
+
+The CI gate requires exact dimensions and landmark presence, 0-1px named
+geometry tolerance, exact audited computed styles, changed-pixel ratio at most
+`0.5%`, and mean channel delta at most `1.5`. Animations are frozen only for
+pixel capture; separate tests retain the real motion/reduced-motion contract.
+The baseline manifest records the private source SHA-256 and only these approved
+differences:
+
+- user-approved warm light palette;
+- browser-owned root frame instead of the demo's 18px preview radius/shadow;
+- deterministic avatar palettes;
+- state-specific user status motion;
+- approved connected Google copy;
+- long-origin ellipsis/tooltip/copy treatment;
+- existing Create User `More ages` selector.
+
+Reviewed deterministic captures cover:
 
 - desktop Settings;
 - desktop Settings with the System Status rail;
 - desktop Admin Overview;
+- Settings Age pending/success/error;
+- Cloud connected/reconnect/incomplete Back recovery;
+- Hidden personal/global empty, non-empty, skeleton, and cached refresh;
+- Users light/mixed/dark and active/background/pending/offline/disabled states;
+- Create User, inline Invite Age, synthetic invite code, and Password Help states;
+- long and IPv6-like origins at 1360, 1180, and 1024 widths;
+- Neon corner paint at 1360 x 880, 1440 x 900, 1180 x 760, and 1024 x 768;
 - phone Settings using the legacy surface;
 - phone Admin using the legacy surface;
 - tablet Settings using the legacy surface;

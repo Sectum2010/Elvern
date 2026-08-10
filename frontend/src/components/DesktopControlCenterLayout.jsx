@@ -21,6 +21,7 @@ import {
 } from "../lib/libraryNavigation.js";
 import { useControlCenterSession } from "./ControlCenterSessionContext.jsx";
 import { SystemStatusRail } from "./SystemStatusRail.jsx";
+import { applyControlCenterPaint } from "../lib/controlCenterPaint.js";
 
 const SETTINGS_NAV = [
   ["appearance", "Appearance", Palette],
@@ -145,7 +146,9 @@ export function DesktopControlCenterLayout() {
   }
 
   function cycleTheme() {
-    setTheme(theme === "light" ? "mixed" : theme === "mixed" ? "dark" : "light");
+    const nextTheme = theme === "light" ? "mixed" : theme === "mixed" ? "dark" : "light";
+    applyControlCenterPaint({ active: true, theme: nextTheme });
+    setTheme(nextTheme);
   }
 
   const ThemeIcon = theme === "light" ? LightThemeIcon : theme === "dark" ? DarkThemeIcon : MixedThemeIcon;
@@ -159,8 +162,9 @@ export function DesktopControlCenterLayout() {
       data-control-center-tab={tab}
       data-control-center-theme={theme}
       data-meridian-theme={theme}
+      data-visual-landmark="control-center-root"
     >
-      <aside className="meridian-sidebar">
+      <aside className="meridian-sidebar" data-visual-landmark="sidebar">
         <button className="meridian-sidebar__back" onClick={returnToLibrary} type="button">
           <BackIcon />
           <span>Library</span>
@@ -217,9 +221,9 @@ export function DesktopControlCenterLayout() {
         </div>
       </aside>
 
-      <main className="meridian-workspace">
+      <main className="meridian-workspace" data-visual-landmark="workspace">
         <div className="meridian-workspace__inner">
-          <header className="meridian-page-header">
+          <header className="meridian-page-header" data-visual-landmark="page-header">
             <h1>{title}</h1>
             {subtitle ? <p>{subtitle}</p> : null}
           </header>

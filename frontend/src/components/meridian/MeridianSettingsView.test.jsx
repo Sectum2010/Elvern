@@ -121,25 +121,31 @@ function serverModel(overrides = {}) {
   };
 }
 
+function libraryModel(overrides = {}) {
+  return {
+    settings: {
+      hide_recently_added: false,
+      hide_duplicate_movies: false,
+    },
+    saving: false,
+    isAdmin: true,
+    ageGroupsStatus: { error: "", loaded: true, loading: false },
+    ageBuckets: [],
+    onRecentlyAddedToggle: vi.fn(),
+    onDuplicateToggle: vi.fn(),
+    onRefreshAgeGroups: vi.fn(),
+    onRetryAgeGroups: vi.fn(),
+    onOpenAgeBucket: vi.fn(),
+    ...overrides,
+  };
+}
+
 describe("MeridianSettingsView contracts", () => {
   test("Library keeps the dedicated age refresh control and real refresh action", () => {
     const onRefreshAgeGroups = vi.fn();
     const model = {
       ...baseModel(),
-      library: {
-        settings: {
-          hide_recently_added: false,
-          hide_duplicate_movies: false,
-        },
-        saving: false,
-        isAdmin: true,
-        ageGroupsLoading: false,
-        ageBuckets: [],
-        onRecentlyAddedToggle: vi.fn(),
-        onDuplicateToggle: vi.fn(),
-        onRefreshAgeGroups,
-        onOpenAgeBucket: vi.fn(),
-      },
+      library: libraryModel({ onRefreshAgeGroups }),
     };
     render(<MeridianSettingsView model={model} tab="library" />);
 
@@ -147,6 +153,62 @@ describe("MeridianSettingsView contracts", () => {
     expect(refresh).toHaveClass("meridian-age-refresh");
     fireEvent.click(refresh);
     expect(onRefreshAgeGroups).toHaveBeenCalledTimes(1);
+  });
+
+  test("Library age refresh keeps cached rows, exact pending copy, and one disabled action", () => {
+    const model = {
+      ...baseModel(),
+      library: libraryModel({
+        ageGroupsStatus: { error: "", loaded: true, loading: true },
+        ageBuckets: [{ age: 12, ageLabel: "12", groupCount: 1, copiesCount: 2, manualLinksCount: 0 }],
+      }),
+    };
+    render(<MeridianSettingsView model={model} tab="library" />);
+
+    expect(screen.getByText("1 movie group")).toBeInTheDocument();
+    const pending = screen.getByRole("button", { name: "Refreshing…" });
+    expect(pending).toBeDisabled();
+    expect(pending.querySelector(".meridian-scan-icon")).toHaveClass("is-spinning");
+    fireEvent.click(pending);
+    expect(model.library.onRefreshAgeGroups).not.toHaveBeenCalled();
+  });
+
+  test("Library age failure without cache is not presented as an empty result", () => {
+    const model = {
+      ...baseModel(),
+      library: libraryModel({
+        ageGroupsStatus: {
+          error: "Age restrictions could not be loaded.",
+          loaded: false,
+          loading: false,
+        },
+      }),
+    };
+    render(<MeridianSettingsView model={model} tab="library" />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Age restrictions could not be loaded.");
+    expect(screen.queryByText("No age-restricted movies yet.")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(model.library.onRetryAgeGroups).toHaveBeenCalledTimes(1);
+  });
+
+  test("Library age failure with cache retains the authoritative cached summary", () => {
+    const model = {
+      ...baseModel(),
+      library: libraryModel({
+        ageGroupsStatus: {
+          error: "Age restrictions could not be refreshed.",
+          loaded: true,
+          loading: false,
+        },
+        ageBuckets: [{ age: 9, ageLabel: "9", groupCount: 1, copiesCount: 1, manualLinksCount: 0 }],
+      }),
+    };
+    render(<MeridianSettingsView model={model} tab="library" />);
+
+    expect(screen.getByText("1 movie group")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Age restrictions could not be refreshed.");
+    expect(screen.queryByText("No age-restricted movies yet.")).not.toBeInTheDocument();
   });
 
   test("Cloud connection and empty personal-library copy use the Meridian layout hooks", () => {

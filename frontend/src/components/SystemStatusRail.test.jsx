@@ -27,8 +27,14 @@ function responseFor(path) {
   if (path === "/api/system/status") return { total_media_items: 92 };
   if (path === "/api/cloud-libraries") return { google: { enabled: true, connected: true } };
   if (path === "/api/admin/google-drive-setup") return { configuration_label: "Configured" };
-  if (path === "/api/user-hidden-items") return { items: [{ id: 1 }] };
-  if (path === "/api/admin/global-hidden-items") return { items: [{ id: 2 }, { id: 3 }] };
+  if (path === "/api/settings/hidden-titles") {
+    return {
+      schema_version: "settings-hidden-titles-v1",
+      revision: "a".repeat(64),
+      personal: { count: 1, items: [{ id: 1 }] },
+      global: { count: 2, items: [{ id: 2 }, { id: 3 }] },
+    };
+  }
   if (path === "/api/user-settings") {
     return { poster_card_display_max_width: "1400", desktop_floating_island_position: "top" };
   }
@@ -66,8 +72,10 @@ describe("SystemStatusRail", () => {
       deviceId: "device-a",
       payloads: {
         system: { total_media_items: 0 },
-        personalHidden: { items: [] },
-        globalHidden: { items: [{ id: 2 }] },
+        hiddenTitles: {
+          personal: { items: [] },
+          global: { items: [{ id: 2 }] },
+        },
         desktopHelper: { helper_required: true, vlc_detection_state: "detection_unavailable" },
       },
     }));
@@ -82,7 +90,11 @@ describe("SystemStatusRail", () => {
     expect(screen.getByText("3")).toBeInTheDocument();
     expect(screen.getByText("VLC on host")).toBeInTheDocument();
     expect(screen.getAllByText("Not required")).toHaveLength(2);
-    expect(apiRequest).toHaveBeenCalledTimes(7);
+    expect(apiRequest).toHaveBeenCalledTimes(6);
+    expect(apiRequest).toHaveBeenCalledWith(
+      "/api/settings/hidden-titles",
+      expect.objectContaining({ abortOnPageHide: true }),
+    );
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(sessionState.setStatusRailOpen).toHaveBeenCalledWith(false);

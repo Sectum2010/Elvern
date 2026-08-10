@@ -7,7 +7,7 @@ from typing import Callable, Literal
 from fastapi import HTTPException, status
 
 from ..config import Settings
-from ..db import get_connection, utcnow_iso
+from ..db import get_connection, normalize_google_provider_identity_rows, utcnow_iso
 from ..models import AuthenticatedUser
 from .google_drive_service import (
     PROVIDER_AUTH_REQUIRED_CODE,
@@ -15,7 +15,17 @@ from .google_drive_service import (
     fetch_drive_resource_metadata,
     google_drive_enabled,
 )
-from .cloud_provider_auth_service import _hash_google_account_subject
+from .at_rest_encryption import decrypt_at_rest
+
+
+def _decrypt_account_label(stored: object, settings: Settings) -> str | None:
+    if not stored:
+        return None
+    try:
+        label, _ = decrypt_at_rest(str(stored), settings)
+    except ValueError:
+        return None
+    return str(label or "").strip() or None
 
 
 def _parse_cloud_source_error_detail(value: object) -> dict[str, object] | None:
@@ -150,7 +160,7 @@ def _build_google_connection_status(
 
     account_label = None
     if account_row is not None:
-        account_label = str(account_row["display_name"] or account_row["email"] or "").strip() or None
+        account_label = str(account_row["account_label"] or "").strip() or None
     if visible_sources:
         message = "Google Drive account connected. Cloud libraries are ready to refresh."
     else:
@@ -258,11 +268,14 @@ def get_cloud_libraries_payload(
     provider: str,
 ) -> dict[str, object]:
     with get_connection(settings) as connection:
+        normalize_google_provider_identity_rows(connection, settings=settings)
+        connection.commit()
         account_row = connection.execute(
             """
-            SELECT email, display_name
-            FROM google_drive_accounts
-            WHERE user_id = ?
+            SELECT identity.display_label_encrypted
+            FROM google_drive_accounts account
+            JOIN provider_identities identity ON identity.id = account.provider_identity_id
+            WHERE account.user_id = ?
             LIMIT 1
             """,
             (user.id,),
@@ -281,13 +294,10 @@ def get_cloud_libraries_payload(
                 s.last_error,
                 COUNT(m.id) AS item_count,
                 CASE WHEN h.id IS NULL THEN 0 ELSE 1 END AS hidden_for_user,
-                owner.username AS owner_username,
-                account.email AS owner_account_email
+                owner.username AS owner_username
             FROM library_sources s
             JOIN users owner
               ON owner.id = s.owner_user_id
-            LEFT JOIN google_drive_accounts account
-              ON account.id = s.google_drive_account_id
             LEFT JOIN media_items m
               ON m.library_source_id = s.id
             LEFT JOIN user_hidden_library_sources h
@@ -309,8 +319,7 @@ def get_cloud_libraries_payload(
                 s.last_synced_at,
                 s.last_error,
                 h.id,
-                owner.username,
-                account.email
+                owner.username
             ORDER BY s.is_shared ASC, datetime(s.created_at) DESC, lower(s.display_name) ASC
             """,
             (user.id, provider, user.id),
@@ -334,7 +343,7 @@ def get_cloud_libraries_payload(
             "is_shared": bool(row["is_shared"]),
             "hidden_for_user": bool(row["hidden_for_user"]),
             "owner_username": row["owner_username"],
-            "owner_account_email": row["owner_account_email"],
+            "owner_account_email": None,
             "item_count": int(row["item_count"] or 0),
             "created_at": str(row["created_at"]),
             "last_synced_at": row["last_synced_at"],
@@ -353,10 +362,14 @@ def get_cloud_libraries_payload(
         else:
             my_libraries.append(payload)
 
+    account_label = _decrypt_account_label(
+        account_row["display_label_encrypted"] if account_row else None,
+        settings,
+    )
     google_status = _build_google_connection_status(
         enabled=google_drive_enabled(settings),
         connected=account_row is not None,
-        account_row=account_row,
+        account_row={"account_label": account_label} if account_row else None,
         visible_sources=visible_sources,
     )
 
@@ -364,8 +377,8 @@ def get_cloud_libraries_payload(
         "google": {
             "enabled": google_drive_enabled(settings),
             "connected": account_row is not None,
-            "account_email": str(account_row["email"]) if account_row and account_row["email"] else None,
-            "account_name": str(account_row["display_name"]) if account_row and account_row["display_name"] else None,
+            "account_email": None,
+            "account_name": account_label,
             "connection_status": google_status["connection_status"],
             "reconnect_required": bool(google_status["reconnect_required"]),
             "provider_auth_required": bool(google_status["provider_auth_required"]),
@@ -459,6 +472,7 @@ def add_google_drive_library_source_record(
                 owner_user_id,
                 provider,
                 google_drive_account_id,
+                provider_identity_id,
                 expected_google_account_subject_hash,
                 expected_google_account_email,
                 expected_google_account_name,
@@ -470,15 +484,13 @@ def add_google_drive_library_source_record(
                 updated_at,
                 last_synced_at,
                 last_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 user.id,
                 provider,
                 int(account_row["id"]),
-                _hash_google_account_subject(settings, str(account_row["google_account_id"])),
-                account_row.get("email"),
-                account_row.get("display_name"),
+                int(account_row["provider_identity_id"]),
                 metadata["resource_type"],
                 metadata["resource_id"],
                 metadata["display_name"],

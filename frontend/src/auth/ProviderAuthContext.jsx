@@ -6,12 +6,10 @@ import {
   buildProviderAuthReturnPath,
   clearProviderAuthIntent,
   createProviderAuthOperationId,
-  getGoogleDriveStatusFromLocation,
   getProviderAuthIdentity,
   getProviderAuthRequirementFromStatus,
   isProviderAuthReconnectCapable,
   PROVIDER_RECONNECT_CANCELLED_MESSAGE,
-  PROVIDER_RECONNECT_PENDING_RESET_MS,
   readProviderAuthIntent,
   saveProviderAuthIntent,
   shouldShowProviderAuthBootstrapModal,
@@ -53,7 +51,7 @@ function removeGoogleDriveCallbackParams() {
 
 
 export function ProviderAuthProvider({ children }) {
-  const { user } = useAuth();
+  const { loading: authLoading, user } = useAuth();
   const identity = getProviderAuthIdentity(user);
   const [requirement, setRequirement] = useState(null);
   const [dismissedThisSession, setDismissedThisSession] = useState(false);
@@ -66,7 +64,6 @@ export function ProviderAuthProvider({ children }) {
   const identityRef = useRef(identity);
   const transactionRef = useRef(IDLE_TRANSACTION);
   const reconcileInFlightRef = useRef(null);
-  const boundedCheckTimerRef = useRef(0);
   const lastResumeCheckAtRef = useRef(0);
 
   const updateTransaction = useCallback((nextTransaction) => {
@@ -120,14 +117,10 @@ export function ProviderAuthProvider({ children }) {
 
   const finishTransaction = useCallback((nextState, message, result = null) => {
     clearProviderAuthIntent();
-    if (boundedCheckTimerRef.current) {
-      window.clearTimeout(boundedCheckTimerRef.current);
-      boundedCheckTimerRef.current = 0;
-    }
     updateTransaction({ state: nextState, message, candidate: null, result });
   }, [updateTransaction]);
 
-  const reconcileProviderAuthTransaction = useCallback(async ({ bounded = false } = {}) => {
+  const reconcileProviderAuthTransaction = useCallback(async () => {
     if (!user || !identity) {
       return null;
     }
@@ -135,33 +128,55 @@ export function ProviderAuthProvider({ children }) {
     if (!intent?.operationId) {
       return null;
     }
-    if (reconcileInFlightRef.current) {
-      return reconcileInFlightRef.current;
+    const currentInFlight = reconcileInFlightRef.current;
+    if (
+      currentInFlight?.identity === identity
+      && currentInFlight?.operationId === intent.operationId
+    ) {
+      return currentInFlight.promise;
     }
-    const task = (async () => {
+    if (currentInFlight) {
+      currentInFlight.controller.abort();
+    }
+    const controller = new AbortController();
+    let task;
+    task = (async () => {
       const operationIdentity = identity;
       const operationId = intent.operationId;
       updateTransaction({ state: "reconciling", message: "", candidate: null, result: null });
-      const callbackStatus = getGoogleDriveStatusFromLocation(window.location);
       const callbackMessage = getGoogleDriveMessageFromLocation(window.location);
-      if (callbackStatus === "cancelled" || callbackStatus === "error") {
-        const message = callbackMessage || PROVIDER_RECONNECT_CANCELLED_MESSAGE;
-        finishTransaction(
-          callbackStatus === "error" ? "error" : "cancelled_or_incomplete",
-          message,
-        );
-        removeGoogleDriveCallbackParams();
-        if (requirementRef.current) {
-          setModalOpen(true);
-          setModalError(message);
+      let operation;
+      try {
+        operation = await apiRequest("/api/cloud-libraries/google/operation/status", {
+          method: "POST",
+          data: { operation_id: operationId },
+          signal: controller.signal,
+        });
+      } catch (requestError) {
+        if (
+          requestError?.name === "AbortError"
+          || identityRef.current !== operationIdentity
+          || readProviderAuthIntent({ identity: operationIdentity })?.operationId !== operationId
+        ) {
+          return transactionRef.current;
         }
+        finishTransaction("cancelled_or_incomplete", PROVIDER_RECONNECT_CANCELLED_MESSAGE);
+        removeGoogleDriveCallbackParams();
         return transactionRef.current;
       }
-      if (callbackStatus === "account_mismatch") {
+      if (
+        identityRef.current !== operationIdentity
+        || readProviderAuthIntent({ identity: operationIdentity })?.operationId !== operationId
+      ) {
+        return transactionRef.current;
+      }
+
+      if (operation?.status === "account_mismatch") {
         try {
           const candidate = await apiRequest("/api/cloud-libraries/google/account-candidate/status", {
             method: "POST",
             data: { operation_id: intent.operationId },
+            signal: controller.signal,
           });
           if (
             identityRef.current !== operationIdentity
@@ -179,7 +194,11 @@ export function ProviderAuthProvider({ children }) {
           removeGoogleDriveCallbackParams();
           return next;
         } catch (requestError) {
-          if (identityRef.current !== operationIdentity) {
+          if (
+            requestError?.name === "AbortError"
+            || identityRef.current !== operationIdentity
+            || readProviderAuthIntent({ identity: operationIdentity })?.operationId !== operationId
+          ) {
             return transactionRef.current;
           }
           finishTransaction("error", requestError.message || "Google Drive account replacement expired.");
@@ -188,50 +207,70 @@ export function ProviderAuthProvider({ children }) {
         }
       }
 
-      const [providerResult, cloudResult] = await Promise.allSettled([
-        apiRequest("/api/cloud-libraries/google/provider-auth-status"),
-        apiRequest("/api/cloud-libraries"),
-      ]);
-      if (
-        identityRef.current !== operationIdentity
-        || readProviderAuthIntent({ identity: operationIdentity })?.operationId !== operationId
-      ) {
-        return transactionRef.current;
-      }
-      if (providerResult.status === "fulfilled") {
-        const nextRequirement = getProviderAuthRequirementFromStatus(providerResult.value);
-        setRequirement(nextRequirement);
-        requirementRef.current = nextRequirement;
-      }
-      const google = cloudResult.status === "fulfilled" ? cloudResult.value?.google : null;
-      const connected = callbackStatus === "connected"
-        || Boolean(google?.connected && !google?.reconnect_required);
-      if (connected) {
-        finishTransaction("connected", callbackMessage || "Google Drive connected.", google);
+      if (operation?.status === "connected") {
+        const nextRequirement = await refreshProviderAuthStatus();
+        if (
+          identityRef.current !== operationIdentity
+          || readProviderAuthIntent({ identity: operationIdentity })?.operationId !== operationId
+        ) {
+          return transactionRef.current;
+        }
+        finishTransaction(
+          "connected",
+          callbackMessage || "Google Drive connected.",
+          { requirement: nextRequirement },
+        );
         removeGoogleDriveCallbackParams();
         return transactionRef.current;
       }
-      if (bounded) {
-        finishTransaction("cancelled_or_incomplete", PROVIDER_RECONNECT_CANCELLED_MESSAGE);
-        if (requirementRef.current) {
-          setModalOpen(true);
-          setModalError(PROVIDER_RECONNECT_CANCELLED_MESSAGE);
+
+      if (operation?.status === "pending") {
+        try {
+          await apiRequest("/api/cloud-libraries/google/operation/cancel", {
+            method: "POST",
+            data: { operation_id: operationId },
+            signal: controller.signal,
+          });
+        } catch {
+          // The pending operation may have expired between status and cancellation.
         }
+        if (
+          identityRef.current !== operationIdentity
+          || readProviderAuthIntent({ identity: operationIdentity })?.operationId !== operationId
+        ) {
+          return transactionRef.current;
+        }
+        finishTransaction("cancelled_or_incomplete", PROVIDER_RECONNECT_CANCELLED_MESSAGE);
+        removeGoogleDriveCallbackParams();
         return transactionRef.current;
       }
-      if (!boundedCheckTimerRef.current) {
-        boundedCheckTimerRef.current = window.setTimeout(() => {
-          boundedCheckTimerRef.current = 0;
-          void reconcileProviderAuthTransaction({ bounded: true });
-        }, PROVIDER_RECONNECT_PENDING_RESET_MS);
+
+      if (operation?.status === "error") {
+        finishTransaction(
+          "error",
+          operation.message || callbackMessage || "Google Drive reconnect failed.",
+        );
+      } else {
+        finishTransaction(
+          "cancelled_or_incomplete",
+          callbackMessage || PROVIDER_RECONNECT_CANCELLED_MESSAGE,
+        );
       }
+      removeGoogleDriveCallbackParams();
       return transactionRef.current;
     })().finally(() => {
-      reconcileInFlightRef.current = null;
+      if (reconcileInFlightRef.current?.promise === task) {
+        reconcileInFlightRef.current = null;
+      }
     });
-    reconcileInFlightRef.current = task;
+    reconcileInFlightRef.current = {
+      identity,
+      operationId: intent.operationId,
+      controller,
+      promise: task,
+    };
     return task;
-  }, [finishTransaction, identity, updateTransaction, user]);
+  }, [finishTransaction, identity, refreshProviderAuthStatus, updateTransaction, user]);
 
   function showProviderAuthPrompt(nextRequirement = requirementRef.current, { onLater = null } = {}) {
     if (!nextRequirement) {
@@ -345,6 +384,13 @@ export function ProviderAuthProvider({ children }) {
   }
 
   useEffect(() => {
+    if (authLoading) {
+      return undefined;
+    }
+    if (reconcileInFlightRef.current?.identity !== identity) {
+      reconcileInFlightRef.current?.controller.abort();
+      reconcileInFlightRef.current = null;
+    }
     if (!user || !identity) {
       clearProviderAuthIntent();
       updateTransaction(IDLE_TRANSACTION);
@@ -363,7 +409,7 @@ export function ProviderAuthProvider({ children }) {
       void reconcileProviderAuthTransaction();
     }
     return () => controller.abort();
-  }, [identity, reconcileProviderAuthTransaction, refreshProviderAuthStatus, updateTransaction, user]);
+  }, [authLoading, identity, reconcileProviderAuthTransaction, refreshProviderAuthStatus, updateTransaction, user]);
 
   useEffect(() => {
     if (!user || typeof window === "undefined") {
@@ -394,12 +440,6 @@ export function ProviderAuthProvider({ children }) {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [identity, reconcileProviderAuthTransaction, user]);
-
-  useEffect(() => () => {
-    if (boundedCheckTimerRef.current) {
-      window.clearTimeout(boundedCheckTimerRef.current);
-    }
-  }, []);
 
   useEffect(() => {
     if (requirement && shouldShowProviderAuthBootstrapModal({ requirement, dismissed: dismissedThisSession })) {

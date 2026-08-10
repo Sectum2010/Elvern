@@ -4,7 +4,6 @@ import {
   Cloud,
   Copy,
   FolderOpen,
-  RefreshCw,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -12,14 +11,15 @@ import {
   BACKGROUND_PRESETS,
   buildBackgroundPreviewStyle,
 } from "../../lib/userBackground.js";
+import { MeridianScanIcon } from "./MeridianScanIcon.jsx";
 
 function MeridianCard({ children, className = "", ...props }) {
   return <section className={`meridian-card${className ? ` ${className}` : ""}`} {...props}>{children}</section>;
 }
 
-function Segmented({ ariaLabel, className = "", disabled = false, onChange, options, value }) {
+function Segmented({ ariaLabel, className = "", disabled = false, onChange, options, value, visualLandmark = undefined }) {
   return (
-    <div aria-label={ariaLabel} className={`meridian-segmented${className ? ` ${className}` : ""}`} role="radiogroup">
+    <div aria-label={ariaLabel} className={`meridian-segmented${className ? ` ${className}` : ""}`} data-visual-landmark={visualLandmark} role="radiogroup">
       {options.map((option) => (
         <button
           aria-checked={option.value === value}
@@ -249,6 +249,14 @@ function AppearancePanel({ model }) {
 }
 
 function LibraryPanel({ model }) {
+  const ageStatus = model.ageGroupsStatus || {
+    error: "",
+    loaded: true,
+    loading: Boolean(model.ageGroupsLoading),
+  };
+  const ageLoading = Boolean(ageStatus.loading);
+  const ageLoaded = !model.isAdmin || Boolean(ageStatus.loaded);
+  const hasAgeBuckets = model.ageBuckets.length > 0;
   return (
     <div className="meridian-panel-stack">
       <MeridianCard>
@@ -256,12 +264,17 @@ function LibraryPanel({ model }) {
         <div className="meridian-divider" />
         <ToggleRow checked={model.settings.hide_duplicate_movies} description="Show only the highest-quality copy for the same title, year, and edition." disabled={model.saving} label="Hide duplicate copies" onChange={model.onDuplicateToggle} />
       </MeridianCard>
-      <MeridianCard className={model.isAdmin && !model.ageBuckets.length ? "meridian-age-card meridian-age-card--empty" : "meridian-age-card"}>
+      <MeridianCard className={model.isAdmin && ageLoaded && !hasAgeBuckets ? "meridian-age-card meridian-age-card--empty" : "meridian-age-card"} data-visual-landmark="age-restrictions-card">
         <div className="meridian-card-header">
           <span className="meridian-row-copy"><strong>Age restrictions</strong><small>Review automatic movie age groups and explicit manual links.</small></span>
-          {model.isAdmin ? <PillButton className="meridian-age-refresh" disabled={model.ageGroupsLoading} onClick={model.onRefreshAgeGroups}><RefreshCw aria-hidden="true" className={model.ageGroupsLoading ? "is-spinning" : ""} size={14} />{model.ageGroupsLoading ? "Refreshing…" : "Refresh"}</PillButton> : null}
+          {model.isAdmin ? <PillButton className="meridian-age-refresh" data-visual-landmark="age-refresh-button" disabled={ageLoading} onClick={model.onRefreshAgeGroups}><MeridianScanIcon spinning={ageLoading} />{ageLoading ? "Refreshing…" : "Refresh"}</PillButton> : null}
         </div>
-        {model.isAdmin && model.ageBuckets.length ? (
+        {model.isAdmin && ageStatus.error ? (
+          <div className="meridian-resource-error meridian-age-card__error" role="alert"><span>{ageStatus.error}</span><PillButton onClick={model.onRetryAgeGroups}>Retry</PillButton></div>
+        ) : null}
+        {model.isAdmin && !ageLoaded && !ageStatus.error ? (
+          <div aria-label="Loading age restrictions" className="meridian-age-card__skeleton"><i /><i /></div>
+        ) : model.isAdmin && hasAgeBuckets ? (
           <div className="meridian-age-list">
             {model.ageBuckets.map((bucket) => (
               <button key={bucket.age} onClick={() => model.onOpenAgeBucket(bucket)} type="button">
@@ -271,9 +284,9 @@ function LibraryPanel({ model }) {
               </button>
             ))}
           </div>
-        ) : (
+        ) : ageLoaded ? (
           <div className="meridian-empty-state"><strong>No age-restricted movies yet.</strong><span>Set an age requirement from a movie's Info panel.</span></div>
-        )}
+        ) : null}
       </MeridianCard>
     </div>
   );
@@ -297,7 +310,7 @@ function CloudPanel({ model }) {
   ];
   return (
     <div className="meridian-panel-stack">
-      <MeridianCard className="meridian-connection-card">
+      <MeridianCard className="meridian-connection-card" data-visual-landmark="google-connection-card">
         <span className="meridian-icon-tile"><Cloud aria-hidden="true" size={19} /></span>
         <span className="meridian-row-copy">
           <strong>Google Drive</strong>
@@ -361,8 +374,8 @@ function HiddenPanel({ model }) {
   const refreshingWithData = status.loading && status.loaded;
   return (
     <div className="meridian-panel-stack">
-      <Segmented className="meridian-hidden-scope" ariaLabel="Hidden title scope" onChange={setScope} options={model.isAdmin ? [{ value: "personal", label: `For me (${model.hiddenItems.length})` }, { value: "global", label: `For everyone (${model.globalHiddenItems.length})` }] : [{ value: "personal", label: `For me (${model.hiddenItems.length})` }]} value={scope} />
-      <MeridianCard className="meridian-hidden-card" id="hidden-list">
+      <Segmented className="meridian-hidden-scope" ariaLabel="Hidden title scope" onChange={setScope} options={model.isAdmin ? [{ value: "personal", label: `For me (${model.hiddenItems.length})` }, { value: "global", label: `For everyone (${model.globalHiddenItems.length})` }] : [{ value: "personal", label: `For me (${model.hiddenItems.length})` }]} value={scope} visualLandmark="hidden-titles-scope" />
+      <MeridianCard className="meridian-hidden-card" data-visual-landmark="hidden-titles-card" id="hidden-list">
         {initialLoading ? <div aria-label="Loading hidden titles" className="meridian-hidden-skeleton"><i /><i /><i /></div> : null}
         {refreshingWithData ? <span className="meridian-resource-refresh" role="status">Refreshing…</span> : null}
         {status.error ? <div className="meridian-resource-error" role="alert"><span>{status.error}</span><PillButton onClick={model.onRetry}>Retry</PillButton></div> : null}

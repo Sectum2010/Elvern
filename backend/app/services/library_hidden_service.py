@@ -475,14 +475,17 @@ def _hide_for_user_in_connection(
     if movie_identity is not None:
         connection.execute(
             """
-            INSERT OR IGNORE INTO user_hidden_movie_keys (
+            INSERT INTO user_hidden_movie_keys (
                 user_id,
                 movie_key,
                 display_title,
                 year,
                 edition_identity,
+                representative_media_item_id,
                 hidden_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, movie_key) DO UPDATE SET
+                representative_media_item_id = excluded.representative_media_item_id
             """,
             (
                 user_id,
@@ -490,6 +493,7 @@ def _hide_for_user_in_connection(
                 str(movie_identity["display_title"]),
                 int(movie_identity["year"]),
                 str(movie_identity["edition_identity"]),
+                item_id,
                 hidden_at,
             ),
         )
@@ -540,20 +544,24 @@ def _hide_globally_in_connection(
     if movie_identity is not None:
         connection.execute(
             """
-            INSERT OR IGNORE INTO global_hidden_movie_keys (
+            INSERT INTO global_hidden_movie_keys (
                 movie_key,
                 display_title,
                 year,
                 edition_identity,
+                representative_media_item_id,
                 hidden_by_user_id,
                 hidden_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(movie_key) DO UPDATE SET
+                representative_media_item_id = excluded.representative_media_item_id
             """,
             (
                 str(movie_identity["movie_key"]),
                 str(movie_identity["display_title"]),
                 int(movie_identity["year"]),
                 str(movie_identity["edition_identity"]),
+                item_id,
                 actor_user_id,
                 hidden_at,
             ),

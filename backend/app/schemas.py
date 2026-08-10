@@ -704,6 +704,29 @@ class HiddenMovieListResponse(BaseModel):
     items: list[HiddenMovieSummary] = Field(default_factory=list)
 
 
+class SettingsHiddenTitleSummary(BaseModel):
+    id: int
+    title: str
+    year: int | None = None
+    edition_label: str | None = None
+    hidden_at: str
+    scope: Literal["personal", "global"]
+
+
+class SettingsHiddenTitleScopeResponse(BaseModel):
+    count: int = 0
+    items: list[SettingsHiddenTitleSummary] = Field(default_factory=list)
+
+
+class SettingsHiddenTitlesResponse(BaseModel):
+    schema_version: Literal["settings-hidden-titles-v1"] = "settings-hidden-titles-v1"
+    revision: str
+    personal: SettingsHiddenTitleScopeResponse = Field(default_factory=SettingsHiddenTitleScopeResponse)
+    global_: SettingsHiddenTitleScopeResponse | None = Field(default=None, alias="global")
+
+    model_config = {"populate_by_name": True}
+
+
 HiddenItemScope = Literal["global", "personal"]
 
 
@@ -836,6 +859,13 @@ class GoogleDriveConnectRequest(BaseModel):
 
 class GoogleDriveAccountCandidateRequest(BaseModel):
     operation_id: str = Field(min_length=24, max_length=160, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class GoogleDriveOAuthOperationResponse(BaseModel):
+    status: Literal["pending", "connected", "account_mismatch", "cancelled", "error", "expired"]
+    expires_at: str
+    message: str | None = None
+    candidate_available: bool = False
 
 
 class GoogleDriveAccountCandidateResponse(BaseModel):

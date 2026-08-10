@@ -195,6 +195,7 @@ jobs:
           --project firefox-assistant-navigation
           --project chromium-settings-navigation
           --project firefox-settings-navigation
+          --project chromium-control-center-baseline
           --project chromium-service-worker-network-guard
           --project firefox-service-worker-network-guard
           --project chromium-wss-network-guard

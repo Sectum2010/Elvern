@@ -186,18 +186,43 @@ def test_different_account_creates_encrypted_session_bound_candidate_without_reb
     assert "google-account" not in repr(candidate)
     with get_connection(initialized_settings) as connection:
         account = connection.execute(
-            "SELECT id, google_account_id FROM google_drive_accounts WHERE user_id = 1",
+            """
+            SELECT account.id, account.google_account_id, account.email, account.display_name,
+                   identity.subject_hash, identity.display_label_encrypted
+            FROM google_drive_accounts account
+            JOIN provider_identities identity ON identity.id = account.provider_identity_id
+            WHERE account.user_id = 1
+            """,
         ).fetchone()
         source = connection.execute(
             "SELECT google_drive_account_id, last_error FROM library_sources WHERE resource_id = 'source-1'",
         ).fetchone()
         stored_candidate = connection.execute(
-            "SELECT access_token, refresh_token FROM google_oauth_account_candidates",
+            """
+            SELECT google_account_id, email, display_name, provider_subject_hash,
+                   display_label_encrypted, access_token, refresh_token
+            FROM google_oauth_account_candidates
+            """,
         ).fetchone()
     assert int(account["id"]) == old_account_id
-    assert account["google_account_id"] == "google-account-old"
+    assert account["google_account_id"] == ""
+    assert account["email"] is None
+    assert account["display_name"] is None
+    assert account["subject_hash"] == cloud_provider_auth_service._hash_google_account_subject(
+        initialized_settings,
+        "google-account-old",
+    )
+    assert "Old account" not in str(account["display_label_encrypted"])
     assert int(source["google_drive_account_id"]) == old_account_id
     assert source["last_error"] == "Reconnect required."
+    assert stored_candidate["google_account_id"] == ""
+    assert stored_candidate["email"] is None
+    assert stored_candidate["display_name"] is None
+    assert stored_candidate["provider_subject_hash"] == cloud_provider_auth_service._hash_google_account_subject(
+        initialized_settings,
+        "google-account-new",
+    )
+    assert "New account" not in str(stored_candidate["display_label_encrypted"])
     assert stored_candidate["access_token"] != "new-access"
     assert stored_candidate["refresh_token"] != "new-refresh"
 
@@ -275,7 +300,13 @@ def test_different_account_replace_migrates_only_sources_with_verified_access(
     assert result["failed_source_count"] == 1
     with get_connection(initialized_settings) as connection:
         account = connection.execute(
-            "SELECT id, google_account_id FROM google_drive_accounts WHERE user_id = 1",
+            """
+            SELECT account.id, account.google_account_id, account.email, account.display_name,
+                   identity.subject_hash
+            FROM google_drive_accounts account
+            JOIN provider_identities identity ON identity.id = account.provider_identity_id
+            WHERE account.user_id = 1
+            """,
         ).fetchone()
         sources = {
             row["resource_id"]: dict(row)
@@ -288,7 +319,13 @@ def test_different_account_replace_migrates_only_sources_with_verified_access(
                 """
             )
         }
-    assert account["google_account_id"] == "google-account-new"
+    assert account["google_account_id"] == ""
+    assert account["email"] is None
+    assert account["display_name"] is None
+    assert account["subject_hash"] == cloud_provider_auth_service._hash_google_account_subject(
+        initialized_settings,
+        "google-account-new",
+    )
     assert int(sources["source-1"]["google_drive_account_id"]) == int(account["id"])
     assert sources["source-1"]["last_error"] is None
     assert sources["source-2"]["google_drive_account_id"] is None

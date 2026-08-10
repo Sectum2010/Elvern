@@ -14,6 +14,40 @@ const PUBLIC_PROBES = [
 const LOCAL_FAULT_ORIGINS = new Set();
 const NETWORK_GUARD_STATE = new WeakMap();
 const MERIDIAN_DEMO_PATH = process.env.ELVERN_MERIDIAN_DEMO_PATH || "";
+const UPDATE_CONTROL_CENTER_BASELINES = process.env.ELVERN_UPDATE_CONTROL_CENTER_BASELINES === "1";
+const CONTROL_CENTER_BASELINE_ROOT = resolve(
+  process.cwd(),
+  "tests-phase7/baselines/control-center",
+);
+const CONTROL_CENTER_BASELINE_MANIFEST_PATH = resolve(
+  CONTROL_CENTER_BASELINE_ROOT,
+  "manifest.json",
+);
+const CONTROL_CENTER_PIXEL_CHANGED_RATIO_LIMIT = 0.005;
+const CONTROL_CENTER_PIXEL_MEAN_DELTA_LIMIT = 1.5;
+const CONTROL_CENTER_GEOMETRY_DELTA_LIMIT_PX = 1;
+const CONTROL_CENTER_APPROVED_OVERRIDES = Object.freeze([
+  "warm-light-theme-palette",
+  "browser-owned-production-root-frame",
+  "deterministic-user-avatar-palette",
+  "state-specific-user-status-motion",
+  "connected-google-drive-copy",
+  "long-origin-ellipsis-tooltip-and-copy",
+  "create-user-more-ages-selector",
+]);
+
+
+function isApprovedMeridianSourceDifference(landmark, property, difference) {
+  if (landmark !== "root" || !difference) return false;
+  if (property === "borderRadius") {
+    return difference.reference === "18px" && difference.actual === "0px";
+  }
+  if (property === "boxShadow") {
+    return difference.reference === "rgba(0, 0, 0, 0.45) 0px 40px 90px 0px"
+      && difference.actual === "none";
+  }
+  return false;
+}
 
 
 function asDataUrl(mimeType, contents) {
@@ -160,8 +194,19 @@ const MERIDIAN_STYLE_PROPERTIES = [
   "fontWeight",
   "color",
   "backgroundColor",
+  "backgroundImage",
   "borderTopColor",
   "borderTopWidth",
+  "borderTopStyle",
+  "borderRightColor",
+  "borderRightWidth",
+  "borderRightStyle",
+  "borderBottomColor",
+  "borderBottomWidth",
+  "borderBottomStyle",
+  "borderLeftColor",
+  "borderLeftWidth",
+  "borderLeftStyle",
   "borderRadius",
   "paddingTop",
   "paddingRight",
@@ -169,6 +214,7 @@ const MERIDIAN_STYLE_PROPERTIES = [
   "paddingLeft",
   "rowGap",
   "columnGap",
+  "boxShadow",
   "transitionDuration",
   "transitionTimingFunction",
 ];
@@ -492,6 +538,189 @@ async function writeMeridianParityArtifacts({
 }
 
 
+function controlCenterBaselineImagePath(stateName) {
+  return resolve(CONTROL_CENTER_BASELINE_ROOT, "images", `${stateName}.png`);
+}
+
+
+function sha256Buffer(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+
+async function collectNamedControlCenterEvidence(page) {
+  return page.evaluate((properties) => {
+    const root = document.querySelector('[data-visual-landmark="control-center-root"]');
+    if (!root) throw new Error("Missing Control Center root visual landmark.");
+    const rootRect = root.getBoundingClientRect();
+    const visible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const computed = getComputedStyle(element);
+      return rect.width > 0
+        && rect.height > 0
+        && computed.display !== "none"
+        && computed.visibility !== "hidden";
+    };
+    const entries = [root, ...root.querySelectorAll("[data-visual-landmark]")]
+      .filter(visible)
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        const computed = getComputedStyle(element);
+        return {
+          name: element.getAttribute("data-visual-landmark"),
+          geometry: {
+            x: Number((rect.x - rootRect.x).toFixed(3)),
+            y: Number((rect.y - rootRect.y).toFixed(3)),
+            width: Number(rect.width.toFixed(3)),
+            height: Number(rect.height.toFixed(3)),
+          },
+          computed_style: Object.fromEntries(
+            properties.map((property) => [property, computed[property]]),
+          ),
+        };
+      });
+    return entries.sort((left, right) => (
+      left.name.localeCompare(right.name)
+      || left.geometry.y - right.geometry.y
+      || left.geometry.x - right.geometry.x
+    ));
+  }, MERIDIAN_STYLE_PROPERTIES);
+}
+
+
+function compareNamedControlCenterEvidence(referenceEntries, actualEntries) {
+  const geometry = [];
+  const styles = [];
+  const referenceNames = referenceEntries.map((entry) => entry.name);
+  const actualNames = actualEntries.map((entry) => entry.name);
+  if (JSON.stringify(referenceNames) !== JSON.stringify(actualNames)) {
+    geometry.push({
+      issue: "landmark_presence",
+      reference: referenceNames,
+      actual: actualNames,
+    });
+    return { geometry, styles };
+  }
+  referenceEntries.forEach((referenceEntry, index) => {
+    const actualEntry = actualEntries[index];
+    const delta = geometryDelta(referenceEntry.geometry, actualEntry.geometry);
+    if (Math.max(...Object.values(delta)) > CONTROL_CENTER_GEOMETRY_DELTA_LIMIT_PX) {
+      geometry.push({
+        name: referenceEntry.name,
+        reference: referenceEntry.geometry,
+        actual: actualEntry.geometry,
+        delta,
+      });
+    }
+    const differences = styleDifferences(
+      referenceEntry.computed_style,
+      actualEntry.computed_style,
+    );
+    if (Object.keys(differences).length) {
+      styles.push({ name: referenceEntry.name, differences });
+    }
+  });
+  return { geometry, styles };
+}
+
+
+async function captureControlCenterBaselineState({
+  page,
+  stateName,
+  route,
+  viewport,
+  testInfo,
+  generatedStates,
+}) {
+  await page.addStyleTag({
+    content: `
+      .meridian-control-center,
+      .meridian-control-center *,
+      .meridian-control-center *::before,
+      .meridian-control-center *::after {
+        animation: none !important;
+        caret-color: transparent !important;
+      }
+    `,
+  });
+  await page.evaluate(() => document.fonts?.ready);
+  await normalizeMeridianProductionFixture(page);
+  const screenshot = await page.screenshot({ animations: "disabled", fullPage: true });
+  const dimensions = await comparePngPixels(page, screenshot, screenshot);
+  const landmarks = await collectNamedControlCenterEvidence(page);
+  const stateRecord = {
+    route,
+    viewport,
+    image: `images/${stateName}.png`,
+    sha256: sha256Buffer(screenshot),
+    dimensions: { width: dimensions.width, height: dimensions.height },
+    landmarks,
+  };
+
+  if (UPDATE_CONTROL_CENTER_BASELINES) {
+    const imagePath = controlCenterBaselineImagePath(stateName);
+    mkdirSync(resolve(CONTROL_CENTER_BASELINE_ROOT, "images"), { recursive: true });
+    writeFileSync(imagePath, screenshot);
+    generatedStates[stateName] = stateRecord;
+    await testInfo.attach(`${stateName}-production-baseline`, {
+      body: screenshot,
+      contentType: "image/png",
+    });
+    return;
+  }
+
+  if (!existsSync(CONTROL_CENTER_BASELINE_MANIFEST_PATH)) {
+    throw new Error(
+      `Missing reviewed Control Center baseline manifest: ${CONTROL_CENTER_BASELINE_MANIFEST_PATH}`,
+    );
+  }
+  const manifest = JSON.parse(readFileSync(CONTROL_CENTER_BASELINE_MANIFEST_PATH, "utf8"));
+  const expected = manifest.states?.[stateName];
+  if (!expected) throw new Error(`Missing reviewed Control Center baseline state: ${stateName}`);
+  const expectedImagePath = resolve(CONTROL_CENTER_BASELINE_ROOT, expected.image);
+  if (!existsSync(expectedImagePath)) {
+    throw new Error(`Missing reviewed Control Center baseline image: ${expectedImagePath}`);
+  }
+  const reference = readFileSync(expectedImagePath);
+  if (sha256Buffer(reference) !== expected.sha256) {
+    throw new Error(`Control Center baseline image hash mismatch: ${stateName}`);
+  }
+  const pixelComparison = await comparePngPixels(page, reference, screenshot);
+  const evidenceComparison = compareNamedControlCenterEvidence(expected.landmarks, landmarks);
+  const outputDirectory = testInfo.outputPath("control-center-baseline", stateName);
+  mkdirSync(outputDirectory, { recursive: true });
+  writeFileSync(resolve(outputDirectory, "reviewed-reference.png"), reference);
+  writeFileSync(resolve(outputDirectory, "production-actual.png"), screenshot);
+  writeFileSync(
+    resolve(outputDirectory, "pixel-diff.png"),
+    Buffer.from(pixelComparison.diff_base64 || "", "base64"),
+  );
+  writeFileSync(
+    resolve(outputDirectory, "geometry-report.json"),
+    `${JSON.stringify(evidenceComparison.geometry, null, 2)}\n`,
+    "utf8",
+  );
+  writeFileSync(
+    resolve(outputDirectory, "computed-style-report.json"),
+    `${JSON.stringify(evidenceComparison.styles, null, 2)}\n`,
+    "utf8",
+  );
+  writeFileSync(
+    resolve(outputDirectory, "manifest-state.json"),
+    `${JSON.stringify({ expected, actual: stateRecord }, null, 2)}\n`,
+    "utf8",
+  );
+
+  expect(pixelComparison.dimensions_match, `${stateName} screenshot dimensions`).toBe(true);
+  expect(pixelComparison.changed_pixel_ratio, `${stateName} changed pixel ratio`)
+    .toBeLessThanOrEqual(CONTROL_CENTER_PIXEL_CHANGED_RATIO_LIMIT);
+  expect(pixelComparison.mean_channel_delta, `${stateName} mean channel delta`)
+    .toBeLessThanOrEqual(CONTROL_CENTER_PIXEL_MEAN_DELTA_LIMIT);
+  expect(evidenceComparison.geometry, `${stateName} landmark geometry`).toEqual([]);
+  expect(evidenceComparison.styles, `${stateName} computed styles`).toEqual([]);
+}
+
+
 async function proxyControl(path, payload) {
   const controlOrigin = process.env.ELVERN_PHASE7_NETWORK_PROXY_CONTROL;
   const controlToken = process.env.ELVERN_PHASE7_NETWORK_PROXY_CONTROL_TOKEN;
@@ -751,7 +980,7 @@ function meridianSafeUsers() {
       age_credential: 18,
       age_credential_display: "18+",
       status_label: active ? "Active now" : disabled ? "Disabled" : "Offline",
-      status_color: active ? "#177A52" : disabled ? "#D64545" : "rgba(25,28,31,.3)",
+      status_color: active ? "green" : disabled ? "red" : "grey",
       totp_enabled: index === 0,
       totp_enabled_at: index === 0 ? "2026-05-09T19:36:00Z" : null,
       totp_setup_prompt_enabled: false,
@@ -1063,8 +1292,56 @@ async function installFixture(page, requests, state = {}) {
       payload = { items: state.hiddenItems || [] };
     } else if (path === "/api/admin/global-hidden-items") {
       payload = { items: state.globalHiddenItems || [] };
+    } else if (path === "/api/settings/hidden-titles") {
+      if (state.settingsAncillaryDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, state.settingsAncillaryDelayMs));
+      }
+      if (
+        state.holdHiddenTitlesAfterRequestCount
+        && state.pathRequestCounts[path] >= Number(state.holdHiddenTitlesAfterRequestCount)
+      ) {
+        await new Promise((resolve) => {
+          state.hiddenTitlesReleases ||= [];
+          state.hiddenTitlesReleases.push(resolve);
+        });
+      }
+      if (
+        state.hiddenTitlesFailureAfterRequestCount
+        && state.pathRequestCounts[path] >= Number(state.hiddenTitlesFailureAfterRequestCount)
+      ) {
+        status = 503;
+        payload = { detail: "Hidden titles are temporarily unavailable." };
+      } else {
+        const personalItems = state.hiddenItems || [];
+        const globalItems = state.globalHiddenItems || [];
+        payload = {
+          schema_version: "settings-hidden-titles-v1",
+          revision: "d".repeat(64),
+          personal: { count: personalItems.length, items: personalItems },
+          global: (state.role || "standard_user") === "admin"
+            ? { count: globalItems.length, items: globalItems }
+            : null,
+        };
+      }
     } else if (path === "/api/library/age-groups") {
-      payload = { total: 0, items: [] };
+      if (
+        state.holdAgeGroupsAfterRequestCount
+        && state.pathRequestCounts[path] >= Number(state.holdAgeGroupsAfterRequestCount)
+      ) {
+        await new Promise((resolve) => {
+          state.ageGroupsReleases ||= [];
+          state.ageGroupsReleases.push(resolve);
+        });
+      }
+      if (
+        state.ageGroupsFailureAfterRequestCount
+        && state.pathRequestCounts[path] >= Number(state.ageGroupsFailureAfterRequestCount)
+      ) {
+        status = 503;
+        payload = { detail: "Age restrictions are temporarily unavailable." };
+      } else {
+        payload = state.ageGroups || { total: 0, items: [] };
+      }
     } else if (path === "/api/admin/google-drive-setup") {
       payload = state.googleDriveSetup || {
         configuration_state: "not_configured",
@@ -1127,7 +1404,63 @@ async function installFixture(page, requests, state = {}) {
     } else if (path === "/api/admin/playback-workers") {
       payload = { workers: [] };
     } else if (path === "/api/admin/invite-codes") {
-      payload = { invite_codes: state.adminInviteCodes || [] };
+      if (route.request().method() === "POST") {
+        payload = state.generatedInviteCode || {
+          id: 7001,
+          code: "ELVERN-DEMO-2026",
+          assigned_age: 18,
+          assigned_age_display: "18+",
+          created_at: "2026-08-01T04:00:00Z",
+          expires_at: "2099-08-01T04:30:00Z",
+          used_at: null,
+        };
+      } else {
+        payload = { invite_codes: state.adminInviteCodes || [] };
+      }
+    } else if (path === "/api/admin/password-help-requests") {
+      if (
+        state.holdPasswordHelpAfterRequestCount
+        && state.pathRequestCounts[path] >= Number(state.holdPasswordHelpAfterRequestCount)
+      ) {
+        await new Promise((resolve) => {
+          state.passwordHelpReleases ||= [];
+          state.passwordHelpReleases.push(resolve);
+        });
+      }
+      if (
+        state.passwordHelpFailureAfterRequestCount
+        && state.pathRequestCounts[path] >= Number(state.passwordHelpFailureAfterRequestCount)
+      ) {
+        status = 503;
+        payload = { detail: "Password help requests are temporarily unavailable." };
+      } else {
+        payload = { requests: state.passwordHelpRequests || [] };
+      }
+    } else if (path === "/api/cloud-libraries/google/connect") {
+      if (state.holdGoogleConnect) {
+        await new Promise((resolve) => {
+          state.googleConnectReleases ||= [];
+          state.googleConnectReleases.push(resolve);
+        });
+      }
+      payload = {
+        authorization_url: `${url.origin}/oauth-fixture/account-chooser`,
+        expires_in_seconds: 900,
+      };
+    } else if (path === "/api/cloud-libraries/google/operation/status") {
+      payload = state.googleOperationStatus || {
+        provider: "google_drive",
+        status: "pending",
+        message: null,
+        expires_at: "2026-08-01T04:15:00Z",
+      };
+    } else if (path === "/api/cloud-libraries/google/operation/cancel") {
+      payload = {
+        provider: "google_drive",
+        status: "cancelled",
+        message: null,
+        expires_at: "2026-08-01T04:15:00Z",
+      };
     } else if (path === "/api/admin/exposure/status") {
       payload = state.exposureStatus || meridianSafeExposureStatus();
     } else if (path === "/api/library/v2/summary") {
@@ -1716,7 +2049,7 @@ test("@settings-navigation delayed Libraries data survives the production Strict
   await page.goto("settings/hidden-titles");
   await expect(page.getByRole("radio", { name: /For me \(1\)/ })).toBeVisible();
   await expect(page.getByText("Delayed Hidden Copy")).toBeVisible();
-  expect(state.pathRequestCounts?.["/api/user-hidden-items"] || 0).toBeGreaterThanOrEqual(1);
+  expect(state.pathRequestCounts?.["/api/settings/hidden-titles"] || 0).toBe(1);
 });
 
 
@@ -1905,7 +2238,414 @@ test("@settings-navigation admin Control Center shares state, status, and real r
 });
 
 
-test("@settings-navigation @control-center-visual production Control Center matches the Meridian primary shell contract", async ({
+test("@control-center-baseline reviewed Control Center production baseline matrix", async ({
+  context,
+}, testInfo) => {
+  test.setTimeout(240_000);
+  if (UPDATE_CONTROL_CENTER_BASELINES) {
+    requireMeridianDemoPath();
+  }
+  const generatedStates = {};
+  const capturedStateNames = [];
+  const hiddenItem = {
+    id: 91,
+    title: "The Synthetic Lighthouse",
+    year: 2026,
+    edition_label: "Extended edition",
+    hidden_at: "2026-08-01T04:00:00Z",
+    scope: "personal",
+  };
+  const passwordHelpRequest = {
+    id: 301,
+    username_snapshot: "demo-caleb",
+    user_id: 2,
+    requester_ip_address: "192.0.2.44",
+    requester_user_agent: "Mozilla/5.0 (X11; Linux x86_64) Firefox/152.0",
+    created_at: "2026-08-01T03:00:00Z",
+    expires_at: "2026-08-31T03:00:00Z",
+    status: "pending",
+  };
+
+  const captureScenario = async ({
+    name,
+    route,
+    state = {},
+    viewport = { width: 1360, height: 880 },
+    beforeNavigation,
+    prepare,
+  }) => {
+    const statePage = await context.newPage();
+    const requests = [];
+    const fixtureState = meridianSafeFixtureState(state);
+    try {
+      await statePage.setViewportSize(viewport);
+      await statePage.emulateMedia({ reducedMotion: "reduce" });
+      await installFixture(statePage, requests, fixtureState);
+      if (beforeNavigation) await beforeNavigation(statePage, fixtureState);
+      await statePage.goto(route);
+      await expect(statePage.locator('[data-visual-landmark="control-center-root"]')).toBeVisible();
+      await statePage.evaluate(() => document.fonts?.ready);
+      if (prepare) await prepare(statePage, fixtureState);
+      await captureControlCenterBaselineState({
+        page: statePage,
+        stateName: name,
+        route,
+        viewport,
+        testInfo,
+        generatedStates,
+      });
+      capturedStateNames.push(name);
+    } finally {
+      for (const releaseName of [
+        "ageGroupsReleases",
+        "googleConnectReleases",
+        "hiddenTitlesReleases",
+        "passwordHelpReleases",
+      ]) {
+        for (const release of fixtureState[releaseName] || []) release();
+      }
+      await statePage.close();
+    }
+  };
+
+  const waitForHeading = (heading) => async (statePage) => {
+    await expect(statePage.getByRole("heading", { name: heading, exact: true })).toBeVisible();
+  };
+  const usersWithMotionStates = meridianSafeUsers().slice(0, 8).map((entry, index) => {
+    if (index === 1) return { ...entry, status_color: "yellow", status_label: "Running" };
+    if (index === 2) return { ...entry, status_color: "orange", status_label: "Revocation pending" };
+    if (index === 4) return { ...entry, enabled: false, status_color: "red", status_label: "Disabled" };
+    return entry;
+  });
+  const themePrepare = (clicks) => async (statePage) => {
+    for (let index = 0; index < clicks; index += 1) {
+      await statePage.getByRole("button", { name: /Theme:/ }).click();
+    }
+    const expectedTheme = clicks === 1 ? "mixed" : clicks === 2 ? "dark" : "light";
+    await expect(statePage.locator('[data-visual-landmark="control-center-root"]'))
+      .toHaveAttribute("data-control-center-theme", expectedTheme);
+  };
+
+  await captureScenario({
+    name: "settings-library-idle",
+    route: "settings/library",
+    prepare: waitForHeading("Library"),
+  });
+  await captureScenario({
+    name: "settings-library-age-refresh-pending",
+    route: "settings/library",
+    state: { holdAgeGroupsAfterRequestCount: 2 },
+    prepare: async (statePage) => {
+      await expect(statePage.getByText("No age-restricted movies yet.")).toBeVisible();
+      await statePage.getByRole("button", { name: "Refresh" }).click();
+      await expect(statePage.getByRole("button", { name: "Refreshing…" })).toBeVisible();
+    },
+  });
+  await captureScenario({
+    name: "settings-library-age-refresh-success",
+    route: "settings/library",
+    state: {
+      ageGroups: {
+        total: 1,
+        items: [{ age_requirement: 13, copies_count: 3, manual_links_count: 1 }],
+      },
+    },
+    prepare: waitForHeading("Library"),
+  });
+  await captureScenario({
+    name: "settings-library-age-refresh-error",
+    route: "settings/library",
+    state: { ageGroupsFailureAfterRequestCount: 1 },
+    prepare: async (statePage) => {
+      await expect(statePage.getByText("Age restrictions are temporarily unavailable.")).toBeVisible();
+    },
+  });
+  await captureScenario({
+    name: "settings-cloud-connected",
+    route: "settings/cloud-sharing",
+    prepare: waitForHeading("Cloud & Sharing"),
+  });
+  await captureScenario({
+    name: "settings-cloud-reconnect-starting",
+    route: "settings/cloud-sharing",
+    state: { holdGoogleConnect: true },
+    prepare: async (statePage) => {
+      await statePage.getByRole("button", { name: "Reconnect" }).click();
+      await expect(statePage.getByRole("button", { name: "Connecting…" })).toBeVisible();
+    },
+  });
+  await captureScenario({
+    name: "settings-cloud-browser-back-incomplete",
+    route: "settings/cloud-sharing",
+    beforeNavigation: async (statePage) => {
+      await statePage.addInitScript(() => {
+        sessionStorage.setItem("elvern:provider-auth-intent", JSON.stringify({
+          provider: "google_drive",
+          operationId: "00000000-0000-4000-8000-000000000099",
+          identity: "1:admin",
+          returnPath: "/settings/cloud-sharing",
+          state: "starting",
+          savedAt: Date.now(),
+        }));
+      });
+    },
+    prepare: async (statePage) => {
+      await expect(statePage.getByText("Reconnect was not completed.")).toBeVisible();
+      await expect(statePage.getByRole("button", { name: "Reconnect" })).toBeEnabled();
+    },
+  });
+  await captureScenario({
+    name: "settings-hidden-personal-empty",
+    route: "settings/hidden-titles",
+    state: { hiddenItems: [], globalHiddenItems: [] },
+    prepare: async (statePage) => {
+      await expect(statePage.getByRole("radio", { name: "For me (0)" })).toBeChecked();
+    },
+  });
+  await captureScenario({
+    name: "settings-hidden-global-empty",
+    route: "settings/hidden-titles",
+    state: { hiddenItems: [], globalHiddenItems: [] },
+    prepare: async (statePage) => {
+      await statePage.getByRole("radio", { name: "For everyone (0)" }).click();
+      await expect(statePage.getByRole("radio", { name: "For everyone (0)" })).toBeChecked();
+    },
+  });
+  await captureScenario({
+    name: "settings-hidden-nonempty",
+    route: "settings/hidden-titles",
+    state: { hiddenItems: [hiddenItem], globalHiddenItems: [] },
+    prepare: async (statePage) => {
+      await expect(statePage.getByText(hiddenItem.title)).toBeVisible();
+    },
+  });
+  await captureScenario({
+    name: "settings-hidden-initial-skeleton",
+    route: "settings/hidden-titles",
+    state: { holdHiddenTitlesAfterRequestCount: 1 },
+    prepare: async (statePage) => {
+      await expect(statePage.getByLabel("Loading hidden titles")).toBeVisible();
+    },
+  });
+  await captureScenario({
+    name: "settings-hidden-cached-refresh",
+    route: "settings/hidden-titles",
+    state: {
+      hiddenItems: [hiddenItem],
+      globalHiddenItems: [],
+      holdHiddenTitlesAfterRequestCount: 2,
+    },
+    prepare: async (statePage) => {
+      await expect(statePage.getByText(hiddenItem.title)).toBeVisible();
+      await statePage.getByRole("button", { name: "Hide for everyone" }).click();
+      await expect(statePage.locator(".meridian-resource-refresh")).toHaveText("Refreshing…");
+    },
+  });
+
+  const longOriginExposureStatus = {
+    ...meridianSafeExposureStatus(),
+    active: {
+      ...meridianSafeExposureStatus().active,
+      current_request_origin: "https://a-very-long-synthetic-elvern-hostname.example.test:8443/control-center",
+    },
+  };
+  await captureScenario({
+    name: "admin-overview-long-origin",
+    route: "admin/overview",
+    state: { exposureStatus: longOriginExposureStatus },
+    prepare: waitForHeading("Overview"),
+  });
+  for (const [name, viewport, origin] of [
+    ["admin-overview-long-origin-1180x760", { width: 1180, height: 760 }, longOriginExposureStatus.active.current_request_origin],
+    ["admin-overview-ipv6-origin-1024x768", { width: 1024, height: 768 }, "http://[2001:db8:85a3::8a2e:370:7334]:4173"],
+  ]) {
+    await captureScenario({
+      name,
+      route: "admin/overview",
+      viewport,
+      state: {
+        exposureStatus: {
+          ...longOriginExposureStatus,
+          active: { ...longOriginExposureStatus.active, current_request_origin: origin },
+        },
+      },
+      prepare: waitForHeading("Overview"),
+    });
+  }
+  for (const [name, clicks] of [
+    ["admin-overview-long-origin-mixed", 1],
+    ["admin-overview-long-origin-dark", 2],
+  ]) {
+    await captureScenario({
+      name,
+      route: "admin/overview",
+      state: { exposureStatus: longOriginExposureStatus },
+      prepare: themePrepare(clicks),
+    });
+  }
+  for (const [name, clicks] of [
+    ["admin-users-light", 0],
+    ["admin-users-mixed", 1],
+    ["admin-users-dark", 2],
+  ]) {
+    await captureScenario({
+      name,
+      route: "admin/users-invites",
+      state: { adminUsers: usersWithMotionStates },
+      prepare: async (statePage) => {
+        await expect(statePage.getByRole("heading", { name: "Users & Invites", exact: true })).toBeVisible();
+        await themePrepare(clicks)(statePage);
+      },
+    });
+  }
+  await captureScenario({
+    name: "admin-users-status-states",
+    route: "admin/users-invites",
+    state: { adminUsers: usersWithMotionStates },
+    prepare: async (statePage) => {
+      for (const label of ["Active now", "Running", "Revocation pending", "Offline", "Disabled"]) {
+        await expect(statePage.getByText(label, { exact: true }).first()).toBeVisible();
+      }
+    },
+  });
+  await captureScenario({
+    name: "admin-create-user-closed",
+    route: "admin/users-invites",
+    prepare: waitForHeading("Users & Invites"),
+  });
+  await captureScenario({
+    name: "admin-create-user-open",
+    route: "admin/users-invites",
+    prepare: async (statePage) => {
+      await statePage.getByRole("button", { name: "Create user", exact: true }).first().click();
+      await expect(statePage.getByLabel("Age credential")).toBeVisible();
+    },
+  });
+  await captureScenario({
+    name: "admin-invite-card-closed",
+    route: "admin/users-invites",
+    prepare: async (statePage) => {
+      await expect(statePage.getByText("Inviting New Users", { exact: true })).toBeVisible();
+    },
+  });
+  await captureScenario({
+    name: "admin-invite-age-open",
+    route: "admin/users-invites",
+    prepare: async (statePage) => {
+      await statePage.getByRole("button", { name: "Generate invite code" }).click();
+      await expect(statePage.getByText("Assign age credential", { exact: true })).toBeVisible();
+    },
+  });
+  await captureScenario({
+    name: "admin-invite-synthetic-code-visible",
+    route: "admin/users-invites",
+    prepare: async (statePage) => {
+      await statePage.getByRole("button", { name: "Generate invite code" }).click();
+      await statePage.getByRole("button", { name: "Generate invite code" }).click();
+      const inviteCodeInput = statePage.getByRole("textbox", { name: "Invite code" });
+      await expect(inviteCodeInput).toBeVisible();
+      await statePage.getByRole("button", { name: "Reveal invite code" }).click();
+      await expect(inviteCodeInput).toHaveValue("ELVERN-DEMO-2026");
+    },
+  });
+  await captureScenario({
+    name: "admin-password-help-empty",
+    route: "admin/users-invites",
+    state: { passwordHelpRequests: [] },
+    prepare: async (statePage) => {
+      await expect(statePage.getByText("No pending password help requests.")).toBeVisible();
+    },
+  });
+  await captureScenario({
+    name: "admin-password-help-nonempty",
+    route: "admin/users-invites",
+    state: { passwordHelpRequests: [passwordHelpRequest] },
+    prepare: async (statePage) => {
+      await expect(statePage.getByText("demo-caleb", { exact: true }).first()).toBeVisible();
+    },
+  });
+  await captureScenario({
+    name: "admin-password-help-refreshing",
+    route: "admin/users-invites",
+    state: {
+      passwordHelpRequests: [passwordHelpRequest],
+      holdPasswordHelpAfterRequestCount: 2,
+    },
+    prepare: async (statePage) => {
+      await expect(statePage.getByText("demo-caleb", { exact: true }).first()).toBeVisible();
+      await statePage.locator('[data-visual-landmark="password-help-refresh"]').click();
+      await expect(statePage.locator('[data-visual-landmark="password-help-refresh"]')).toHaveText(/Refreshing…/);
+    },
+  });
+
+  for (const viewport of [
+    { width: 1360, height: 880 },
+    { width: 1440, height: 900 },
+    { width: 1180, height: 760 },
+    { width: 1024, height: 768 },
+  ]) {
+    await captureScenario({
+      name: `shell-neon-corners-${viewport.width}x${viewport.height}`,
+      route: "settings/appearance",
+      viewport,
+      prepare: waitForHeading("Appearance"),
+    });
+  }
+  await captureScenario({
+    name: "shell-system-status-rail-closed",
+    route: "settings/appearance",
+    prepare: async (statePage) => {
+      await expect(statePage.getByRole("complementary", { name: "System status" })).toHaveCount(0);
+    },
+  });
+  await captureScenario({
+    name: "shell-system-status-rail-open",
+    route: "settings/appearance",
+    prepare: async (statePage) => {
+      await statePage.getByRole("button", { name: "System status" }).click();
+      await expect(statePage.getByRole("complementary", { name: "System status" })).toBeVisible();
+    },
+  });
+
+  if (UPDATE_CONTROL_CENTER_BASELINES) {
+    const demoSource = readFileSync(MERIDIAN_DEMO_PATH);
+    const manifest = {
+      schema_version: "elvern-control-center-baseline-v1",
+      demo_source_sha256: sha256Buffer(demoSource),
+      private_demo_shipped: false,
+      approved_overrides: CONTROL_CENTER_APPROVED_OVERRIDES,
+      runtime: {
+        browser: "chromium",
+        locale: "en-US",
+        timezone: "America/Los_Angeles",
+        device_scale_factor: 1,
+        reduced_motion: "reduce",
+        external_fonts_or_scripts: false,
+      },
+      thresholds: {
+        changed_pixel_ratio: CONTROL_CENTER_PIXEL_CHANGED_RATIO_LIMIT,
+        mean_channel_delta: CONTROL_CENTER_PIXEL_MEAN_DELTA_LIMIT,
+        landmark_geometry_px: CONTROL_CENTER_GEOMETRY_DELTA_LIMIT_PX,
+        computed_styles: "exact",
+      },
+      style_properties: MERIDIAN_STYLE_PROPERTIES,
+      states: generatedStates,
+    };
+    mkdirSync(CONTROL_CENTER_BASELINE_ROOT, { recursive: true });
+    writeFileSync(
+      CONTROL_CENTER_BASELINE_MANIFEST_PATH,
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      "utf8",
+    );
+  } else {
+    const manifest = JSON.parse(readFileSync(CONTROL_CENTER_BASELINE_MANIFEST_PATH, "utf8"));
+    expect(manifest.approved_overrides).toEqual(CONTROL_CENTER_APPROVED_OVERRIDES);
+    expect(Object.keys(manifest.states).sort()).toEqual([...capturedStateNames].sort());
+  }
+});
+
+
+test("@control-center-source-generation production Control Center matches the Meridian primary shell contract", async ({
   page,
 }, testInfo) => {
   requireMeridianDemoPath();
@@ -1971,6 +2711,7 @@ test("@settings-navigation @control-center-visual production Control Center matc
 
   await page.goto("admin/overview");
   await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+  await expect(page.locator(".meridian-security-gauge__score")).toHaveText("92");
   await normalizeMeridianProductionFixture(page);
   const productionAdminScreenshot = await productionRoot.screenshot({ animations: "disabled" });
   const adminComparison = await comparePngPixels(
@@ -2059,7 +2800,7 @@ test("@settings-navigation @control-center-visual production Control Center matc
 });
 
 
-test("@settings-navigation @control-center-visual Meridian dedicated parity matrix emits strict evidence", async ({
+test("@control-center-source-generation Meridian dedicated parity matrix emits strict evidence", async ({
   browserName,
   page,
 }, testInfo) => {
@@ -2169,6 +2910,10 @@ test("@settings-navigation @control-center-visual Meridian dedicated parity matr
         demoPage.evaluate(() => document.fonts?.ready),
         page.evaluate(() => document.fonts?.ready),
       ]);
+      const productionSecurityScore = page.locator(".meridian-security-gauge__score");
+      if (await productionSecurityScore.isVisible()) {
+        await expect(productionSecurityScore).toHaveText("92");
+      }
       await normalizeMeridianDemoFixture(demoPage);
       await normalizeMeridianProductionFixture(page);
       const reference = await demoRoot.screenshot({ animations: "disabled" });
@@ -2224,7 +2969,8 @@ test("@settings-navigation @control-center-visual Meridian dedicated parity matr
         const differences = artifacts.computedStyleReport.differences[key] || {};
         for (const property of MERIDIAN_STYLE_PROPERTIES) {
           recordParityFailure(
-            differences[property] === undefined,
+            differences[property] === undefined
+              || isApprovedMeridianSourceDifference(key, property, differences[property]),
             `${name}: ${key} ${property} differs (${JSON.stringify(differences[property])})`,
           );
         }

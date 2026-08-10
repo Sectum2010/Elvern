@@ -4,6 +4,7 @@ import {
   ADMIN_LIVE_AUDIT_TICKER_LINE,
   desktopAdminResourcesForTab,
   easeMeridianEntryProgress,
+  getDeterministicUserAvatarPalette,
   MERIDIAN_ENTRY_PROGRESS_INTERVAL_MS,
   MERIDIAN_ENTRY_PROGRESS_STEP,
   shouldPollDesktopPlaybackWorkers,
@@ -62,5 +63,17 @@ describe("desktop Admin Control Center resource contract", () => {
     expect(easeMeridianEntryProgress(0)).toBe(0);
     expect(easeMeridianEntryProgress(0.5)).toBe(0.875);
     expect(easeMeridianEntryProgress(1)).toBe(1);
+  });
+
+  test("assigns stable non-semantic avatar palettes from internal identifiers", () => {
+    expect(getDeterministicUserAvatarPalette(42))
+      .toBe(getDeterministicUserAvatarPalette(42));
+    expect(getDeterministicUserAvatarPalette("42"))
+      .toBe(getDeterministicUserAvatarPalette(42));
+    expect(getDeterministicUserAvatarPalette(42))
+      .toMatch(/^meridian-user-avatar--palette-[0-7]$/);
+    expect(new Set(Array.from({ length: 24 }, (_, index) => (
+      getDeterministicUserAvatarPalette(index + 1)
+    ))).size).toBeGreaterThan(4);
   });
 });

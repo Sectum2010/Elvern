@@ -196,6 +196,23 @@ function mockApi(initialSettings = defaultSettings, mockOptions = {}) {
       }
       return Promise.resolve({ items: hiddenItems });
     }
+    if (requestPath === "/api/settings/hidden-titles") {
+      if (scopeAttempted && hiddenReadFailuresAfterScope > 0) {
+        hiddenReadFailuresAfterScope -= 1;
+        return Promise.reject(new ApiNetworkError(undefined, {
+          failureId: 41,
+          incidentId: 31,
+        }));
+      }
+      return Promise.resolve({
+        schema_version: "settings-hidden-titles-v1",
+        revision: "test-hidden-revision",
+        personal: { count: hiddenItems.length, items: hiddenItems },
+        global: mockAuthState.role === "admin"
+          ? { count: globalHiddenItems.length, items: globalHiddenItems }
+          : null,
+      });
+    }
     if (requestPath === "/api/admin/global-hidden-items") {
       return Promise.resolve({ items: globalHiddenItems });
     }
@@ -836,14 +853,14 @@ describe("SettingsPage section navigation and consolidation", () => {
     );
     expect(await screen.findByText("Idle Hidden Copy")).toBeInTheDocument();
     const initialReads = apiRequest.mock.calls.filter(
-      ([requestPath]) => requestPath === "/api/user-hidden-items",
+      ([requestPath]) => requestPath === "/api/settings/hidden-titles",
     ).length;
 
     vi.useFakeTimers();
     try {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(apiRequest.mock.calls.filter(
-        ([requestPath]) => requestPath === "/api/user-hidden-items",
+        ([requestPath]) => requestPath === "/api/settings/hidden-titles",
       )).toHaveLength(initialReads);
       expect(screen.getByText("Idle Hidden Copy")).toBeInTheDocument();
     } finally {
@@ -856,7 +873,7 @@ describe("SettingsPage section navigation and consolidation", () => {
     const originalImplementation = apiRequest.getMockImplementation();
     let hiddenReads = 0;
     apiRequest.mockImplementation((requestPath, options) => {
-      if (requestPath === "/api/user-hidden-items") {
+      if (requestPath === "/api/settings/hidden-titles") {
         hiddenReads += 1;
         if (hiddenReads === 1) {
           return Promise.reject(new Error("Hidden titles unavailable."));
@@ -1388,7 +1405,7 @@ describe("SettingsPage Hidden scope transfer", () => {
 
   test("successful scope transfer uses the backend authoritative hidden timestamp", () => {
     const source = fs.readFileSync(settingsPagePath, "utf8");
-    expect(source.match(/hidden_at:\s*payload\.hidden_at/g)).toHaveLength(4);
+    expect(source.match(/hidden_at:\s*payload\.hidden_at/g)).toHaveLength(6);
     expect(source).not.toContain("hidden_at: new Date().toISOString()");
   });
 
@@ -1947,6 +1964,47 @@ describe("SettingsPage Preferences controls", () => {
       .toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: /Hide duplicate copies/ }))
       .toBeInTheDocument();
+  });
+
+  test("desktop Age Refresh has one authoritative request and ignores duplicate clicks", async () => {
+    mockAuthState.role = "admin";
+    mockApi();
+    const originalImplementation = apiRequest.getMockImplementation();
+    let ageReads = 0;
+    let resolveRefresh;
+    apiRequest.mockImplementation((requestPath, options) => {
+      if (requestPath === "/api/library/age-groups") {
+        ageReads += 1;
+        if (ageReads === 2) {
+          return new Promise((resolve) => {
+            resolveRefresh = resolve;
+          });
+        }
+      }
+      return originalImplementation(requestPath, options);
+    });
+    render(
+      <StrictMode>
+        <MemoryRouter initialEntries={["/settings/library"]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </StrictMode>,
+    );
+
+    const refresh = await screen.findByRole("button", { name: "Refresh" });
+    await waitFor(() => expect(ageReads).toBe(1));
+    fireEvent.click(refresh);
+    const pending = await screen.findByRole("button", { name: "Refreshing…" });
+    expect(pending).toBeDisabled();
+    fireEvent.click(pending);
+    expect(ageReads).toBe(2);
+
+    await act(async () => {
+      resolveRefresh({ total: 0, items: [] });
+    });
+    expect(await screen.findByRole("button", { name: "Refresh" })).toBeEnabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Age restrictions refreshed.");
+    expect(ageReads).toBe(2);
   });
 
   test("phone hides the desktop-only dynamic search setting", async () => {

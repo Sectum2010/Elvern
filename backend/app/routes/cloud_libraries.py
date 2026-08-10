@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 
 from ..auth import CurrentUser
@@ -14,6 +14,7 @@ from ..schemas import (
     GoogleDriveAccountReplacementResponse,
     GoogleDriveConnectRequest,
     GoogleDriveConnectResponse,
+    GoogleDriveOAuthOperationResponse,
     MessageResponse,
     ProviderAuthStatusResponse,
 )
@@ -23,14 +24,17 @@ from ..services.cloud_library_service import (
     build_google_drive_connect_response,
     cancel_google_account_candidate,
     cancel_google_drive_connect,
+    cancel_google_oauth_operation,
     complete_google_drive_connect,
     confirm_google_account_candidate,
     get_cloud_libraries_payload,
     get_google_account_candidate_payload,
+    get_google_oauth_operation_payload,
     get_google_drive_provider_auth_status_payload,
     hide_shared_library_source_for_user,
     move_google_drive_library_source,
     resolve_google_connect_state,
+    fail_google_drive_connect,
     show_shared_library_source_for_user,
 )
 
@@ -72,12 +76,48 @@ def cloud_libraries_google_connect(
     return GoogleDriveConnectResponse(**response_payload)
 
 
+@router.post("/google/operation/status", response_model=GoogleDriveOAuthOperationResponse)
+def read_google_oauth_operation(
+    payload: GoogleDriveAccountCandidateRequest,
+    request: Request,
+    response: Response,
+    user=CurrentUser,
+) -> GoogleDriveOAuthOperationResponse:
+    response.headers["Cache-Control"] = "no-store"
+    result = get_google_oauth_operation_payload(
+        request.app.state.settings,
+        user_id=user.id,
+        auth_session_id=_require_auth_session_id(user),
+        operation_id=payload.operation_id,
+    )
+    return GoogleDriveOAuthOperationResponse(**result)
+
+
+@router.post("/google/operation/cancel", response_model=GoogleDriveOAuthOperationResponse)
+def cancel_google_oauth_operation_route(
+    payload: GoogleDriveAccountCandidateRequest,
+    request: Request,
+    response: Response,
+    user=CurrentUser,
+) -> GoogleDriveOAuthOperationResponse:
+    response.headers["Cache-Control"] = "no-store"
+    result = cancel_google_oauth_operation(
+        request.app.state.settings,
+        user_id=user.id,
+        auth_session_id=_require_auth_session_id(user),
+        operation_id=payload.operation_id,
+    )
+    return GoogleDriveOAuthOperationResponse(**result)
+
+
 @router.post("/google/account-candidate/status", response_model=GoogleDriveAccountCandidateResponse)
 def read_google_account_candidate(
     payload: GoogleDriveAccountCandidateRequest,
     request: Request,
+    response: Response,
     user=CurrentUser,
 ) -> GoogleDriveAccountCandidateResponse:
+    response.headers["Cache-Control"] = "no-store"
     result = get_google_account_candidate_payload(
         request.app.state.settings,
         user_id=user.id,
@@ -91,8 +131,10 @@ def read_google_account_candidate(
 def cancel_google_account_replacement(
     payload: GoogleDriveAccountCandidateRequest,
     request: Request,
+    response: Response,
     user=CurrentUser,
 ) -> MessageResponse:
+    response.headers["Cache-Control"] = "no-store"
     cancel_google_account_candidate(
         request.app.state.settings,
         user_id=user.id,
@@ -106,8 +148,10 @@ def cancel_google_account_replacement(
 def confirm_google_account_replacement(
     payload: GoogleDriveAccountCandidateRequest,
     request: Request,
+    response: Response,
     user=CurrentUser,
 ) -> GoogleDriveAccountReplacementResponse:
+    response.headers["Cache-Control"] = "no-store"
     result = confirm_google_account_candidate(
         request.app.state.settings,
         user_id=user.id,
@@ -159,6 +203,11 @@ def cloud_libraries_google_callback(
                 or error_message.get("title")
                 or "Google Drive reconnect failed."
             )
+        fail_google_drive_connect(
+            request.app.state.settings,
+            state_token=state,
+            message=str(error_message),
+        )
         redirect_target = build_google_connect_callback_redirect(
             request.app.state.settings,
             success=False,

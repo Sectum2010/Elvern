@@ -8,6 +8,7 @@ const pagesDir = path.dirname(fileURLToPath(import.meta.url));
 const adminPagePath = path.resolve(pagesDir, "AdminPage.jsx");
 const libraryPagePath = path.resolve(pagesDir, "LibraryPage.jsx");
 const refreshSweepButtonPath = path.resolve(pagesDir, "../components/RefreshSweepButton.jsx");
+const controlCenterStylesPath = path.resolve(pagesDir, "../controlCenter.css");
 const stylesPath = path.resolve(pagesDir, "../styles.css");
 
 function readAdminPage() {
@@ -24,6 +25,10 @@ function readRefreshSweepButton() {
 
 function readStyles() {
   return fs.readFileSync(stylesPath, "utf8");
+}
+
+function readControlCenterStyles() {
+  return fs.readFileSync(controlCenterStylesPath, "utf8");
 }
 
 describe("AdminPage invite code guards", () => {
@@ -390,6 +395,51 @@ describe("AdminPage exposure mode planner guards", () => {
 });
 
 describe("AdminPage desktop Control Center contracts", () => {
+  test("uses one Meridian card system for Users, Invites, and Password Help", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain('desktopControlCenter ? "meridian-card meridian-users-card" : "settings-card settings-card--wide"');
+    expect(source).toContain('desktopControlCenter ? "meridian-card meridian-invite-card" : "settings-card"');
+    expect(source).toContain('className={`${desktopControlCenter ? "meridian-card" : "settings-card settings-card--wide"} control-center-admin-password-help');
+    expect(source).not.toContain('className="settings-card settings-card--wide meridian-card meridian-users-card"');
+  });
+
+  test("keeps active/background/pending status motion distinct and reduced-motion safe", () => {
+    const styles = readControlCenterStyles();
+
+    expect(styles).toContain(".user-status-indicator--green { animation: merUserActive");
+    expect(styles).toContain(".user-status-indicator--yellow { animation: merUserBackground");
+    expect(styles).toContain(".user-status-indicator--orange { animation: merUserPending");
+    expect(styles).toMatch(/\.user-status-indicator--grey,[\s\S]*\.user-status-indicator--red\s*\{ animation: none; \}/);
+    expect(styles).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.meridian-users-card \.user-status-indicator\s*\{[\s\S]*animation: none !important;/);
+  });
+
+  test("keeps the inline Invite age flow and dedicated Password Help resource states", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain('className="meridian-invite-age-panel"');
+    expect(source).toContain("INVITE CODE");
+    expect(source).toContain("Assign age credential");
+    expect(source).toContain("inviteAgeModalOpen && !desktopControlCenter");
+    expect(source).toContain('aria-label="Loading password help requests"');
+    expect(source).toContain("passwordHelpStatus.error");
+    expect(source).toContain("passwordHelpStatus.loaded");
+    expect(source).toContain("passwordHelpStatus.loading ? \"Refreshing…\" : \"Refresh\"");
+  });
+
+  test("long posture values retain full copy semantics without claiming unsupported clipboard success", () => {
+    const source = readAdminPage();
+    const styles = readControlCenterStyles();
+
+    expect(source).toContain("function MeridianPostureValue({ label, value })");
+    expect(source).toContain('title={String(value)}');
+    expect(source).toContain('aria-label={`${copied ? "Copied" : "Copy"} ${label}: ${value}`}');
+    expect(source).toContain("if (!navigator.clipboard?.writeText)");
+    expect(source).toContain("await navigator.clipboard.writeText(String(value));");
+    expect(styles).toContain("grid-template-columns: minmax(126px, 1.15fr) minmax(0, 1fr)");
+    expect(styles).toContain(".meridian-posture-grid dt { overflow: hidden;");
+  });
+
   test("keeps approved synthetic display isolated from real admin state", () => {
     const source = readAdminPage();
 

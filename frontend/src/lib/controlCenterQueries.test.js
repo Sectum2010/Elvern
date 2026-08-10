@@ -44,6 +44,11 @@ describe("Control Center resource cache", () => {
     })).toBe("/api/desktop-helper/status?platform=linux&device_id=device+%2F+one");
   });
 
+  test("owns the desktop Age restrictions endpoint as one protected resource", () => {
+    expect(controlCenterResourcePath({ resource: "ageGroups" }))
+      .toBe("/api/library/age-groups");
+  });
+
   test("deduplicates concurrent requests for the same protected resource", async () => {
     let resolveRequest;
     apiRequest.mockReturnValue(new Promise((resolve) => {

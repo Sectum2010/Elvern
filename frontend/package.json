@@ -13,6 +13,8 @@
     "playwright:install:extra": "node scripts/install-playwright-extra-browsers.mjs",
     "build:phase7": "node scripts/build-phase7-production.mjs",
     "test:e2e:revision-chromium": "node scripts/run-cross-browser-playwright.mjs --project chromium-desktop-production --project chromium-assistant-navigation --project chromium-settings-navigation --project chromium-service-worker-network-guard --project chromium-wss-network-guard",
+    "test:e2e:control-center-baseline": "node scripts/run-cross-browser-playwright.mjs --project chromium-control-center-baseline",
+    "visual:update:control-center": "ELVERN_UPDATE_CONTROL_CENTER_BASELINES=1 node scripts/run-cross-browser-playwright.mjs --project chromium-control-center-source-generation",
     "test:e2e:firefox": "node scripts/run-cross-browser-playwright.mjs --project firefox-desktop-production --project firefox-assistant-navigation --project firefox-settings-navigation --project firefox-service-worker-network-guard --project firefox-wss-network-guard",
     "test:e2e:webkit": "node scripts/run-cross-browser-playwright.mjs --project webkit-desktop-production",
     "test:e2e:cross-browser": "node scripts/run-cross-browser-playwright.mjs",

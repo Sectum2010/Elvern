@@ -10,6 +10,7 @@ import { join, resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
+import crossBrowserConfig from "../playwright.cross-browser.config.js";
 import {
   classifyConnectAuthority,
   classifyProxyTarget,
@@ -286,5 +287,20 @@ describe("browser-level network authority", () => {
     );
     expect(config).toContain('bypass: "<-loopback>"');
     expect(config).toContain('"network.proxy.allow_hijacking_localhost": true');
+  });
+
+  test("desktop production projects exclude private Control Center source generation", () => {
+    for (const projectName of [
+      "chromium-desktop-production",
+      "firefox-desktop-production",
+      "webkit-desktop-production",
+    ]) {
+      const project = crossBrowserConfig.projects.find(({ name }) => name === projectName);
+      expect(project?.grepInvert).toBeInstanceOf(RegExp);
+      expect(project.grepInvert.test("@control-center-source-generation private parity"))
+        .toBe(true);
+      expect(project.grepInvert.test("@control-center-baseline reviewed baseline"))
+        .toBe(true);
+    }
   });
 });
