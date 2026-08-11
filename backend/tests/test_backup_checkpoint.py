@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import shutil
 import sqlite3
+import threading
+import time
 
 import pytest
 
@@ -857,6 +859,12 @@ def test_admin_backup_endpoints_list_create_inspect_and_restore_plan(
     assert list_response.json()["backups_dir"] == str((fake_root / "backend" / "data" / "backups").resolve())
     assert list_response.json()["checkpoints"] == []
 
+    recent_auth_response = client.post(
+        "/api/admin/backups/recent-auth",
+        json={"current_admin_password": admin_credentials["password"]},
+    )
+    assert recent_auth_response.status_code == 200
+
     plaintext_probe_dir = tmp_path / "admin-plaintext-probe"
     create_response = client.post("/api/admin/backups", json={"output_dir": str(plaintext_probe_dir)})
     assert create_response.status_code == 200
@@ -895,6 +903,219 @@ def test_admin_backup_endpoints_list_create_inspect_and_restore_plan(
     assert plan_payload["checkpoint_valid"] is True
     assert plan_payload["restore_scope"]["media_files_included"] is False
     assert plan_payload["restore_scope"]["poster_files_included"] is False
+
+
+def test_backup_job_requires_recent_auth_and_is_idempotent(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _prepare_fake_project_root(tmp_path, monkeypatch)
+    _insert_runtime_fixture_data(initialized_settings)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+
+    missing_step_up = client.post(
+        "/api/admin/backup-jobs",
+        json={"key_source": "auto", "idempotency_key": "job-contract"},
+    )
+    assert missing_step_up.status_code == 428
+    assert missing_step_up.json()["detail"]["code"] == "recent_auth_required"
+
+    assert client.post(
+        "/api/admin/backups/recent-auth",
+        json={"current_admin_password": admin_credentials["password"]},
+    ).status_code == 200
+    created = client.post(
+        "/api/admin/backup-jobs",
+        json={"key_source": "auto", "idempotency_key": "job-contract"},
+    )
+    assert created.status_code == 202
+    job_id = created.json()["id"]
+    duplicate = client.post(
+        "/api/admin/backup-jobs",
+        json={"key_source": "auto", "idempotency_key": "job-contract"},
+    )
+    assert duplicate.status_code == 202
+    assert duplicate.json()["id"] == job_id
+
+    deadline = time.monotonic() + 15
+    job = created.json()
+    while job["state"] not in {"completed", "failed", "interrupted"} and time.monotonic() < deadline:
+        time.sleep(0.05)
+        response = client.get(f"/api/admin/backup-jobs/{job_id}")
+        assert response.status_code == 200
+        job = response.json()
+    assert job["state"] == "completed", job
+    assert job["progress_percent"] == 100
+    assert job["checkpoint_id"]
+
+    with get_connection(initialized_settings) as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(backup_jobs)").fetchall()}
+        persisted = connection.execute(
+            "SELECT idempotency_key, key_source, checkpoint_id FROM backup_jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        catalog = connection.execute(
+            "SELECT checkpoint_id, catalog_status FROM backup_catalog WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    assert "passphrase" not in columns
+    assert "output_path" not in columns
+    assert dict(persisted) == {
+        "idempotency_key": "job-contract",
+        "key_source": "auto",
+        "checkpoint_id": job["checkpoint_id"],
+    }
+    assert dict(catalog) == {
+        "checkpoint_id": job["checkpoint_id"],
+        "catalog_status": "valid",
+    }
+
+
+def test_backup_job_rejects_a_competing_writer(
+    client,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    from backend.app.services.backup_job_service import BackupJobManager
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_job(self, *, job_id, actor_id, actor_username, passphrase):
+        del self, job_id, actor_id, actor_username, passphrase
+        entered.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(BackupJobManager, "_run_job", hold_job)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    assert client.post(
+        "/api/admin/backups/recent-auth",
+        json={"current_admin_password": admin_credentials["password"]},
+    ).status_code == 200
+    first = client.post(
+        "/api/admin/backup-jobs",
+        json={"key_source": "auto", "idempotency_key": "writer-one"},
+    )
+    assert first.status_code == 202
+    assert entered.wait(timeout=2)
+    try:
+        competing = client.post(
+            "/api/admin/backup-jobs",
+            json={"key_source": "auto", "idempotency_key": "writer-two"},
+        )
+        assert competing.status_code == 409
+        assert competing.json()["detail"]["code"] == "backup_job_active"
+        assert competing.json()["detail"]["job_id"] == first.json()["id"]
+    finally:
+        release.set()
+
+
+def test_remote_backup_routes_redact_host_paths(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    fake_root = _prepare_fake_project_root(tmp_path, monkeypatch)
+    _insert_runtime_fixture_data(initialized_settings)
+    monkeypatch.setattr(
+        "backend.app.routes.admin.resolve_same_host_request",
+        lambda *args, **kwargs: {"same_host": False},
+    )
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    assert client.post(
+        "/api/admin/backups/recent-auth",
+        json={"current_admin_password": admin_credentials["password"]},
+    ).status_code == 200
+
+    created = client.post("/api/admin/backups", json={})
+    assert created.status_code == 200
+    checkpoint = created.json()["checkpoint"]
+    checkpoint_id = checkpoint["checkpoint_id"]
+    assert checkpoint["path"] == f"backups/{checkpoint_id}"
+
+    listed = client.get("/api/admin/backups")
+    assert listed.status_code == 200
+    assert listed.json()["backups_dir"] == "backups"
+    assert listed.json()["checkpoints"][0]["path"] == f"backups/{checkpoint_id}"
+
+    inspected = client.get(f"/api/admin/backups/{checkpoint_id}/inspect")
+    assert inspected.status_code == 200
+    assert inspected.json()["path"] == f"backups/{checkpoint_id}"
+
+    restore_plan = client.get(f"/api/admin/backups/{checkpoint_id}/restore-plan")
+    assert restore_plan.status_code == 200
+    payload = restore_plan.json()
+    assert payload["checkpoint_path"] == f"backups/{checkpoint_id}"
+    assert all(value is None for value in payload["source_metadata"].values())
+    serialized = json.dumps(payload)
+    assert str(fake_root.resolve()) not in serialized
+    assert str(initialized_settings.db_path.resolve()) not in serialized
+    assert str(initialized_settings.media_root.resolve()) not in serialized
+
+
+def test_backup_passphrase_failures_are_rate_limited_per_session_and_checkpoint(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _prepare_fake_project_root(tmp_path, monkeypatch)
+    _insert_runtime_fixture_data(initialized_settings)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    assert client.post(
+        "/api/admin/backups/recent-auth",
+        json={"current_admin_password": admin_credentials["password"]},
+    ).status_code == 200
+    created = client.post(
+        "/api/admin/backups",
+        json={"passphrase": "correct-test-passphrase"},
+    )
+    assert created.status_code == 200
+    checkpoint_id = created.json()["checkpoint"]["checkpoint_id"]
+    monkeypatch.setattr(
+        "backend.app.services.recovery_security_service.BACKUP_PASSPHRASE_ATTEMPT_LIMIT",
+        2,
+    )
+
+    for _ in range(2):
+        response = client.post(
+            f"/api/admin/backups/{checkpoint_id}/inspect",
+            json={"passphrase": "incorrect-test-passphrase"},
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "backup_passphrase_invalid"
+
+    blocked = client.post(
+        f"/api/admin/backups/{checkpoint_id}/inspect",
+        json={"passphrase": "incorrect-test-passphrase"},
+    )
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "backup_passphrase_rate_limited"
+
+
+def test_backup_catalog_keeps_missing_checkpoint_as_honest_status(
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _prepare_fake_project_root(tmp_path, monkeypatch)
+    _insert_runtime_fixture_data(initialized_settings)
+    created = backup_service.create_backup_checkpoint(initialized_settings)
+    from backend.app.services.backup_job_service import list_backup_catalog
+
+    first = list_backup_catalog(initialized_settings)
+    assert first[0]["checkpoint_id"] == created["checkpoint_id"]
+    Path(created["backup_path"]).unlink()
+
+    missing = list_backup_catalog(initialized_settings)
+    assert missing[0]["checkpoint_id"] == created["checkpoint_id"]
+    assert missing[0]["catalog_status"] == "missing"
 
 
 def test_admin_backup_endpoint_rejects_invalid_checkpoint_ids(

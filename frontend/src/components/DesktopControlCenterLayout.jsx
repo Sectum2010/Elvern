@@ -5,16 +5,19 @@ import {
   FileClock,
   Gauge,
   Library,
+  LogOut,
   MonitorPlay,
   Palette,
   RotateCcw,
   Shield,
+  Sparkles,
   Users,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext.jsx";
+import { useOptionalProviderAuth } from "../auth/ProviderAuthContext.jsx";
 import {
   markLibraryReturnPending,
   readLibraryReturnTarget,
@@ -22,6 +25,14 @@ import {
 import { useControlCenterSession } from "./ControlCenterSessionContext.jsx";
 import { SystemStatusRail } from "./SystemStatusRail.jsx";
 import { applyControlCenterPaint } from "../lib/controlCenterPaint.js";
+import { invalidateLibraryQueries } from "../lib/libraryQueries.js";
+import {
+  canAccessAssistant,
+  resolveAssistantNavigationTarget,
+} from "../lib/assistantAccess.js";
+import { usePlaybackAwareLogout } from "../features/auth/usePlaybackAwareLogout.js";
+import { PlaybackWorkerLogoutDialog } from "../features/auth/PlaybackWorkerLogoutDialog.jsx";
+import { requestControlCenterNavigation } from "../lib/controlCenterNavigation.js";
 
 const SETTINGS_NAV = [
   ["appearance", "Appearance", Palette],
@@ -100,31 +111,100 @@ export function DesktopControlCenterLayout() {
   const [switching, setSwitching] = useState(false);
   const [switchRotation, setSwitchRotation] = useState(area === "admin" ? 180 : 0);
   const [tilt, setTilt] = useState({ x: 0, y: 0, active: false });
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [contentEntering, setContentEntering] = useState(true);
   const switchTimerRef = useRef(0);
+  const contentFrameRef = useRef(0);
+  const firstContentEffectRef = useRef(true);
+  const accountMenuRef = useRef(null);
   const navItems = (area === "admin" ? ADMIN_NAV : SETTINGS_NAV)
     .filter(([key]) => key !== "server-storage" || user?.role === "admin");
   const activeNavIndex = Math.max(0, navItems.findIndex(([key]) => key === tab));
   const [title, subtitle] = TITLES[tab] || TITLES[area === "admin" ? "overview" : "appearance"];
   const host = useMemo(hostnameLabel, []);
+  const logoutCoordinator = usePlaybackAwareLogout({ onBeforeLogout: () => setAccountMenuOpen(false) });
+  const {
+    acknowledgeProviderAuthOutcome,
+    providerAuthTransaction,
+  } = useOptionalProviderAuth();
+  const [providerOutcomeToast, setProviderOutcomeToast] = useState(null);
+  const providerOutcomeTimerRef = useRef(0);
+  const assistantTarget = resolveAssistantNavigationTarget(user);
 
   useEffect(() => () => window.clearTimeout(switchTimerRef.current), []);
+
+  useEffect(() => () => window.clearTimeout(providerOutcomeTimerRef.current), []);
+
+  useEffect(() => {
+    const outcomeId = providerAuthTransaction?.outcomeId;
+    if (!outcomeId || providerAuthTransaction.identity !== `${String(user?.id ?? "")}:${String(user?.role || "").trim().toLowerCase()}`) {
+      return;
+    }
+    const state = providerAuthTransaction.state;
+    if (!["connected", "cancelled_or_incomplete", "error"].includes(state)) {
+      return;
+    }
+    setProviderOutcomeToast({
+      tone: state === "connected" ? "success" : "error",
+      text: providerAuthTransaction.message || (state === "connected" ? "Google Drive connected." : "Reconnect was not completed."),
+    });
+    if (state === "connected") {
+      void invalidateLibraryQueries();
+    }
+    acknowledgeProviderAuthOutcome(outcomeId);
+    window.clearTimeout(providerOutcomeTimerRef.current);
+    providerOutcomeTimerRef.current = window.setTimeout(() => setProviderOutcomeToast(null), 5000);
+  }, [acknowledgeProviderAuthOutcome, providerAuthTransaction, user?.id, user?.role]);
 
   useEffect(() => {
     if (!switching) setSwitchRotation(area === "admin" ? 180 : 0);
   }, [area, switching]);
 
+  useEffect(() => {
+    setAccountMenuOpen(false);
+    if (firstContentEffectRef.current) {
+      firstContentEffectRef.current = false;
+      return undefined;
+    }
+    setContentEntering(false);
+    contentFrameRef.current = window.requestAnimationFrame(() => setContentEntering(true));
+    return () => window.cancelAnimationFrame(contentFrameRef.current);
+  }, [area, tab]);
+
+  useEffect(() => {
+    if (!accountMenuOpen) return undefined;
+    function handlePointerDown(event) {
+      if (!accountMenuRef.current?.contains(event.target)) setAccountMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [accountMenuOpen]);
+
   function returnToLibrary() {
     const identity = { userId: user?.id, role: user?.role };
     const target = readLibraryReturnTarget(identity);
-    if (target) markLibraryReturnPending(identity);
-    navigate(target?.listPath || "/library?category=movies", {
-      state: target ? { restoreLibraryReturn: true } : undefined,
-    });
+    const destination = target?.listPath || "/library?category=movies";
+    const proceed = () => {
+      if (target) markLibraryReturnPending(identity);
+      navigate(destination, {
+        state: target ? { restoreLibraryReturn: true } : undefined,
+      });
+    };
+    if (requestControlCenterNavigation(destination, proceed)) {
+      proceed();
+    }
   }
 
   function switchArea() {
     if (switching || user?.role !== "admin") return;
     const destination = area === "admin" ? `/settings/${settingsTab}` : `/admin/${adminTab}`;
+    const proceed = () => startAreaSwitch(destination);
+    if (requestControlCenterNavigation(destination, proceed)) {
+      proceed();
+    }
+  }
+
+  function startAreaSwitch(destination) {
     const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
     const midpointDelay = reducedMotion ? 40 : 275;
     const completionDelay = reducedMotion ? 80 : 275;
@@ -149,6 +229,17 @@ export function DesktopControlCenterLayout() {
     const nextTheme = theme === "light" ? "mixed" : theme === "mixed" ? "dark" : "light";
     applyControlCenterPaint({ active: true, theme: nextTheme });
     setTheme(nextTheme);
+  }
+
+  function openAssistant() {
+    if (!assistantTarget) return;
+    const proceed = () => {
+      setAccountMenuOpen(false);
+      navigate(assistantTarget);
+    };
+    if (requestControlCenterNavigation(assistantTarget, proceed)) {
+      proceed();
+    }
   }
 
   const ThemeIcon = theme === "light" ? LightThemeIcon : theme === "dark" ? DarkThemeIcon : MixedThemeIcon;
@@ -203,6 +294,13 @@ export function DesktopControlCenterLayout() {
             <NavLink
               className={({ isActive }) => `meridian-nav__link${isActive ? " meridian-nav__link--active" : ""}`}
               key={key}
+              onClick={(event) => {
+                const destination = `/${area}/${key}`;
+                const proceed = () => navigate(destination);
+                if (!requestControlCenterNavigation(destination, proceed)) {
+                  event.preventDefault();
+                }
+              }}
               to={`/${area}/${key}`}
             >
               <Icon aria-hidden="true" size={17} strokeWidth={1.8} />
@@ -212,12 +310,44 @@ export function DesktopControlCenterLayout() {
         </nav>
 
         <div className="meridian-sidebar__spacer" />
-        <div className="meridian-user-card">
-          <span aria-hidden="true" className="meridian-user-card__avatar">{avatar}</span>
-          <span className="meridian-user-card__copy">
-            <strong>{user?.username || "User"}</strong>
-            <small>{roleLabel(user?.role)}</small>
-          </span>
+        <div className="meridian-user-card-wrap" ref={accountMenuRef}>
+          {accountMenuOpen ? (
+            <div className="meridian-account-menu" id="meridian-account-menu" role="menu">
+              {canAccessAssistant(user) ? (
+                <button className="meridian-account-menu__item" onClick={openAssistant} role="menuitem" type="button">
+                  <Sparkles aria-hidden="true" size={15} />
+                  <span>Assistant</span>
+                </button>
+              ) : null}
+              {canAccessAssistant(user) ? <span aria-hidden="true" className="meridian-account-menu__divider" /> : null}
+              <button
+                className="meridian-account-menu__item meridian-account-menu__item--danger"
+                onClick={() => {
+                  setAccountMenuOpen(false);
+                  void logoutCoordinator.requestLogout();
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <LogOut aria-hidden="true" size={15} />
+                <span>Sign out</span>
+              </button>
+            </div>
+          ) : null}
+          <button
+            aria-controls="meridian-account-menu"
+            aria-expanded={accountMenuOpen}
+            aria-haspopup="menu"
+            className="meridian-user-card"
+            onClick={() => setAccountMenuOpen((open) => !open)}
+            type="button"
+          >
+            <span aria-hidden="true" className="meridian-user-card__avatar">{avatar}</span>
+            <span className="meridian-user-card__copy">
+              <strong>{user?.username || "User"}</strong>
+              <small>{roleLabel(user?.role)}</small>
+            </span>
+          </button>
         </div>
       </aside>
 
@@ -227,11 +357,20 @@ export function DesktopControlCenterLayout() {
             <h1>{title}</h1>
             {subtitle ? <p>{subtitle}</p> : null}
           </header>
-          <div className="meridian-content" key={`${area}:${tab}`}>
+          <div className={`meridian-content${contentEntering ? " meridian-content--entering" : ""}`}>
             <Outlet />
           </div>
         </div>
       </main>
+
+      {providerOutcomeToast ? (
+        <div
+          className={`meridian-toast${providerOutcomeToast.tone === "error" ? " meridian-toast--error" : ""}`}
+          role="status"
+        >
+          {providerOutcomeToast.text}
+        </div>
+      ) : null}
 
       {user?.role === "admin" ? <SystemStatusRail /> : null}
 
@@ -257,6 +396,7 @@ export function DesktopControlCenterLayout() {
       >
         <ThemeIcon aria-hidden="true" size={19} />
       </button>
+      <PlaybackWorkerLogoutDialog coordinator={logoutCoordinator} />
     </section>
   );
 }

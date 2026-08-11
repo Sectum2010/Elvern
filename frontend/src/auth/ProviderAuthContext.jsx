@@ -25,6 +25,9 @@ const IDLE_TRANSACTION = Object.freeze({
   message: "",
   candidate: null,
   result: null,
+  operationId: "",
+  outcomeId: "",
+  identity: "",
 });
 
 
@@ -115,9 +118,28 @@ export function ProviderAuthProvider({ children }) {
     }
   }, [identity, user]);
 
-  const finishTransaction = useCallback((nextState, message, result = null) => {
+  const finishTransaction = useCallback((nextState, message, result = null, operation = null) => {
+    const intent = operation || readProviderAuthIntent({ identity: identityRef.current });
+    const operationId = String(intent?.operationId || transactionRef.current.operationId || "");
+    const operationIdentity = String(intent?.identity || identityRef.current || "");
     clearProviderAuthIntent();
-    updateTransaction({ state: nextState, message, candidate: null, result });
+    updateTransaction({
+      state: nextState,
+      message,
+      candidate: null,
+      result,
+      operationId,
+      outcomeId: operationId ? `${operationIdentity}:${operationId}` : "",
+      identity: operationIdentity,
+    });
+  }, [updateTransaction]);
+
+  const acknowledgeProviderAuthOutcome = useCallback((outcomeId) => {
+    if (!outcomeId || transactionRef.current.outcomeId !== outcomeId) {
+      return false;
+    }
+    updateTransaction(IDLE_TRANSACTION);
+    return true;
   }, [updateTransaction]);
 
   const reconcileProviderAuthTransaction = useCallback(async () => {
@@ -143,7 +165,15 @@ export function ProviderAuthProvider({ children }) {
     task = (async () => {
       const operationIdentity = identity;
       const operationId = intent.operationId;
-      updateTransaction({ state: "reconciling", message: "", candidate: null, result: null });
+      updateTransaction({
+        state: "reconciling",
+        message: "",
+        candidate: null,
+        result: null,
+        operationId,
+        outcomeId: "",
+        identity: operationIdentity,
+      });
       const callbackMessage = getGoogleDriveMessageFromLocation(window.location);
       let operation;
       try {
@@ -160,7 +190,15 @@ export function ProviderAuthProvider({ children }) {
         ) {
           return transactionRef.current;
         }
-        finishTransaction("cancelled_or_incomplete", PROVIDER_RECONNECT_CANCELLED_MESSAGE);
+        updateTransaction({
+          state: "unknown",
+          message: "Google Drive reconnect status is temporarily unknown. Elvern will check again.",
+          candidate: null,
+          result: null,
+          operationId,
+          outcomeId: "",
+          identity: operationIdentity,
+        });
         removeGoogleDriveCallbackParams();
         return transactionRef.current;
       }
@@ -189,6 +227,9 @@ export function ProviderAuthProvider({ children }) {
             message: callbackMessage,
             candidate,
             result: null,
+            operationId,
+            outcomeId: "",
+            identity: operationIdentity,
           };
           updateTransaction(next);
           removeGoogleDriveCallbackParams();
@@ -201,7 +242,12 @@ export function ProviderAuthProvider({ children }) {
           ) {
             return transactionRef.current;
           }
-          finishTransaction("error", requestError.message || "Google Drive account replacement expired.");
+          finishTransaction(
+            "error",
+            requestError.message || "Google Drive account replacement expired.",
+            null,
+            intent,
+          );
           removeGoogleDriveCallbackParams();
           return transactionRef.current;
         }
@@ -219,6 +265,7 @@ export function ProviderAuthProvider({ children }) {
           "connected",
           callbackMessage || "Google Drive connected.",
           { requirement: nextRequirement },
+          intent,
         );
         removeGoogleDriveCallbackParams();
         return transactionRef.current;
@@ -240,7 +287,7 @@ export function ProviderAuthProvider({ children }) {
         ) {
           return transactionRef.current;
         }
-        finishTransaction("cancelled_or_incomplete", PROVIDER_RECONNECT_CANCELLED_MESSAGE);
+        finishTransaction("cancelled_or_incomplete", PROVIDER_RECONNECT_CANCELLED_MESSAGE, null, intent);
         removeGoogleDriveCallbackParams();
         return transactionRef.current;
       }
@@ -249,11 +296,15 @@ export function ProviderAuthProvider({ children }) {
         finishTransaction(
           "error",
           operation.message || callbackMessage || "Google Drive reconnect failed.",
+          null,
+          intent,
         );
       } else {
         finishTransaction(
           "cancelled_or_incomplete",
           callbackMessage || PROVIDER_RECONNECT_CANCELLED_MESSAGE,
+          null,
+          intent,
         );
       }
       removeGoogleDriveCallbackParams();
@@ -322,7 +373,15 @@ export function ProviderAuthProvider({ children }) {
       state: "starting",
     };
     saveProviderAuthIntent(intent);
-    updateTransaction({ state: "starting", message: "", candidate: null, result: null });
+    updateTransaction({
+      state: "starting",
+      message: "",
+      candidate: null,
+      result: null,
+      operationId,
+      outcomeId: "",
+      identity,
+    });
     setModalError("");
     try {
       const payload = await startGoogleDriveReconnect({
@@ -335,7 +394,15 @@ export function ProviderAuthProvider({ children }) {
       ) {
         return null;
       }
-      updateTransaction({ state: "navigating_external", message: "", candidate: null, result: null });
+      updateTransaction({
+        state: "navigating_external",
+        message: "",
+        candidate: null,
+        result: null,
+        operationId,
+        outcomeId: "",
+        identity,
+      });
       return payload;
     } catch (requestError) {
       if (identityRef.current !== identity) {
@@ -455,6 +522,7 @@ export function ProviderAuthProvider({ children }) {
     providerAuthDismissedThisSession: dismissedThisSession,
     providerAuthReconnectPending: reconnectPending,
     providerAuthTransaction: transaction,
+    acknowledgeProviderAuthOutcome,
     refreshProviderAuthStatus,
     reconcileProviderAuthTransaction,
     showProviderAuthPrompt,
@@ -500,6 +568,7 @@ export function useOptionalProviderAuth() {
     providerAuthControllerAvailable: false,
     providerAuthReconnectPending: false,
     providerAuthTransaction: IDLE_TRANSACTION,
+    acknowledgeProviderAuthOutcome: () => false,
     startProviderReconnect: async () => null,
     cancelAccountReplacement: async () => undefined,
     confirmAccountReplacement: async () => null,

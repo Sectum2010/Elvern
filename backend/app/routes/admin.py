@@ -7,12 +7,13 @@ from queue import Empty
 from fastapi import APIRouter, Body, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
-from ..auth import CurrentAdmin, CurrentHeartbeatAdmin, clear_session_cookie, resolve_client_ip, revoke_sessions_for_user
+from ..auth import CurrentAdmin, CurrentHeartbeatAdmin, clear_session_cookie, resolve_client_ip
 from ..schemas import (
     AdminTechnicalMetadataEnrichmentRequest,
     AdminTechnicalMetadataEnrichmentTriggerResponse,
     AdminTechnicalMetadataStatusResponse,
     AdminDownloadAccessResponse,
+    AdminDownloadSearchResponse,
     AdminDownloadAccessUpdateRequest,
     AdminUrlPrefixResponse,
     AdminUrlPrefixRotateRequest,
@@ -30,10 +31,18 @@ from ..schemas import (
     AdminUserDeleteRequest,
     BackupCheckpointCreateResponse,
     BackupCheckpointCreateRequest,
+    BackupCheckpointDeleteRequest,
+    BackupCheckpointDeleteResponse,
     BackupCheckpointInspectResponse,
     BackupCheckpointListResponse,
     BackupCheckpointPassphraseRequest,
     BackupRestorePlanResponse,
+    BackupJobActiveResponse,
+    BackupJobCreateRequest,
+    BackupJobResponse,
+    BackupPreviewResponse,
+    RecoveryRecentAuthResponse,
+    RecoveryRecentAuthVerifyRequest,
     ExposureModeDraftRequest,
     ExposureMaintenanceLockRequest,
     ExposureMaintenanceLockResponse,
@@ -82,6 +91,7 @@ from ..services.admin_service import (
     list_audit_log,
     list_users,
     revoke_session,
+    revoke_user_security_boundary,
     update_user_password,
     update_user,
 )
@@ -94,6 +104,7 @@ from ..services.account_access_service import (
     list_visible_invite_codes,
     revoke_invite_code,
     update_download_access_for_user,
+    search_downloadable_media_for_user,
 )
 from ..services.app_settings_service import (
     clear_google_drive_setup_overrides,
@@ -109,6 +120,7 @@ from ..services.app_settings_service import (
     update_poster_reference_location,
 )
 from ..services.backup_service import (
+    build_safe_backup_preview,
     build_restore_dry_run_plan,
     create_backup_checkpoint,
     get_backups_dir_path,
@@ -117,6 +129,26 @@ from ..services.backup_service import (
     prune_backup_checkpoints,
     resolve_backup_checkpoint_path,
     summarize_backup_checkpoint,
+)
+from ..services.backup_encryption import (
+    BackupEncryptionError,
+    BackupPassphraseRequiredError,
+    BackupWrongPassphraseError,
+    validate_backup_passphrase,
+)
+from ..services.backup_job_service import (
+    delete_backup_checkpoint,
+    get_backup_job_manager,
+    list_backup_catalog,
+    update_backup_catalog_verification,
+)
+from ..services.recovery_security_service import (
+    clear_backup_passphrase_failures,
+    enforce_backup_passphrase_rate_limit,
+    get_recovery_recent_auth_status,
+    record_backup_passphrase_failure,
+    require_recovery_recent_auth,
+    verify_recovery_recent_auth,
 )
 from ..services.desktop_playback_service import resolve_same_host_request
 from ..services.exposure_mode_service import (
@@ -176,6 +208,53 @@ def _resolve_admin_checkpoint_path(settings, checkpoint_id: str):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+def _admin_backup_same_host(request: Request) -> bool:
+    return bool(
+        resolve_same_host_request(
+            request.app.state.settings,
+            platform="linux",
+            client_ip=resolve_client_ip(request),
+            request_host=request.url.hostname,
+            explicit_same_host=False,
+        )["same_host"]
+    )
+
+
+def _admin_backup_display_path(request: Request, *, checkpoint_id: str, path: object) -> str:
+    if _admin_backup_same_host(request):
+        return str(path)
+    return f"backups/{checkpoint_id}"
+
+
+def _redact_remote_restore_plan_paths(payload: dict[str, object], *, checkpoint_id: str) -> dict[str, object]:
+    redacted = dict(payload)
+    redacted["checkpoint_path"] = f"backups/{checkpoint_id}"
+    source_metadata = dict(redacted.get("source_metadata") or {})
+    for field in (
+        "source_db_path",
+        "source_project_root",
+        "source_public_app_origin",
+        "source_backend_origin",
+        "source_media_root_path",
+        "source_transcode_dir",
+    ):
+        source_metadata[field] = None
+    redacted["source_metadata"] = source_metadata
+    current_metadata = dict(redacted.get("current_metadata") or {})
+    current_metadata.update(
+        {
+            "current_db_path": "Server-local database",
+            "current_project_root": "Server-local project root",
+            "current_public_app_origin": "Server-local public origin",
+            "current_backend_origin": "Server-local backend origin",
+            "current_media_root_path": "Server-local media root",
+            "current_transcode_dir": "Server-local transcode directory",
+        }
+    )
+    redacted["current_metadata"] = current_metadata
+    return redacted
 
 
 def _verify_current_admin_password_for_route(settings, *, actor, current_admin_password: str) -> None:
@@ -558,7 +637,13 @@ def admin_update_user(
         ip_address=resolve_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
-    if payload.enabled is False:
+    if updated.get("_role_changed"):
+        _invalidate_user_sessions_if_available(
+            request,
+            user_id,
+            reason="user_role_changed",
+        )
+    elif payload.enabled is False:
         _invalidate_user_sessions_if_available(
             request,
             user_id,
@@ -601,6 +686,7 @@ def admin_update_user_password(
     user_id: int,
     payload: AdminPasswordUpdateRequest,
     request: Request,
+    response: Response,
     user=CurrentAdmin,
 ) -> MessageResponse:
     updated = update_user_password(
@@ -612,6 +698,9 @@ def admin_update_user_password(
         ip_address=resolve_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+    _invalidate_user_sessions_if_available(request, user_id, reason="user_password_changed")
+    if user_id == user.id:
+        clear_session_cookie(response, request.app.state.settings)
     return MessageResponse(message=f"Password updated for {updated['username']}")
 
 
@@ -671,7 +760,8 @@ def admin_disable_user_totp(
         )
         connection.execute("DELETE FROM user_recovery_codes WHERE user_id = ?", (user_id,))
         connection.commit()
-    revoke_sessions_for_user(settings, user_id=user_id, reason="admin_disabled_totp")
+    revoke_user_security_boundary(settings, user_id=user_id, reason="admin_disabled_totp")
+    _invalidate_user_sessions_if_available(request, user_id, reason="admin_disabled_totp")
     log_security_event(
         settings,
         event_kind="admin_disabled_user_totp",
@@ -836,6 +926,25 @@ def admin_update_user_download_access(
     return AdminDownloadAccessResponse(**updated)
 
 
+@router.get("/users/{user_id}/download-search", response_model=AdminDownloadSearchResponse)
+def admin_search_user_download_media(
+    user_id: int,
+    request: Request,
+    q: str = Query(default="", max_length=200),
+    limit: int = Query(default=40, ge=1, le=100),
+    user=CurrentAdmin,
+) -> AdminDownloadSearchResponse:
+    del user
+    return AdminDownloadSearchResponse(
+        **search_downloadable_media_for_user(
+            request.app.state.settings,
+            user_id=user_id,
+            query=q,
+            limit=limit,
+        )
+    )
+
+
 @router.post("/self-delete", response_model=MessageResponse)
 def admin_self_delete(
     payload: AdminSelfDeleteRequest,
@@ -995,10 +1104,99 @@ def admin_audit_log(
 @router.get("/backups", response_model=BackupCheckpointListResponse)
 def admin_list_backups(request: Request, user=CurrentAdmin) -> BackupCheckpointListResponse:
     del user
+    checkpoints = list_backup_catalog(request.app.state.settings)
+    same_host = _admin_backup_same_host(request)
+    if not same_host:
+        for checkpoint in checkpoints:
+            checkpoint["path"] = f"backups/{checkpoint['checkpoint_id']}"
     return BackupCheckpointListResponse(
-        backups_dir=get_backups_dir_path(request.app.state.settings),
-        checkpoints=list_backup_checkpoints(request.app.state.settings),
+        backups_dir=(
+            get_backups_dir_path(request.app.state.settings)
+            if same_host
+            else "backups"
+        ),
+        checkpoints=checkpoints,
     )
+
+
+@router.post("/backups/recent-auth", response_model=RecoveryRecentAuthResponse)
+def admin_verify_recovery_recent_auth(
+    payload: RecoveryRecentAuthVerifyRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> RecoveryRecentAuthResponse:
+    verified = verify_recovery_recent_auth(
+        request.app.state.settings,
+        actor=user,
+        current_admin_password=payload.current_admin_password,
+    )
+    log_security_event(
+        request.app.state.settings,
+        event_kind="recovery_recent_auth_verified",
+        actor_user_id=user.id,
+        actor_username=user.username,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return RecoveryRecentAuthResponse(**verified)
+
+
+@router.get("/backups/recent-auth/status", response_model=RecoveryRecentAuthResponse)
+def admin_recovery_recent_auth_status(
+    request: Request,
+    user=CurrentAdmin,
+) -> RecoveryRecentAuthResponse:
+    return RecoveryRecentAuthResponse(
+        **get_recovery_recent_auth_status(request.app.state.settings, actor=user)
+    )
+
+
+@router.post("/backup-jobs", response_model=BackupJobResponse, status_code=status.HTTP_202_ACCEPTED)
+def admin_create_backup_job(
+    payload: BackupJobCreateRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> BackupJobResponse:
+    require_recovery_recent_auth(request.app.state.settings, actor=user)
+    passphrase = None
+    if payload.key_source == "passphrase":
+        passphrase = validate_backup_passphrase(payload.passphrase or "")
+        if passphrase != (payload.passphrase_confirmation or ""):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "backup_passphrase_mismatch", "message": "Backup passphrases do not match."},
+            )
+    job = get_backup_job_manager(request.app.state.settings).start_job(
+        actor=user,
+        key_source=payload.key_source,
+        passphrase=passphrase,
+        idempotency_key=payload.idempotency_key,
+    )
+    log_audit_event(
+        request.app.state.settings,
+        action="admin.backup.job.create",
+        outcome="success",
+        user_id=user.id,
+        username=user.username,
+        role=user.role,
+        session_id=user.session_id,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        details={"job_id": job["id"], "backup_key_source": payload.key_source},
+    )
+    return BackupJobResponse(**job)
+
+
+@router.get("/backup-jobs/active", response_model=BackupJobActiveResponse)
+def admin_get_active_backup_job(request: Request, user=CurrentAdmin) -> BackupJobActiveResponse:
+    del user
+    return BackupJobActiveResponse(job=get_backup_job_manager(request.app.state.settings).active_job())
+
+
+@router.get("/backup-jobs/{job_id}", response_model=BackupJobResponse)
+def admin_get_backup_job(job_id: str, request: Request, user=CurrentAdmin) -> BackupJobResponse:
+    del user
+    return BackupJobResponse(**get_backup_job_manager(request.app.state.settings).get_job(job_id))
 
 
 @router.post("/backups", response_model=BackupCheckpointCreateResponse)
@@ -1007,6 +1205,7 @@ def admin_create_backup(
     payload: BackupCheckpointCreateRequest | None = Body(default=None),
     user=CurrentAdmin,
 ) -> BackupCheckpointCreateResponse:
+    require_recovery_recent_auth(request.app.state.settings, actor=user)
     passphrase = (payload.passphrase if payload else None) or None
     created = create_backup_checkpoint(
         request.app.state.settings,
@@ -1026,6 +1225,11 @@ def admin_create_backup(
         created["backup_path"],
         settings=request.app.state.settings,
         passphrase=passphrase,
+    )
+    summary["path"] = _admin_backup_display_path(
+        request,
+        checkpoint_id=str(summary["checkpoint_id"]),
+        path=summary["path"],
     )
     log_security_event(
         request.app.state.settings,
@@ -1051,7 +1255,6 @@ def admin_create_backup(
         user_agent=request.headers.get("user-agent"),
         details={
             "checkpoint_id": summary["checkpoint_id"],
-            "path": summary["path"],
             "created_at_utc": summary["created_at_utc"],
             "backup_trigger": summary["backup_trigger"],
         },
@@ -1069,10 +1272,12 @@ def admin_inspect_backup(
     request: Request,
     user=CurrentAdmin,
 ) -> BackupCheckpointInspectResponse:
-    del user
+    _resolve_admin_checkpoint_path(request.app.state.settings, checkpoint_id)
+    require_recovery_recent_auth(request.app.state.settings, actor=user)
     return _admin_inspect_backup_with_passphrase(
         checkpoint_id,
         request,
+        actor=user,
         passphrase=None,
     )
 
@@ -1084,10 +1289,12 @@ def admin_inspect_backup_with_passphrase(
     request: Request,
     user=CurrentAdmin,
 ) -> BackupCheckpointInspectResponse:
-    del user
+    _resolve_admin_checkpoint_path(request.app.state.settings, checkpoint_id)
+    require_recovery_recent_auth(request.app.state.settings, actor=user)
     return _admin_inspect_backup_with_passphrase(
         checkpoint_id,
         request,
+        actor=user,
         passphrase=payload.passphrase,
     )
 
@@ -1096,9 +1303,16 @@ def _admin_inspect_backup_with_passphrase(
     checkpoint_id: str,
     request: Request,
     *,
+    actor,
     passphrase: str | None,
 ) -> BackupCheckpointInspectResponse:
     checkpoint_path = _resolve_admin_checkpoint_path(request.app.state.settings, checkpoint_id)
+    if passphrase:
+        enforce_backup_passphrase_rate_limit(
+            request.app.state.settings,
+            actor=actor,
+            checkpoint_id=checkpoint_id,
+        )
     inspection = inspect_backup_checkpoint(
         checkpoint_path,
         settings=request.app.state.settings,
@@ -1109,7 +1323,13 @@ def _admin_inspect_backup_with_passphrase(
         settings=request.app.state.settings,
         passphrase=passphrase,
     )
-    if inspection.get("encrypted") and not inspection.get("valid") and passphrase:
+    error_code = str(inspection.get("error_code") or "")
+    if error_code == "backup_passphrase_invalid" and passphrase:
+        record_backup_passphrase_failure(
+            request.app.state.settings,
+            actor=actor,
+            checkpoint_id=checkpoint_id,
+        )
         log_security_event(
             request.app.state.settings,
             event_kind="backup_inspect_failed_wrong_passphrase",
@@ -1117,11 +1337,29 @@ def _admin_inspect_backup_with_passphrase(
             user_agent=request.headers.get("user-agent"),
             details={"checkpoint_id": checkpoint_id},
         )
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Wrong backup passphrase.")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "backup_passphrase_invalid", "message": "Wrong backup passphrase."},
+        )
+    if passphrase and inspection.get("valid"):
+        clear_backup_passphrase_failures(
+            request.app.state.settings,
+            actor=actor,
+            checkpoint_id=checkpoint_id,
+        )
     manifest = inspection.get("manifest") or {}
+    update_backup_catalog_verification(
+        request.app.state.settings,
+        checkpoint_id=checkpoint_id,
+        valid=bool(inspection.get("valid")),
+    )
     return BackupCheckpointInspectResponse(
         checkpoint_id=summary["checkpoint_id"],
-        path=summary["path"],
+        path=_admin_backup_display_path(
+            request,
+            checkpoint_id=str(summary["checkpoint_id"]),
+            path=summary["path"],
+        ),
         created_at_utc=summary["created_at_utc"],
         backup_trigger=summary["backup_trigger"],
         auto_checkpoint=summary["auto_checkpoint"],
@@ -1137,7 +1375,7 @@ def _admin_inspect_backup_with_passphrase(
         files_verified=int(inspection.get("files_verified") or 0),
         missing_files=list(inspection.get("missing_files") or []),
         hash_mismatches=list(inspection.get("hash_mismatches") or []),
-        errors=list(inspection.get("errors") or []),
+        errors=["Checkpoint verification failed."] if inspection.get("errors") else [],
     )
 
 
@@ -1147,7 +1385,7 @@ def admin_backup_restore_plan(
     request: Request,
     user=CurrentAdmin,
 ) -> BackupRestorePlanResponse:
-    del user
+    require_recovery_recent_auth(request.app.state.settings, actor=user)
     return _admin_backup_restore_plan_with_passphrase(checkpoint_id, request, passphrase=None)
 
 
@@ -1158,7 +1396,7 @@ def admin_backup_restore_plan_with_passphrase(
     request: Request,
     user=CurrentAdmin,
 ) -> BackupRestorePlanResponse:
-    del user
+    require_recovery_recent_auth(request.app.state.settings, actor=user)
     return _admin_backup_restore_plan_with_passphrase(
         checkpoint_id,
         request,
@@ -1174,14 +1412,15 @@ def _admin_backup_restore_plan_with_passphrase(
 ) -> BackupRestorePlanResponse:
     checkpoint_path = _resolve_admin_checkpoint_path(request.app.state.settings, checkpoint_id)
     try:
-        return BackupRestorePlanResponse(
-            **build_restore_dry_run_plan(
-                request.app.state.settings,
-                checkpoint_path,
-                passphrase=passphrase,
-            )
+        plan = build_restore_dry_run_plan(
+            request.app.state.settings,
+            checkpoint_path,
+            passphrase=passphrase,
         )
-    except ValueError:
+        if not _admin_backup_same_host(request):
+            plan = _redact_remote_restore_plan_paths(plan, checkpoint_id=checkpoint_id)
+        return BackupRestorePlanResponse(**plan)
+    except BackupWrongPassphraseError as exc:
         log_security_event(
             request.app.state.settings,
             event_kind="backup_inspect_failed_wrong_passphrase",
@@ -1189,7 +1428,100 @@ def _admin_backup_restore_plan_with_passphrase(
             user_agent=request.headers.get("user-agent"),
             details={"checkpoint_id": checkpoint_id, "operation": "restore_plan"},
         )
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Wrong backup passphrase.")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "backup_passphrase_invalid", "message": "Wrong backup passphrase."},
+        ) from exc
+    except BackupPassphraseRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except BackupEncryptionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": "Checkpoint verification failed."},
+        ) from exc
+
+
+@router.post("/backups/{checkpoint_id}/preview", response_model=BackupPreviewResponse)
+def admin_preview_backup(
+    checkpoint_id: str,
+    payload: BackupCheckpointPassphraseRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> BackupPreviewResponse:
+    require_recovery_recent_auth(request.app.state.settings, actor=user)
+    checkpoint_path = _resolve_admin_checkpoint_path(request.app.state.settings, checkpoint_id)
+    if payload.passphrase:
+        enforce_backup_passphrase_rate_limit(
+            request.app.state.settings,
+            actor=user,
+            checkpoint_id=checkpoint_id,
+        )
+    try:
+        preview = build_safe_backup_preview(
+            request.app.state.settings,
+            checkpoint_path,
+            passphrase=payload.passphrase,
+        )
+    except (BackupWrongPassphraseError, BackupPassphraseRequiredError) as exc:
+        if isinstance(exc, BackupWrongPassphraseError):
+            record_backup_passphrase_failure(
+                request.app.state.settings,
+                actor=user,
+                checkpoint_id=checkpoint_id,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except BackupEncryptionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": "Checkpoint verification failed."},
+        ) from exc
+    update_backup_catalog_verification(
+        request.app.state.settings,
+        checkpoint_id=checkpoint_id,
+        valid=bool(preview.get("checkpoint_valid")),
+    )
+    if payload.passphrase:
+        clear_backup_passphrase_failures(
+            request.app.state.settings,
+            actor=user,
+            checkpoint_id=checkpoint_id,
+        )
+    return BackupPreviewResponse(**preview)
+
+
+@router.delete("/backups/{checkpoint_id}", response_model=BackupCheckpointDeleteResponse)
+def admin_delete_backup(
+    checkpoint_id: str,
+    payload: BackupCheckpointDeleteRequest,
+    request: Request,
+    user=CurrentAdmin,
+) -> BackupCheckpointDeleteResponse:
+    require_recovery_recent_auth(request.app.state.settings, actor=user)
+    if not payload.confirm or payload.checkpoint_id != checkpoint_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Confirm the selected checkpoint before deleting it",
+        )
+    deleted = delete_backup_checkpoint(request.app.state.settings, checkpoint_id)
+    log_audit_event(
+        request.app.state.settings,
+        action="admin.backup.delete",
+        outcome="success",
+        user_id=user.id,
+        username=user.username,
+        role=user.role,
+        session_id=user.session_id,
+        ip_address=resolve_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        details={"checkpoint_id": checkpoint_id},
+    )
+    return BackupCheckpointDeleteResponse(**deleted)
 
 
 @router.get("/global-hidden-items", response_model=HiddenMovieListResponse)

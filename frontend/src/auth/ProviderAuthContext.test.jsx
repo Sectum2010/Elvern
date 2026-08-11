@@ -29,7 +29,9 @@ function Probe() {
     <div>
       <output data-testid="transaction-state">{controller.providerAuthTransaction.state}</output>
       <output data-testid="transaction-message">{controller.providerAuthTransaction.message}</output>
+      <output data-testid="transaction-outcome">{controller.providerAuthTransaction.outcomeId}</output>
       <button onClick={() => controller.startProviderReconnect({ allowWithoutRequirement: true })} type="button">Reconnect now</button>
+      <button onClick={() => controller.acknowledgeProviderAuthOutcome(controller.providerAuthTransaction.outcomeId)} type="button">Acknowledge</button>
     </div>
   );
 }
@@ -96,8 +98,44 @@ describe("ProviderAuthProvider transaction owner", () => {
     renderProvider();
 
     expect(await screen.findByTestId("transaction-state")).toHaveTextContent("connected");
+    expect(screen.getByTestId("transaction-outcome")).toHaveTextContent("7:admin:operation-provider-auth-test");
     expect(window.location.search).toBe("");
     expect(readProviderAuthIntent({ identity: "7:admin" })).toBeNull();
+  });
+
+  test("acknowledges a terminal outcome exactly once across rerenders", async () => {
+    saveIntent();
+    apiRequest.mockImplementation((path) => {
+      if (path === "/api/cloud-libraries/google/provider-auth-status") return Promise.resolve({ provider_auth_required: false });
+      if (path === "/api/cloud-libraries/google/operation/status") return Promise.resolve({ status: "connected" });
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const rendered = renderProvider();
+
+    expect(await screen.findByTestId("transaction-state")).toHaveTextContent("connected");
+    fireEvent.click(screen.getByRole("button", { name: "Acknowledge" }));
+    expect(screen.getByTestId("transaction-state")).toHaveTextContent("idle");
+
+    rendered.rerender(<ProviderAuthProvider><Probe /></ProviderAuthProvider>);
+    expect(screen.getByTestId("transaction-state")).toHaveTextContent("idle");
+    expect(apiRequest.mock.calls.filter(
+      ([path]) => path === "/api/cloud-libraries/google/operation/status",
+    )).toHaveLength(1);
+  });
+
+  test("keeps a network-unknown operation reconcilable instead of calling it cancelled", async () => {
+    saveIntent();
+    apiRequest.mockImplementation((path) => {
+      if (path === "/api/cloud-libraries/google/provider-auth-status") return Promise.resolve({ provider_auth_required: false });
+      if (path === "/api/cloud-libraries/google/operation/status") return Promise.reject(new TypeError("network unavailable"));
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    renderProvider();
+
+    expect(await screen.findByTestId("transaction-state")).toHaveTextContent("unknown");
+    expect(screen.getByTestId("transaction-message")).toHaveTextContent("temporarily unknown");
+    expect(screen.getByTestId("transaction-outcome")).toHaveTextContent("");
+    expect(readProviderAuthIntent({ identity: "7:admin" })).not.toBeNull();
   });
 
   test("turns callback cancellation into a terminal non-pending state", async () => {

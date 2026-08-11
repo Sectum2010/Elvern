@@ -98,6 +98,18 @@ export function setControlCenterResourceData({
   );
 }
 
+export function getControlCenterResourceData({
+  userId,
+  role,
+  resource,
+  platform = "",
+  deviceId = "",
+} = {}) {
+  return queryClient.getQueryData(
+    buildControlCenterResourceQueryKey({ userId, role, resource, platform, deviceId }),
+  );
+}
+
 export function invalidateControlCenterResource({
   userId,
   role,

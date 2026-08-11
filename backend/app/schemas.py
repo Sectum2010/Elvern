@@ -494,6 +494,12 @@ class BackupCheckpointSummaryResponse(BaseModel):
     git_dirty: bool | None = None
     inspect_valid: bool = False
     inspect_error: str | None = None
+    catalog_status: str = "available"
+    key_id: str | None = None
+    last_verification_state: str | None = None
+    last_verified_at: str | None = None
+    verification_fingerprint: str | None = None
+    job_id: str | None = None
 
 
 class BackupCheckpointListResponse(BaseModel):
@@ -509,6 +515,93 @@ class BackupCheckpointCreateResponse(BaseModel):
 
 class BackupCheckpointCreateRequest(BaseModel):
     passphrase: str | None = None
+
+
+class RecoveryRecentAuthVerifyRequest(BaseModel):
+    current_admin_password: str
+
+
+class RecoveryRecentAuthResponse(BaseModel):
+    verified: bool = True
+    expires_at: str | None = None
+    expires_in_seconds: int = 0
+
+
+BackupJobState = Literal[
+    "queued",
+    "snapshotting_database",
+    "collecting_components",
+    "sealing_manifest",
+    "archiving",
+    "encrypting",
+    "writing_checkpoint",
+    "verifying_checkpoint",
+    "completed",
+    "failed",
+    "interrupted",
+]
+
+
+class BackupJobCreateRequest(BaseModel):
+    key_source: Literal["auto", "passphrase"] = "auto"
+    passphrase: str | None = None
+    passphrase_confirmation: str | None = None
+    idempotency_key: str | None = Field(default=None, max_length=128)
+
+
+class BackupJobResponse(BaseModel):
+    id: str
+    state: BackupJobState
+    progress_current: int = 0
+    progress_total: int = 100
+    progress_percent: int = Field(default=0, ge=0, le=100)
+    stage_progress_current: int | None = None
+    stage_progress_total: int | None = None
+    stage_progress_unit: Literal["pages", "bytes", "items"] | None = None
+    message: str = ""
+    key_source: Literal["auto", "passphrase"]
+    checkpoint_id: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: str
+    started_at: str | None = None
+    updated_at: str
+    completed_at: str | None = None
+
+
+class BackupJobActiveResponse(BaseModel):
+    job: BackupJobResponse | None = None
+
+
+class BackupPreviewCountsResponse(BaseModel):
+    users: int = 0
+    enabled_admins: int = 0
+    media_items: int = 0
+
+
+class BackupPreviewResponse(BaseModel):
+    preview_only: bool = True
+    checkpoint_id: str
+    checkpoint_valid: bool = False
+    database_integrity: str | None = None
+    schema_compatible: bool = False
+    backup_counts: BackupPreviewCountsResponse
+    current_counts: BackupPreviewCountsResponse
+    settings_matches: dict[str, bool] = Field(default_factory=dict)
+    helper_releases_available: bool = False
+    assistant_uploads_available: bool = False
+    blocking_errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class BackupCheckpointDeleteRequest(BaseModel):
+    checkpoint_id: str
+    confirm: bool = False
+
+
+class BackupCheckpointDeleteResponse(BaseModel):
+    checkpoint_id: str
+    deleted: bool = True
 
 
 class BackupCheckpointHashMismatchResponse(BaseModel):
@@ -1897,6 +1990,11 @@ class AdminDownloadAccessResponse(BaseModel):
 class AdminDownloadAccessUpdateRequest(BaseModel):
     access_mode: DownloadAccessMode
     media_item_ids: list[int] = Field(default_factory=list)
+
+
+class AdminDownloadSearchResponse(BaseModel):
+    user_id: int
+    items: list[DownloadAccessMovieResponse] = Field(default_factory=list)
 
 
 class DownloadSessionResponse(BaseModel):

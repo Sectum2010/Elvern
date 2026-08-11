@@ -48,7 +48,7 @@ from backend.app.services.account_access_service import (
     update_download_access_for_user,
     validate_download_session,
 )
-from backend.app.services.admin_service import create_user, delete_user, update_user
+from backend.app.services.admin_service import create_user, delete_user, update_user, update_user_password
 from backend.app.services.log_redaction import redact_download_session_urls
 from backend.app.services.media_age_access_service import set_media_age_requirement
 from backend.app.services.desktop_helper_service import (
@@ -3362,7 +3362,7 @@ def test_download_access_selected_movie_gate_and_revoke(initialized_settings) ->
     ) is False
 
 
-def test_admin_download_access_defaults_to_all_until_explicit_override(initialized_settings) -> None:
+def test_admin_download_access_is_inherent_and_restrictions_are_rejected(initialized_settings) -> None:
     admin_user = _admin_user(initialized_settings)
     media_item = _create_media_item(initialized_settings, relative_name="admin-download-default.mp4")
     with get_connection(initialized_settings) as connection:
@@ -3385,24 +3385,37 @@ def test_admin_download_access_defaults_to_all_until_explicit_override(initializ
         item_id=int(media_item["id"]),
     ) is True
 
-    update_download_access_for_user(
-        initialized_settings,
-        user_id=admin_user.id,
-        access_mode="none",
-        media_item_ids=[],
-        actor=admin_user,
-        ip_address="127.0.0.1",
-        user_agent="pytest",
-    )
+    with pytest.raises(HTTPException, match="Admin accounts always have full download access"):
+        update_download_access_for_user(
+            initialized_settings,
+            user_id=admin_user.id,
+            access_mode="none",
+            media_item_ids=[],
+            actor=admin_user,
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+
+    # A stale pre-upgrade grant must not override inherent admin authorization.
+    with get_connection(initialized_settings) as connection:
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute(
+            """
+            INSERT INTO download_access_grants (
+                user_id, access_mode, created_at, updated_at, updated_by_user_id
+            ) VALUES (?, 'none', ?, ?, ?)
+            """,
+            (admin_user.id, now, now, admin_user.id),
+        )
+        connection.commit()
 
     explicit_access = get_download_access_for_user(initialized_settings, user_id=admin_user.id)
-    assert explicit_access["access_mode"] == "none"
-    assert explicit_access["updated_at"] is not None
+    assert explicit_access["access_mode"] == "all"
     assert is_item_download_allowed(
         initialized_settings,
         user_id=admin_user.id,
         item_id=int(media_item["id"]),
-    ) is False
+    ) is True
 
 
 def test_download_session_endpoint_authorizes_range_requests(initialized_settings, client) -> None:
@@ -4121,3 +4134,212 @@ def test_admin_delete_user_revokes_sessions_and_blocks_last_enabled_admin(initia
             user_agent="pytest",
         )
     assert self_exc.value.status_code == 400
+
+
+def _seed_user_security_boundary_access(settings, *, username: str, role: str):
+    created = create_user(
+        settings,
+        username=username,
+        password="family-password",
+        role=role,
+        enabled=True,
+        actor=_admin_user(settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    session_user, token = _issue_user_session(
+        settings,
+        username=username,
+        password="family-password",
+    )
+    item = _create_media_item(settings, relative_name=f"{username}.mp4")
+    if role != "admin":
+        _grant_download_for_item(
+            settings,
+            user_id=int(created["id"]),
+            media_item_id=int(item["id"]),
+        )
+    download = create_download_session(
+        settings,
+        user=session_user,
+        item_id=int(item["id"]),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    native = create_native_playback_session(
+        settings,
+        user_id=session_user.id,
+        item=item,
+        auth_session_id=session_user.session_id,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        client_name="Pytest Security Boundary",
+        created_from_auth_session_id=session_user.session_id,
+    )
+    desktop = create_desktop_vlc_handoff_record(
+        settings,
+        user_id=session_user.id,
+        item=item,
+        platform="windows",
+        device_id=None,
+        auth_session_id=session_user.session_id,
+        user_agent="pytest",
+        source_ip="127.0.0.1",
+        strategy="helper",
+        resolved_target="vlc",
+        backend_origin="http://testserver",
+    )
+    now = utcnow_iso()
+    future = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+    with get_connection(settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO google_oauth_states (
+                state_token, user_id, auth_session_id, operation_id_hash, created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (f"state-{username}", created["id"], session_user.session_id, f"operation-{username}", now, future),
+        )
+        candidate = connection.execute(
+            """
+            INSERT INTO google_oauth_account_candidates (
+                user_id, auth_session_id, operation_id_hash, google_account_id,
+                refresh_token, access_token, created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                created["id"],
+                session_user.session_id,
+                f"operation-{username}",
+                f"google-{username}",
+                "encrypted-refresh-token-fixture",
+                "encrypted-access-token-fixture",
+                now,
+                future,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO google_oauth_operations (
+                user_id, auth_session_id, operation_id_hash, status, candidate_id,
+                created_at, updated_at, expires_at
+            ) VALUES (?, ?, ?, 'account_mismatch', ?, ?, ?, ?)
+            """,
+            (
+                created["id"],
+                session_user.session_id,
+                f"operation-{username}",
+                candidate.lastrowid,
+                now,
+                now,
+                future,
+            ),
+        )
+        connection.commit()
+    return {
+        "user_id": int(created["id"]),
+        "auth_token": token,
+        "native_session_id": native["session_id"],
+        "desktop_handoff_id": desktop["handoff_id"],
+        "download_session_id": download["session_id"],
+    }
+
+
+def _assert_user_security_boundary_revoked(settings, seeded, *, reason: str) -> None:
+    with get_connection(settings) as connection:
+        auth_row = connection.execute(
+            "SELECT revoked_at, revoked_reason FROM sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (seeded["user_id"],),
+        ).fetchone()
+        native_row = connection.execute(
+            "SELECT revoked_at FROM native_playback_sessions WHERE session_id = ?",
+            (seeded["native_session_id"],),
+        ).fetchone()
+        desktop_row = connection.execute(
+            "SELECT revoked_at FROM desktop_vlc_handoffs WHERE handoff_id = ?",
+            (seeded["desktop_handoff_id"],),
+        ).fetchone()
+        download_row = connection.execute(
+            "SELECT revoked_at, last_error FROM download_sessions WHERE id = ?",
+            (seeded["download_session_id"],),
+        ).fetchone()
+        oauth_counts = {
+            table: connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE user_id = ?",  # nosec B608 - trusted test constants
+                (seeded["user_id"],),
+            ).fetchone()[0]
+            for table in (
+                "google_oauth_states",
+                "google_oauth_account_candidates",
+                "google_oauth_operations",
+            )
+        }
+    assert get_user_by_session_token(settings, seeded["auth_token"]) is None
+    assert auth_row["revoked_at"] is not None
+    assert auth_row["revoked_reason"] == reason
+    assert native_row["revoked_at"] is not None
+    assert desktop_row["revoked_at"] is not None
+    assert download_row["revoked_at"] is not None
+    assert download_row["last_error"] == reason
+    assert oauth_counts == {
+        "google_oauth_states": 0,
+        "google_oauth_account_candidates": 0,
+        "google_oauth_operations": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("initial_role", "next_role", "reason"),
+    [
+        ("standard_user", "admin", "user_role_changed"),
+        ("admin", "standard_user", "user_role_changed"),
+    ],
+)
+def test_role_change_revokes_every_target_access_surface(
+    initialized_settings,
+    initial_role: str,
+    next_role: str,
+    reason: str,
+) -> None:
+    seeded = _seed_user_security_boundary_access(
+        initialized_settings,
+        username=f"boundary-{initial_role}",
+        role=initial_role,
+    )
+
+    update_user(
+        initialized_settings,
+        user_id=seeded["user_id"],
+        enabled=None,
+        role=next_role,
+        current_admin_password=initialized_settings.admin_bootstrap_password or "",
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    _assert_user_security_boundary_revoked(initialized_settings, seeded, reason=reason)
+
+
+def test_password_reset_revokes_every_target_access_surface(initialized_settings) -> None:
+    seeded = _seed_user_security_boundary_access(
+        initialized_settings,
+        username="boundary-password",
+        role="standard_user",
+    )
+
+    update_user_password(
+        initialized_settings,
+        user_id=seeded["user_id"],
+        new_password="replacement-password",
+        current_admin_password=initialized_settings.admin_bootstrap_password or "",
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    _assert_user_security_boundary_revoked(
+        initialized_settings,
+        seeded,
+        reason="user_password_changed",
+    )

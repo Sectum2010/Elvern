@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import errno
 from datetime import datetime, timezone
 from pathlib import Path
 import shutil
@@ -12,20 +13,27 @@ import subprocess
 import tarfile
 import tempfile
 from contextlib import contextmanager
-from typing import Iterator, Literal
+from typing import Callable, Iterator, Literal
 
 from ..config import PROJECT_ROOT, Settings
+from ..db import get_connection
 from .backup_encryption import (
     HEADER_MAGIC,
+    HEADER_MAGIC_V2,
     KEY_SOURCE_AUTO,
     KEY_SOURCE_PASSPHRASE,
+    BackupEncryptionError,
+    V2EncryptingWriter,
+    decrypt_backup_file_v2,
     decrypt_backup,
     encrypt_backup,
+    inspect_encrypted_backup_file_header,
     inspect_encrypted_backup_header,
+    validate_backup_passphrase,
 )
 
 
-BACKUP_FORMAT_VERSION = 1
+BACKUP_FORMAT_VERSION = 2
 RESTORE_PLAN_FORMAT_VERSION = 1
 BACKUP_WARNING = (
     "Manual backups may contain secrets such as env values, OAuth tokens, "
@@ -175,7 +183,70 @@ def _extract_tar_gz_bytes(tarball_bytes: bytes, destination_dir: Path) -> None:
             _set_private_permissions(target, is_dir=False)
 
 
-def _create_sqlite_snapshot(*, source_db_path: Path, destination_path: Path) -> str:
+def _extract_tar_gz_file(tarball_path: Path, destination_dir: Path) -> None:
+    _ensure_private_dir(destination_dir)
+    destination_root = destination_dir.resolve()
+    with tarfile.open(tarball_path, mode="r:gz") as archive:
+        for member in archive:
+            target = (destination_root / member.name).resolve()
+            try:
+                target.relative_to(destination_root)
+            except ValueError as exc:
+                raise ValueError("Backup archive contains unsafe paths") from exc
+            if member.isdir():
+                _ensure_private_dir(target)
+                continue
+            if not member.isfile():
+                raise ValueError("Backup archive contains unsupported member type")
+            _ensure_private_dir(target.parent)
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                raise ValueError("Backup archive contains unreadable file")
+            with extracted, target.open("wb") as output:
+                shutil.copyfileobj(extracted, output, length=1024 * 1024)
+            _set_private_permissions(target, is_dir=False)
+
+
+def _stream_encrypted_archive(
+    source_dir: Path,
+    destination_path: Path,
+    *,
+    settings: Settings,
+    passphrase: str | None,
+) -> dict[str, object]:
+    _ensure_private_dir(destination_path.parent)
+    temporary_path = destination_path.with_name(f".{destination_path.name}.{os.getpid()}.tmp")
+    temporary_path.unlink(missing_ok=True)
+    try:
+        with temporary_path.open("wb") as output:
+            _set_private_permissions(temporary_path, is_dir=False)
+            writer = V2EncryptingWriter(output, settings=settings, passphrase=passphrase)
+            try:
+                with tarfile.open(fileobj=writer, mode="w|gz") as archive:
+                    for path in sorted(source_dir.rglob("*")):
+                        archive.add(path, arcname=path.relative_to(source_dir).as_posix())
+            finally:
+                writer.close()
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, destination_path)
+        _set_private_permissions(destination_path, is_dir=False)
+        directory_fd = os.open(destination_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return dict(writer.header)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _create_sqlite_snapshot(
+    *,
+    source_db_path: Path,
+    destination_path: Path,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> str:
     if not source_db_path.exists():
         raise FileNotFoundError(f"Source database does not exist: {source_db_path}")
 
@@ -184,8 +255,23 @@ def _create_sqlite_snapshot(*, source_db_path: Path, destination_path: Path) -> 
     destination_connection = sqlite3.connect(destination_path, check_same_thread=False)
     try:
         source_connection.execute("PRAGMA busy_timeout = 5000")
-        source_connection.backup(destination_connection)
+        latest_page_progress: tuple[int, int] | None = None
+
+        def report_pages(_status: int, remaining: int, total: int) -> None:
+            nonlocal latest_page_progress
+            latest_page_progress = (
+                max(int(total) - int(remaining), 0),
+                max(int(total), 0),
+            )
+
+        source_connection.backup(
+            destination_connection,
+            pages=64,
+            progress=report_pages if progress_callback is not None else None,
+        )
         destination_connection.commit()
+        if progress_callback is not None and latest_page_progress is not None:
+            progress_callback(*latest_page_progress)
     finally:
         destination_connection.close()
         source_connection.close()
@@ -311,6 +397,31 @@ def _materialized_checkpoint(
         }
         return
 
+    with requested_path.open("rb") as source:
+        magic = source.read(max(len(HEADER_MAGIC), len(HEADER_MAGIC_V2)))
+    if magic.startswith(HEADER_MAGIC_V2):
+        if settings is None:
+            raise ValueError("Encrypted backup inspection requires settings")
+        with tempfile.TemporaryDirectory(prefix="elvern-backup-inspect-v2-") as tmp_dir:
+            temporary_root = Path(tmp_dir)
+            tarball_path = temporary_root / "checkpoint.tar.gz"
+            header = decrypt_backup_file_v2(
+                requested_path,
+                tarball_path,
+                settings=settings,
+                passphrase=passphrase,
+            )
+            checkpoint_dir = temporary_root / "checkpoint"
+            _extract_tar_gz_file(tarball_path, checkpoint_dir)
+            yield checkpoint_dir, {
+                "storage_kind": "encrypted_archive",
+                "encrypted": True,
+                "key_source": header.get("key_source"),
+                "format_version": 2,
+                "archive_path": str(requested_path),
+            }
+        return
+
     blob = requested_path.read_bytes()
     if blob.startswith(HEADER_MAGIC):
         if settings is None:
@@ -372,7 +483,7 @@ def _write_manifest(manifest_path: Path, payload: dict[str, object]) -> None:
     _set_private_permissions(manifest_path, is_dir=False)
 
 
-def create_backup_checkpoint(
+def _create_backup_checkpoint_impl(
     settings: Settings,
     output_dir: str | Path | None = None,
     *,
@@ -388,11 +499,20 @@ def create_backup_checkpoint(
     initiated_by_user_id: int | None = None,
     initiated_by_username: str | None = None,
     operation_context: dict[str, object] | None = None,
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
+    progress_metrics_callback: Callable[[str, int, int, str, int, int, str], None] | None = None,
+    staging_path_callback: Callable[[Path], None] | None = None,
 ) -> dict[str, object]:
+    def report(stage: str, current: int, total: int, message: str) -> None:
+        if progress_callback is not None:
+            progress_callback(stage, current, total, message)
+
     created_at = _utc_now()
     resolved_trigger_kind = trigger_kind or ("auto" if auto_checkpoint else "manual")
     resolved_include_env = (resolved_trigger_kind == "manual") if include_env is None else bool(include_env)
     encrypted_output = output_dir is None
+    if encrypted_output and resolved_trigger_kind == "manual" and passphrase:
+        passphrase = validate_backup_passphrase(passphrase)
     if not encrypted_output and not allow_plaintext_backup:
         raise ValueError(PLAINTEXT_BACKUP_DENIED_ERROR)
     encrypted_backup_path = _allocate_default_encrypted_backup_path(created_at) if encrypted_output else None
@@ -406,14 +526,36 @@ def create_backup_checkpoint(
 
     _ensure_private_dir(_resolve_backups_dir(None))
     _ensure_private_dir(checkpoint_dir)
+    if staging_path_callback is not None:
+        staging_path_callback(checkpoint_dir)
 
+    report("snapshotting_database", 5, 100, "Creating a consistent database snapshot")
     db_snapshot_filename = "elvern.db"
     db_snapshot_path = checkpoint_dir / db_snapshot_filename
+    def report_snapshot_pages(completed_pages: int, total_pages: int) -> None:
+        overall_current = 5
+        if total_pages > 0:
+            overall_current += round((completed_pages / total_pages) * 15)
+        message = f"Creating a consistent database snapshot ({completed_pages}/{total_pages} pages)"
+        report("snapshotting_database", overall_current, 100, message)
+        if progress_metrics_callback is not None:
+            progress_metrics_callback(
+                "snapshotting_database",
+                completed_pages,
+                total_pages,
+                "pages",
+                overall_current,
+                100,
+                message,
+            )
+
     db_integrity_check_result = _create_sqlite_snapshot(
         source_db_path=settings.db_path,
         destination_path=db_snapshot_path,
+        progress_callback=report_snapshot_pages,
     )
 
+    report("collecting_components", 22, 100, "Collecting protected runtime components")
     env_source = (PROJECT_ROOT / "deploy" / "env" / "elvern.env").resolve()
     env_included = bool(resolved_include_env and env_source.exists())
     if env_included:
@@ -437,6 +579,7 @@ def create_backup_checkpoint(
             checkpoint_dir / "backend" / "data" / "assistant_uploads",
         )
 
+    report("sealing_manifest", 50, 100, "Sealing the checkpoint manifest")
     git_commit, git_dirty = _safe_git_metadata(PROJECT_ROOT)
     manifest = {
         "backup_format_version": BACKUP_FORMAT_VERSION,
@@ -480,20 +623,31 @@ def create_backup_checkpoint(
     manifest_path = checkpoint_dir / "manifest.json"
     total_size_bytes, file_count = _directory_file_stats(checkpoint_dir)
     if encrypted_output and encrypted_backup_path is not None:
-        tarball_bytes = _create_tar_gz_bytes(checkpoint_dir)
-        encrypted = encrypt_backup(
-            tarball_bytes,
+        free_bytes = shutil.disk_usage(encrypted_backup_path.parent).free
+        estimated_required = max(total_size_bytes * 2, 8 * 1024 * 1024)
+        if free_bytes < estimated_required:
+            raise OSError(
+                errno.ENOSPC,
+                f"Insufficient disk space for backup: need about {estimated_required} bytes",
+            )
+        report("archiving", 62, 100, "Archiving checkpoint components")
+        report("encrypting", 72, 100, "Encrypting checkpoint with AES-256-GCM")
+        encryption_header = _stream_encrypted_archive(
+            checkpoint_dir,
+            encrypted_backup_path,
             settings=settings,
             passphrase=passphrase if resolved_trigger_kind == "manual" else None,
         )
-        _ensure_private_dir(encrypted_backup_path.parent)
-        encrypted_backup_path.write_bytes(encrypted)
-        _set_private_permissions(encrypted_backup_path, is_dir=False)
+        manifest["backup_key_id"] = encryption_header.get("key_id")
         shutil.rmtree(checkpoint_dir)
         backup_path = encrypted_backup_path
         manifest_path = encrypted_backup_path
         total_size_bytes = int(encrypted_backup_path.stat().st_size)
         file_count = 1
+        report("writing_checkpoint", 88, 100, "Committing the encrypted checkpoint")
+        report("verifying_checkpoint", 96, 100, "Verifying checkpoint metadata")
+
+    report("completed", 100, 100, "Backup checkpoint created")
 
     return {
         "checkpoint_id": backup_path.name,
@@ -511,6 +665,56 @@ def create_backup_checkpoint(
         "file_count": file_count,
         "manifest": manifest,
     }
+
+
+def create_backup_checkpoint(
+    settings: Settings,
+    output_dir: str | Path | None = None,
+    *,
+    allow_plaintext_backup: bool = False,
+    include_env: bool | None = None,
+    include_helper_releases: bool = True,
+    include_assistant_uploads: bool = True,
+    backup_trigger: str = "manual_cli",
+    auto_checkpoint: bool = False,
+    trigger_kind: Literal["auto", "manual"] | None = None,
+    passphrase: str | None = None,
+    reason: str | None = None,
+    initiated_by_user_id: int | None = None,
+    initiated_by_username: str | None = None,
+    operation_context: dict[str, object] | None = None,
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
+    progress_metrics_callback: Callable[[str, int, int, str, int, int, str], None] | None = None,
+) -> dict[str, object]:
+    staging_path: Path | None = None
+
+    def remember_staging_path(path: Path) -> None:
+        nonlocal staging_path
+        staging_path = path
+
+    try:
+        return _create_backup_checkpoint_impl(
+            settings,
+            output_dir,
+            allow_plaintext_backup=allow_plaintext_backup,
+            include_env=include_env,
+            include_helper_releases=include_helper_releases,
+            include_assistant_uploads=include_assistant_uploads,
+            backup_trigger=backup_trigger,
+            auto_checkpoint=auto_checkpoint,
+            trigger_kind=trigger_kind,
+            passphrase=passphrase,
+            reason=reason,
+            initiated_by_user_id=initiated_by_user_id,
+            initiated_by_username=initiated_by_username,
+            operation_context=operation_context,
+            progress_callback=progress_callback,
+            progress_metrics_callback=progress_metrics_callback,
+            staging_path_callback=remember_staging_path,
+        )
+    finally:
+        if output_dir is None and staging_path is not None and staging_path.exists():
+            shutil.rmtree(staging_path, ignore_errors=True)
 
 
 def _inspect_plaintext_checkpoint_dir(checkpoint_dir: Path) -> dict[str, object]:
@@ -614,10 +818,10 @@ def inspect_backup_checkpoint(
                 inspection["manifest_path"] = f"{archive_path}:manifest.json"
             inspection.update(storage_metadata)
             return inspection
-    except ValueError as exc:
+    except (ValueError, BackupEncryptionError) as exc:
         requested_path = Path(path).expanduser().resolve()
         header = (
-            inspect_encrypted_backup_header(requested_path.read_bytes())
+            inspect_encrypted_backup_file_header(requested_path)
             if requested_path.is_file() and requested_path.suffix == ".enc"
             else {"encrypted": False, "key_source": None}
         )
@@ -632,6 +836,7 @@ def inspect_backup_checkpoint(
             "missing_files": [],
             "hash_mismatches": [],
             "errors": [str(exc)],
+            "error_code": getattr(exc, "code", "backup_corrupt"),
             "valid": False,
             "contains_secrets": True,
             "warning": BACKUP_WARNING,
@@ -848,6 +1053,79 @@ def build_restore_dry_run_plan(
             "missing_files": list(inspection.get("missing_files") or []),
             "hash_mismatches": list(inspection.get("hash_mismatches") or []),
         },
+    }
+
+
+def build_safe_backup_preview(
+    settings: Settings,
+    checkpoint_path: str | Path,
+    *,
+    passphrase: str | None = None,
+) -> dict[str, object]:
+    with _materialized_checkpoint(checkpoint_path, settings=settings, passphrase=passphrase) as (
+        checkpoint_dir,
+        storage_metadata,
+    ):
+        inspection = _inspect_plaintext_checkpoint_dir(checkpoint_dir)
+        manifest = inspection.get("manifest") or {}
+        db_snapshot = checkpoint_dir / str(manifest.get("db_snapshot_filename") or "elvern.db")
+        backup_counts = {"users": 0, "enabled_admins": 0, "media_items": 0}
+        backup_schema_version = None
+        if db_snapshot.is_file():
+            connection = sqlite3.connect(db_snapshot)
+            try:
+                backup_counts = {
+                    "users": int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]),
+                    "enabled_admins": int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND enabled = 1"
+                        ).fetchone()[0]
+                    ),
+                    "media_items": int(connection.execute("SELECT COUNT(*) FROM media_items").fetchone()[0]),
+                }
+                backup_schema_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            finally:
+                connection.close()
+        helper_releases_available = (checkpoint_dir / "backend" / "data" / "helper_releases").exists()
+        assistant_uploads_available = (checkpoint_dir / "backend" / "data" / "assistant_uploads").exists()
+
+    with get_connection(settings) as connection:
+        current_counts = {
+            "users": int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]),
+            "enabled_admins": int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM users WHERE role = 'admin' AND enabled = 1"
+                ).fetchone()[0]
+            ),
+            "media_items": int(connection.execute("SELECT COUNT(*) FROM media_items").fetchone()[0]),
+        }
+        current_schema_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+
+    blocking_errors = _collect_inspection_errors(inspection)
+    warnings: list[str] = []
+    if manifest.get("media_root_path") != str(settings.media_root.resolve()):
+        warnings.append("The media library reference differs from the current server.")
+    if not helper_releases_available:
+        warnings.append("Desktop helper releases are not included in this checkpoint.")
+    if not assistant_uploads_available:
+        warnings.append("Assistant uploads are not included in this checkpoint.")
+    return {
+        "preview_only": True,
+        "checkpoint_id": Path(str(storage_metadata.get("archive_path") or checkpoint_path)).name,
+        "checkpoint_valid": bool(inspection.get("valid")) and not blocking_errors,
+        "database_integrity": inspection.get("db_integrity_check_result"),
+        "schema_compatible": backup_schema_version == current_schema_version,
+        "backup_counts": backup_counts,
+        "current_counts": current_counts,
+        "settings_matches": {
+            "project_root": manifest.get("project_root") == str(PROJECT_ROOT.resolve()),
+            "media_library_reference": manifest.get("media_root_path") == str(settings.media_root.resolve()),
+            "public_origin": manifest.get("public_app_origin") == settings.public_app_origin,
+        },
+        "helper_releases_available": helper_releases_available,
+        "assistant_uploads_available": assistant_uploads_available,
+        "blocking_errors": blocking_errors,
+        "warnings": warnings,
     }
 
 

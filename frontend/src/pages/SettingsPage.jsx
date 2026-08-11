@@ -1136,6 +1136,7 @@ export function SettingsPage() {
     providerAuthControllerAvailable,
     providerAuthReconnectPending,
     providerAuthTransaction,
+    acknowledgeProviderAuthOutcome,
     startProviderReconnect,
     cancelAccountReplacement,
     confirmAccountReplacement,
@@ -1168,7 +1169,7 @@ export function SettingsPage() {
   const pendingReconcileHandlerRef = useRef(null);
   const hiddenHashRestoreKeyRef = useRef("");
   const oauthHashRestoreKeyRef = useRef("");
-  const handledProviderAuthTransactionRef = useRef(null);
+  const handledProviderAuthTransactionRef = useRef("");
   const toastTimerRef = useRef(0);
   const googleSetupDraftDirtyRef = useRef(false);
   const sharedReferenceDraftDirtyRef = useRef(false);
@@ -2445,7 +2446,8 @@ export function SettingsPage() {
   useEffect(() => {
     if (
       !providerAuthTransaction
-      || handledProviderAuthTransactionRef.current === providerAuthTransaction
+      || !providerAuthTransaction.outcomeId
+      || handledProviderAuthTransactionRef.current === providerAuthTransaction.outcomeId
     ) {
       return;
     }
@@ -2453,17 +2455,30 @@ export function SettingsPage() {
     if (!["connected", "cancelled_or_incomplete", "error"].includes(transactionState)) {
       return;
     }
-    handledProviderAuthTransactionRef.current = providerAuthTransaction;
+    handledProviderAuthTransactionRef.current = providerAuthTransaction.outcomeId;
     if (transactionState === "connected") {
-      setMessage(providerAuthTransaction.message || "Google Drive connected.");
-      setError("");
+      if (!showDesktopControlCenter) {
+        setMessage(providerAuthTransaction.message || "Google Drive connected.");
+        setError("");
+      }
       void invalidateLibraryQueries();
       void loadSettingsResource("cloud", { force: true });
+      if (!showDesktopControlCenter) {
+        acknowledgeProviderAuthOutcome(providerAuthTransaction.outcomeId);
+      }
       return;
     }
-    setError(providerAuthTransaction.message || "Reconnect was not completed.");
-    setMessage("");
-  }, [loadSettingsResource, providerAuthTransaction]);
+    if (!showDesktopControlCenter) {
+      setError(providerAuthTransaction.message || "Reconnect was not completed.");
+      setMessage("");
+      acknowledgeProviderAuthOutcome(providerAuthTransaction.outcomeId);
+    }
+  }, [
+    acknowledgeProviderAuthOutcome,
+    loadSettingsResource,
+    providerAuthTransaction,
+    showDesktopControlCenter,
+  ]);
 
   function applyUserSettingsPayload(payload) {
     const resolvedSettings = resolveUserSettings(payload);

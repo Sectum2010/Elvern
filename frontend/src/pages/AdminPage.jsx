@@ -4,6 +4,8 @@ import { LoadingView } from "../components/LoadingView";
 import { NonLoginSecretInput } from "../components/NonLoginSecretInput";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { DesktopBackToLibraryButton } from "../components/DesktopBackToLibraryButton";
+import { UserActionsDialog } from "../components/UserActionsDialog.jsx";
+import { RecoveryPanel } from "../components/RecoveryPanel.jsx";
 import { MeridianScanIcon } from "../components/meridian/MeridianScanIcon.jsx";
 import { useAuth } from "../auth/AuthContext";
 import { apiRequest } from "../lib/api";
@@ -50,7 +52,15 @@ import {
   detectClientDeviceClass,
   detectClientPlatform,
 } from "../lib/platformDetection.js";
-import { fetchControlCenterResource } from "../lib/controlCenterQueries.js";
+import {
+  fetchControlCenterResource,
+  getControlCenterResourceData,
+} from "../lib/controlCenterQueries.js";
+import {
+  ADMIN_BACKUP_EVENT_TYPES,
+  dispatchAdminBackupEvent,
+} from "../lib/adminEvents.js";
+import { CONTROL_CENTER_BEFORE_NAVIGATION_EVENT } from "../lib/controlCenterNavigation.js";
 
 
 const SELF_DELETE_CONFIRM_DETAIL = "Confirm deletion before removing your own account";
@@ -63,6 +73,7 @@ const ADMIN_STREAM_RELEVANT_EVENTS = [
   "user_disabled",
   "user_enabled",
   "user_deleted",
+  ...ADMIN_BACKUP_EVENT_TYPES,
 ];
 const ADMIN_SECTION_AUTO_COLLAPSE_MS = 15_000;
 const PLAYBACK_WORKERS_POLL_MS = 4_000;
@@ -936,7 +947,7 @@ function AdminSectionIcon({ name }) {
 
 
 export function AdminPage() {
-  const { user, refreshAuth } = useAuth();
+  const { user, refreshAuth, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [statusPayload, setStatusPayload] = useState(null);
@@ -944,6 +955,7 @@ export function AdminPage() {
   const [sessionsPayload, setSessionsPayload] = useState([]);
   const [auditPayload, setAuditPayload] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [desktopResourceStates, setDesktopResourceStates] = useState({});
   const [banner, setBanner] = useState(null);
   const [recoveryFeedback, setRecoveryFeedback] = useState(null);
   const [statusRefreshPending, setStatusRefreshPending] = useState(false);
@@ -980,6 +992,9 @@ export function AdminPage() {
   const [showAllCreateUserAges, setShowAllCreateUserAges] = useState(false);
   const [userFeedback, setUserFeedback] = useState({});
   const [userActionsModalUserId, setUserActionsModalUserId] = useState(null);
+  const [userActionsTab, setUserActionsTab] = useState("account");
+  const [showAllUserActionAges, setShowAllUserActionAges] = useState(false);
+  const [downloadDiscardConfirm, setDownloadDiscardConfirm] = useState(null);
   const [createUserExpanded, setCreateUserExpanded] = useState(false);
   const [deleteUserState, setDeleteUserState] = useState({
     userId: null,
@@ -1057,7 +1072,10 @@ export function AdminPage() {
     loading: false,
     saving: false,
     accessMode: "none",
+    originalAccessMode: "none",
     selectedItems: [],
+    originalSelectedItems: [],
+    originalSelectedItemIds: [],
     searchQuery: "",
     searchResults: [],
     searchPending: false,
@@ -1117,6 +1135,8 @@ export function AdminPage() {
   const ownTotpReturnFocusRef = useRef(null);
   const ownTotpPendingRef = useRef(false);
   const inviteAgeSelectRef = useRef(null);
+  const userActionsReturnFocusRef = useRef(null);
+  const userActionsTargetRef = useRef(null);
   const passwordHelpRequestInFlightRef = useRef(false);
   const passwordHelpRequestGenerationRef = useRef(0);
   ownTotpPendingRef.current = ownTotpModal.pending;
@@ -1200,6 +1220,16 @@ export function AdminPage() {
     () => usersPayload.find((entry) => entry.id === userActionsModalUserId) || null,
     [usersPayload, userActionsModalUserId],
   );
+  const downloadAccessDirty = useMemo(() => {
+    if (!downloadAccessState.userId || !downloadAccessState.loading) {
+      const currentIds = downloadAccessState.selectedItems.map((item) => Number(item.id)).sort((a, b) => a - b);
+      const originalIds = [...downloadAccessState.originalSelectedItemIds].map(Number).sort((a, b) => a - b);
+      return downloadAccessState.accessMode !== downloadAccessState.originalAccessMode
+        || currentIds.length !== originalIds.length
+        || currentIds.some((itemId, index) => itemId !== originalIds[index]);
+    }
+    return false;
+  }, [downloadAccessState]);
   const playbackWorkersByUserId = useMemo(
     () => buildPlaybackWorkersByUserId(playbackWorkersPayload),
     [playbackWorkersPayload],
@@ -1294,11 +1324,62 @@ export function AdminPage() {
     });
   }
 
+  function setDesktopResourceLoading(resources) {
+    setDesktopResourceStates((current) => {
+      const next = { ...current };
+      resources.forEach((resource) => {
+        next[resource] = {
+          loaded: Boolean(current[resource]?.loaded),
+          loading: true,
+          error: "",
+        };
+      });
+      return next;
+    });
+  }
+
+  function setDesktopResourceResult(resource, { error = "" } = {}) {
+    setDesktopResourceStates((current) => ({
+      ...current,
+      [resource]: {
+        loaded: error ? Boolean(current[resource]?.loaded) : true,
+        loading: false,
+        error,
+      },
+    }));
+  }
+
+  async function refreshDesktopAdminResource(resource) {
+    setDesktopResourceLoading([resource]);
+    try {
+      const payload = await desktopAdminResourceRequest(resource, { force: true });
+      applyDesktopAdminResource(resource, payload);
+      setDesktopResourceResult(resource);
+    } catch (requestError) {
+      if (requestError?.name !== "AbortError") {
+        setDesktopResourceResult(resource, {
+          error: requestError?.message || `Failed to load ${resource}`,
+        });
+      }
+    }
+  }
+
   async function loadDesktopAdminSection(tab, { signal, force = false } = {}) {
     const generation = desktopRequestGenerationRef.current + 1;
     desktopRequestGenerationRef.current = generation;
-    setLoading(true);
     const resources = desktopAdminResourcesForTab(tab);
+    resources.forEach((resource) => {
+      const cached = getControlCenterResourceData({
+        userId: user?.id,
+        role: user?.role,
+        resource,
+      });
+      if (cached !== undefined) {
+        applyDesktopAdminResource(resource, cached);
+        setDesktopResourceResult(resource);
+      }
+    });
+    setDesktopResourceLoading(resources);
     if (resources.includes("passwordHelp")) {
       setPasswordHelpStatus((current) => ({ ...current, error: "", loading: true }));
     }
@@ -1312,10 +1393,14 @@ export function AdminPage() {
     results.forEach((result, index) => {
       if (result.status === "fulfilled") {
         applyDesktopAdminResource(resources[index], result.value);
+        setDesktopResourceResult(resources[index]);
         return;
       }
       if (result.reason?.name !== "AbortError") {
         failures.push(result.reason?.message || `Failed to load ${resources[index]}`);
+        setDesktopResourceResult(resources[index], {
+          error: result.reason?.message || `Failed to load ${resources[index]}`,
+        });
         if (resources[index] === "passwordHelp") {
           setPasswordHelpStatus((current) => ({
             ...current,
@@ -1325,10 +1410,7 @@ export function AdminPage() {
         }
       }
     });
-    if (failures.length > 0) {
-      setBanner({ tone: "error", text: failures[0] });
-    }
-    setLoading(false);
+    void failures;
   }
 
   async function refreshAdminUsersResource() {
@@ -2180,6 +2262,10 @@ export function AdminPage() {
   }, [user?.id, user?.role]);
 
   useEffect(() => {
+    setDesktopResourceStates({});
+  }, [user?.id, user?.role]);
+
+  useEffect(() => {
     if (!desktopControlCenter || !inviteAgeModalOpen) {
       return undefined;
     }
@@ -2279,7 +2365,10 @@ export function AdminPage() {
         ...current,
         userId: null,
         accessMode: "none",
+        originalAccessMode: "none",
         selectedItems: [],
+        originalSelectedItems: [],
+        originalSelectedItemIds: [],
         searchQuery: "",
         searchResults: [],
         feedback: "",
@@ -2287,8 +2376,14 @@ export function AdminPage() {
       }));
       return;
     }
-    loadDownloadAccessForUser(selectedUserActionsEntry);
-  }, [selectedUserActionsEntry?.id]);
+    if (
+      (!desktopControlCenter || userActionsTab === "downloads")
+      && selectedUserActionsEntry.role === "standard_user"
+      && downloadAccessState.userId !== selectedUserActionsEntry.id
+    ) {
+      loadDownloadAccessForUser(selectedUserActionsEntry);
+    }
+  }, [desktopControlCenter, downloadAccessState.userId, selectedUserActionsEntry?.id, userActionsTab]);
 
   useEffect(() => {
     if (!selectedUserActionsEntry || downloadAccessState.accessMode !== "selected") {
@@ -2303,9 +2398,12 @@ export function AdminPage() {
     const timerId = window.setTimeout(async () => {
       setDownloadAccessState((current) => ({ ...current, searchPending: true }));
       try {
-        const payload = await apiRequest(`/api/library/search?q=${encodeURIComponent(query)}`, {
+        const payload = await apiRequest(
+          `/api/admin/users/${selectedUserActionsEntry.id}/download-search?q=${encodeURIComponent(query)}`,
+          {
           signal: controller.signal,
-        });
+          },
+        );
         setDownloadAccessState((current) => ({
           ...current,
           searchPending: false,
@@ -2404,7 +2502,11 @@ export function AdminPage() {
       }
     }
 
-    function handleAdminStreamEvent() {
+    function handleAdminStreamEvent(event) {
+      if (ADMIN_BACKUP_EVENT_TYPES.includes(event.type)) {
+        dispatchAdminBackupEvent(event.type);
+        return;
+      }
       loadAdminRealtimeState();
     }
 
@@ -2478,16 +2580,28 @@ export function AdminPage() {
       : current));
   }
 
-  function openUserActionsModal(entry) {
+  function finishOpenUserActionsModal(entry) {
     clearUserEditors(userActionsModalUserId);
+    userActionsReturnFocusRef.current = document.activeElement;
     setAgeCredentialEditor({
       userId: entry.id,
       ageCredential: Number(entry.age_credential || 18),
     });
+    setUserActionsTab("account");
+    setShowAllUserActionAges(false);
+    userActionsTargetRef.current = { id: entry.id, username: entry.username };
     setUserActionsModalUserId(entry.id);
   }
 
-  function closeUserActionsModal() {
+  function openUserActionsModal(entry) {
+    if (downloadAccessDirty && userActionsModalUserId !== entry.id) {
+      setDownloadDiscardConfirm({ action: "target", targetUserId: entry.id });
+      return;
+    }
+    finishOpenUserActionsModal(entry);
+  }
+
+  function finishCloseUserActionsModal() {
     if (userActionsModalUserId != null) {
       clearUserEditors(userActionsModalUserId);
     }
@@ -2498,7 +2612,60 @@ export function AdminPage() {
       pending: false,
       error: "",
     });
+    setUserActionsTab("account");
+    setShowAllUserActionAges(false);
+    setDownloadDiscardConfirm(null);
+    userActionsTargetRef.current = null;
     setUserActionsModalUserId(null);
+  }
+
+  function closeUserActionsModal() {
+    if (userActionsTab === "downloads" && downloadAccessDirty) {
+      setDownloadDiscardConfirm({ action: "close" });
+      return;
+    }
+    finishCloseUserActionsModal();
+  }
+
+  function requestUserActionsTab(nextTab) {
+    if (nextTab === userActionsTab) {
+      return;
+    }
+    if (userActionsTab === "downloads" && downloadAccessDirty) {
+      setDownloadDiscardConfirm({ action: "tab", nextTab });
+      return;
+    }
+    clearUserEditors(userActionsModalUserId);
+    setUserActionsTab(nextTab);
+  }
+
+  function discardDownloadDraft() {
+    setDownloadAccessState((current) => ({
+      ...current,
+      accessMode: current.originalAccessMode,
+      selectedItems: current.originalSelectedItems,
+      searchQuery: "",
+      searchResults: [],
+      error: "",
+      feedback: "",
+    }));
+    const pendingAction = downloadDiscardConfirm;
+    setDownloadDiscardConfirm(null);
+    if (pendingAction?.action === "tab") {
+      clearUserEditors(userActionsModalUserId);
+      setUserActionsTab(pendingAction.nextTab);
+    } else if (pendingAction?.action === "close") {
+      finishCloseUserActionsModal();
+    } else if (pendingAction?.action === "target") {
+      const target = usersPayload.find((entry) => entry.id === pendingAction.targetUserId);
+      finishCloseUserActionsModal();
+      if (target) {
+        finishOpenUserActionsModal(target);
+      }
+    } else if (pendingAction?.action === "route") {
+      finishCloseUserActionsModal();
+      pendingAction.proceed?.();
+    }
   }
 
   function openTerminateWorkerModal(worker) {
@@ -2959,6 +3126,12 @@ export function AdminPage() {
         },
       });
       clearUserEditors(entry.id);
+      if (entry.id === user?.id) {
+        finishCloseUserActionsModal();
+        await logout();
+        navigate("/login", { replace: true });
+        return;
+      }
       setFeedbackForUser(entry.id, "success", payload.message || `Password updated for ${entry.username}.`);
     } catch (requestError) {
       setFeedbackForUser(
@@ -3182,7 +3355,10 @@ export function AdminPage() {
         userId: entry.id,
         loading: false,
         accessMode: payload.access_mode || "none",
+        originalAccessMode: payload.access_mode || "none",
         selectedItems: payload.selected_items || [],
+        originalSelectedItems: payload.selected_items || [],
+        originalSelectedItemIds: (payload.selected_items || []).map((item) => Number(item.id)),
       }));
     } catch (requestError) {
       setDownloadAccessState((current) => ({
@@ -3237,7 +3413,10 @@ export function AdminPage() {
         ...current,
         saving: false,
         accessMode: payload.access_mode || "none",
+        originalAccessMode: payload.access_mode || "none",
         selectedItems: payload.selected_items || [],
+        originalSelectedItems: payload.selected_items || [],
+        originalSelectedItemIds: (payload.selected_items || []).map((item) => Number(item.id)),
         feedback: "Download access saved.",
       }));
     } catch (requestError) {
@@ -3385,14 +3564,40 @@ export function AdminPage() {
   );
 
   useEffect(() => {
+    function handleBeforeControlCenterNavigation(event) {
+      if (userActionsModalUserId == null) {
+        return;
+      }
+      if (userActionsTab === "downloads" && downloadAccessDirty) {
+        event.preventDefault();
+        setDownloadDiscardConfirm({
+          action: "route",
+          destination: event.detail?.destination || "",
+          proceed: event.detail?.proceed,
+        });
+        return;
+      }
+      finishCloseUserActionsModal();
+    }
+
+    window.addEventListener(CONTROL_CENTER_BEFORE_NAVIGATION_EVENT, handleBeforeControlCenterNavigation);
+    return () => window.removeEventListener(
+      CONTROL_CENTER_BEFORE_NAVIGATION_EVENT,
+      handleBeforeControlCenterNavigation,
+    );
+  }, [downloadAccessDirty, userActionsModalUserId, userActionsTab]);
+
+  useEffect(() => {
     if (userActionsModalUserId == null || selectedUserActionsEntry) {
       return;
     }
-    setUserActionsModalUserId(null);
+    const removedUsername = userActionsTargetRef.current?.username || "The selected user";
+    finishCloseUserActionsModal();
+    setBanner({ tone: "error", text: `${removedUsername} is no longer available.` });
   }, [selectedUserActionsEntry, userActionsModalUserId]);
 
   useEffect(() => {
-    if ((!selectedUserActionsEntry && !terminateWorkerModal && !dismissPlaybackStatusModal && !diagnosticIdModal) || typeof document === "undefined") {
+    if ((!terminateWorkerModal && !dismissPlaybackStatusModal && !diagnosticIdModal) || typeof document === "undefined") {
       return undefined;
     }
     const previousOverflow = document.body.style.overflow;
@@ -3410,7 +3615,6 @@ export function AdminPage() {
           closeDismissPlaybackStatusModal();
           return;
         }
-        closeUserActionsModal();
       }
     }
     document.body.style.overflow = "hidden";
@@ -3419,10 +3623,44 @@ export function AdminPage() {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [selectedUserActionsEntry, terminateWorkerModal, terminateWorkerPending, dismissPlaybackStatusModal, diagnosticIdModal]);
+  }, [terminateWorkerModal, terminateWorkerPending, dismissPlaybackStatusModal, diagnosticIdModal]);
 
-  if (loading && !statusPayload) {
+  if (!desktopControlCenter && loading && !statusPayload) {
     return <LoadingView label="Loading admin tools..." />;
+  }
+
+  function desktopResourceNotice(resource, label) {
+    if (!desktopControlCenter) {
+      return null;
+    }
+    const resourceState = desktopResourceStates[resource];
+    if (resourceState?.error) {
+      return (
+        <div className="meridian-resource-error" role="alert">
+          <span>{label} unavailable. {resourceState.error}</span>
+          <button
+            className="meridian-pill-button"
+            disabled={resourceState.loading}
+            onClick={() => refreshDesktopAdminResource(resource)}
+            type="button"
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    if (resourceState?.loading && !resourceState.loaded) {
+      return <p className="meridian-muted-copy" role="status">Loading {label.toLowerCase()}…</p>;
+    }
+    return null;
+  }
+
+  function desktopResourceHasNoUsableData(resource) {
+    if (!desktopControlCenter) {
+      return false;
+    }
+    const resourceState = desktopResourceStates[resource];
+    return !resourceState?.loaded && Boolean(resourceState?.loading || resourceState?.error);
   }
 
   function clearSectionCollapseTimer() {
@@ -3474,6 +3712,7 @@ export function AdminPage() {
         </div>
         {desktopControlCenter ? playbackWorkerSummaryElement : null}
       </div>
+      {desktopResourceNotice("users", "Users")}
       {!desktopControlCenter ? playbackWorkerSummaryElement : null}
       {playbackWorkersWarning ? (
         <p className="page-subnote admin-workers-summary__warning">
@@ -3997,60 +4236,20 @@ export function AdminPage() {
   ) : null;
 
   const userActionsModal = selectedUserActionsEntry ? (
-    <div
-      aria-labelledby="admin-user-actions-modal-title"
-      aria-modal="true"
-      className="browser-resume-modal"
-      role="dialog"
+    <UserActionsDialog
+      activeTab={userActionsTab}
+      crown={selectedUserActionsEntry.role === "admin" ? <AdminCrownIcon /> : null}
+      legacy={!desktopControlCenter}
+      legacyAvatarClass={getDeterministicUserAvatarPalette(selectedUserActionsEntry.id)}
+      onRequestClose={closeUserActionsModal}
+      onTabChange={requestUserActionsTab}
+      returnFocusElement={userActionsReturnFocusRef.current}
+      user={{
+        ...selectedUserActionsEntry,
+        last_login_label: formatDate(selectedUserActionsEntry.last_login_at),
+      }}
     >
-      <div
-        aria-hidden="true"
-        className="browser-resume-modal__backdrop"
-        onClick={closeUserActionsModal}
-      />
-      <div className="browser-resume-modal__card detail-info-modal__card admin-user-actions-modal">
-        <div className="detail-info-modal__header admin-user-actions-modal__header">
-          <div className="detail-info-modal__copy">
-            <p className="eyebrow detail-info-modal__eyebrow">User actions</p>
-            <div className="admin-user-actions-modal__title-row">
-              <div className={`user-avatar-button user-avatar-button--static ${getDeterministicUserAvatarPalette(selectedUserActionsEntry.id)}`} aria-hidden="true">
-                <span className="user-avatar-button__initials">
-                  {getUserAvatarInitials(selectedUserActionsEntry.username)}
-                </span>
-              </div>
-              <div className="admin-user-actions-modal__title-copy">
-                <h2 id="admin-user-actions-modal-title" className="detail-info-modal__title">
-                  {selectedUserActionsEntry.username}
-                  {selectedUserActionsEntry.role === "admin" ? <AdminCrownIcon /> : null}
-                </h2>
-                <div className="admin-user-actions-modal__subtitle">
-                  <UserStatusIndicator
-                    color={selectedUserActionsEntry.status_color}
-                    label={selectedUserActionsEntry.status_label}
-                  />
-                  <span>
-                    {selectedUserActionsEntry.active_sessions} live session
-                    {selectedUserActionsEntry.active_sessions === 1 ? "" : "s"}
-                  </span>
-                </div>
-              </div>
-            </div>
-            <p className="page-subnote">
-              Last login {formatDate(selectedUserActionsEntry.last_login_at)}
-              {selectedUserActionsEntry.last_seen_at ? ` · last heartbeat ${formatDate(selectedUserActionsEntry.last_seen_at)}` : ""}
-              {selectedUserActionsEntry.last_activity_at ? ` · last activity ${formatDate(selectedUserActionsEntry.last_activity_at)}` : ""}
-            </p>
-          </div>
-          <button
-            className="ghost-button detail-info-modal__close"
-            onClick={closeUserActionsModal}
-            type="button"
-          >
-            Close
-          </button>
-        </div>
-        <div className="detail-info-modal__body admin-user-actions-modal__body">
-          <section className="admin-user-actions-modal__section">
+          {(!desktopControlCenter || userActionsTab === "account") ? <section className="admin-user-actions-modal__section">
             <div className="admin-user-actions-modal__section-header">
               <h3>Account actions</h3>
               <p className="page-subnote">
@@ -4184,28 +4383,46 @@ export function AdminPage() {
             ) : null}
 
             <div className="admin-inline-form admin-age-credential-editor">
-              <label>
-                Age credential
-                <select
-                  className="admin-select"
-                  disabled={userActionPending === selectedUserActionsEntry.id}
-                  onChange={(event) =>
-                    setAgeCredentialEditor({
+              <span className="admin-age-credential-editor__label">AGE CREDENTIAL</span>
+              <div className="admin-age-credential-editor__controls">
+                <div className="admin-age-credential-editor__quick" role="group" aria-label="Quick age credential choices">
+                  {[18, 16, 13].map((age) => (
+                    <button
+                      className={Number(ageCredentialEditor.ageCredential) === age ? "is-active" : ""}
+                      disabled={userActionPending === selectedUserActionsEntry.id}
+                      key={age}
+                      onClick={() => setAgeCredentialEditor({ userId: selectedUserActionsEntry.id, ageCredential: age })}
+                      type="button"
+                    >
+                      {age}+
+                    </button>
+                  ))}
+                  <button
+                    aria-expanded={showAllUserActionAges}
+                    className={showAllUserActionAges ? "is-active" : ""}
+                    onClick={() => setShowAllUserActionAges((current) => !current)}
+                    type="button"
+                  >
+                    More ages
+                  </button>
+                </div>
+                {showAllUserActionAges ? (
+                  <select
+                    aria-label="All age credentials"
+                    className="admin-select admin-age-credential-editor__select"
+                    disabled={userActionPending === selectedUserActionsEntry.id}
+                    onChange={(event) => setAgeCredentialEditor({
                       userId: selectedUserActionsEntry.id,
                       ageCredential: Number(event.target.value),
-                    })
-                  }
-                  value={
-                    ageCredentialEditor.userId === selectedUserActionsEntry.id
-                      ? ageCredentialEditor.ageCredential
-                      : Number(selectedUserActionsEntry.age_credential || 18)
-                  }
-                >
-                  {AGE_CREDENTIAL_OPTIONS.map((age) => (
-                    <option key={age} value={age}>{formatAgeCredential(age)}</option>
-                  ))}
-                </select>
-              </label>
+                    })}
+                    value={ageCredentialEditor.ageCredential}
+                  >
+                    {AGE_CREDENTIAL_OPTIONS.map((age) => (
+                      <option key={age} value={age}>{formatAgeCredential(age)}</option>
+                    ))}
+                  </select>
+                ) : null}
+              </div>
               <div className="admin-list__actions">
                 <button
                   className="primary-button"
@@ -4318,6 +4535,12 @@ export function AdminPage() {
                 <p className="page-subnote">
                   Confirm making {selectedUserActionsEntry.username} {roleConfirm.nextRole === "admin" ? "an admin" : "a standard user"}.
                 </p>
+                <div className="admin-user-actions-modal__consequence">
+                  All active sign-ins, browser/Route2 and native playback access, VLC handoffs, and download sessions for this user will end. They must sign in again
+                  {roleConfirm.nextRole === "admin"
+                    ? " as an admin. Elvern may prompt them to configure 2FA, but they may defer setup and remain an admin."
+                    : " as a standard user with download access reset to none."}
+                </div>
                 <NonLoginSecretInput
                   autoComplete="new-password"
                   onChange={(event) =>
@@ -4353,6 +4576,10 @@ export function AdminPage() {
                   handleSubmitPassword(selectedUserActionsEntry);
                 }}
               >
+                <div className="admin-user-actions-modal__consequence">
+                  Updating this password ends the user’s active sign-ins, browser/Route2 and native playback access, VLC handoffs, OAuth operations, and download sessions.
+                  {selectedUserActionsEntry.id === user?.id ? " This browser will sign out and require a fresh login." : ""}
+                </div>
                 <NonLoginSecretInput
                   autoComplete="new-password"
                   onChange={(event) =>
@@ -4391,9 +4618,9 @@ export function AdminPage() {
                 </div>
               </form>
             ) : null}
-          </section>
+          </section> : null}
 
-	          <section className="admin-user-actions-modal__section">
+	          {(!desktopControlCenter || userActionsTab === "assistant") ? <section className="admin-user-actions-modal__section">
 	            <div className="admin-user-actions-modal__section-header">
 	              <h3>Assistant</h3>
 	              <p className="page-subnote">Secondary access only for the safe structured request form.</p>
@@ -4422,14 +4649,19 @@ export function AdminPage() {
 	                Admins always have Assistant access. The account switch is only configurable for standard users.
 	              </p>
 	            )}
-	          </section>
+          </section> : null}
 
-          <section className="admin-user-actions-modal__section">
+          {(!desktopControlCenter || userActionsTab === "downloads") ? <section className="admin-user-actions-modal__section">
             <div className="admin-user-actions-modal__section-header">
               <h3>Download Access (Beta)</h3>
               <p className="page-subnote">Download grants are separate from playback access.</p>
             </div>
-            {downloadAccessState.loading && downloadAccessState.userId === selectedUserActionsEntry.id ? (
+            {selectedUserActionsEntry.role === "admin" ? (
+              <div className="download-access-card download-access-card--readonly">
+                <strong>Full download access</strong>
+                <p className="page-subnote">Admins inherently have access to every movie they can view.</p>
+              </div>
+            ) : downloadAccessState.loading && downloadAccessState.userId === selectedUserActionsEntry.id ? (
               <p className="page-subnote">Loading download access...</p>
             ) : (
               <div className="download-access-card">
@@ -4525,9 +4757,10 @@ export function AdminPage() {
                 ) : null}
                 {downloadAccessState.error ? <p className="form-error">{downloadAccessState.error}</p> : null}
                 {downloadAccessState.feedback ? <p className="action-feedback">{downloadAccessState.feedback}</p> : null}
+                {downloadAccessDirty ? <p className="download-access-card__dirty">Unsaved changes</p> : null}
                 <button
                   className="primary-button"
-                  disabled={downloadAccessState.saving}
+                  disabled={downloadAccessState.saving || !downloadAccessDirty}
                   onClick={() => saveDownloadAccess(selectedUserActionsEntry)}
                   type="button"
                 >
@@ -4535,10 +4768,25 @@ export function AdminPage() {
                 </button>
               </div>
             )}
-          </section>
-	        </div>
-	      </div>
-	    </div>
+          </section> : null}
+    </UserActionsDialog>
+  ) : null;
+
+  const downloadDiscardModal = downloadDiscardConfirm ? (
+    <div aria-labelledby="download-discard-title" aria-modal="true" className="browser-resume-modal" role="dialog">
+      <div aria-hidden="true" className="browser-resume-modal__backdrop" />
+      <div className="browser-resume-modal__card detail-info-modal__card meridian-confirm-dialog">
+        <div className="detail-info-modal__copy">
+          <p className="eyebrow detail-info-modal__eyebrow">UNSAVED DOWNLOAD ACCESS</p>
+          <h2 className="detail-info-modal__title" id="download-discard-title">Discard changes?</h2>
+          <p className="page-subnote">The download access draft has not been saved.</p>
+        </div>
+        <div className="browser-resume-modal__actions">
+          <button className="ghost-button" onClick={() => setDownloadDiscardConfirm(null)} type="button">Keep editing</button>
+          <button className="ghost-button ghost-button--danger" onClick={discardDownloadDraft} type="button">Discard changes</button>
+        </div>
+      </div>
+    </div>
   ) : null;
 
   const terminateWorkerConfirmationModal = terminateWorkerModal ? (
@@ -4771,6 +5019,7 @@ export function AdminPage() {
   const adminOverviewSummary = desktopControlCenter ? (
     <MeridianEntryMotion>
       {(entryProgress) => <div className="meridian-overview">
+      {desktopResourceNotice("system", "System status")}
       <div className="meridian-overview__grid">
         <section className="meridian-card meridian-security-gauge" aria-label="Security score 92, private" data-visual-landmark="admin-overview-gauge">
           <div className="meridian-security-gauge__dial-wrap">
@@ -4811,10 +5060,10 @@ export function AdminPage() {
               ["Maintenance Mode", exposureMaintenanceLockStatus],
               ["Prepared switch", exposurePreparedSwitchStatus],
               ["Current request origin", formatExposureValue(exposureActive.current_request_origin)],
-              ["Multi-user", statusPayload.security.multiuser_enabled ? "Enabled" : "Disabled"],
-              ["Users", String(statusPayload.total_users)],
+              ["Multi-user", statusPayload?.security?.multiuser_enabled == null ? "Unavailable" : statusPayload.security.multiuser_enabled ? "Enabled" : "Disabled"],
+              ["Users", statusPayload?.total_users == null ? String(usersPayload.length) : String(statusPayload.total_users)],
               ["Active auth sessions", String(sessionsPayload.length)],
-              ["Session TTL", `${statusPayload.security.session_ttl_hours} hour(s)`],
+              ["Session TTL", statusPayload?.security?.session_ttl_hours == null ? "Unavailable" : `${statusPayload.security.session_ttl_hours} hour(s)`],
             ].map(([label, value]) => (
               <div key={label}>
                 <dt>{label}</dt>
@@ -4899,9 +5148,11 @@ export function AdminPage() {
       )}
     </MeridianEntryMotion>
   ) : null;
-  const securitySection = statusPayload ? (
+  const securitySection = (
     <div className={`admin-section-grid${desktopControlCenter ? " meridian-admin-sections" : ""}`}>
-      {!desktopControlCenter ? (
+      {desktopAdminTab === "security" ? desktopResourceNotice("urlPrefix", "URL prefix") : null}
+      {desktopAdminTab === "security" ? desktopResourceNotice("ownTotp", "Two-factor authentication status") : null}
+      {!desktopControlCenter && statusPayload ? (
         <>
       <section className="settings-card control-center-admin-library-status">
         <h2>Library status</h2>
@@ -5260,7 +5511,7 @@ export function AdminPage() {
         </div>
       </section> : null}
 	    </div>
-	  ) : null;
+	  );
 
   const logsSection = (
     <>
@@ -5294,6 +5545,7 @@ export function AdminPage() {
             </button>
           ) : null}
         </div>
+        {desktopResourceNotice("sessions", "Active sessions")}
         <div className="admin-list admin-list--dense">
           {visibleSessions.length > 0 ? (
             visibleSessions.map((session) => (
@@ -5323,7 +5575,7 @@ export function AdminPage() {
                 </div>
               </div>
             ))
-          ) : (
+          ) : desktopResourceHasNoUsableData("sessions") ? null : (
             <p className="page-subnote">No active sessions found.</p>
           )}
         </div>
@@ -5345,6 +5597,7 @@ export function AdminPage() {
             </button>
           ) : null}
         </div>
+        {desktopResourceNotice("audit", "Audit log")}
         <div className="admin-list admin-list--dense">
           {visibleAuditEvents.length > 0 ? (
             visibleAuditEvents.map((event) => (
@@ -5362,7 +5615,7 @@ export function AdminPage() {
                 </div>
               </div>
             ))
-          ) : (
+          ) : desktopResourceHasNoUsableData("audit") ? null : (
             <p className="page-subnote">No audit events recorded yet.</p>
           )}
         </div>
@@ -6580,7 +6833,7 @@ export function AdminPage() {
         ? <MeridianFeedbackToast banner={banner} />
         : <FeedbackBanner banner={banner} />}
 
-      {statusPayload ? (
+      {desktopControlCenter || statusPayload ? (
         <div className={`admin-section-stack${desktopControlCenter ? " meridian-admin-stack" : ""}`}>
 		          {desktopAdminTab === "overview" ? adminOverviewSummary : null}
 		          {desktopAdminTab === "security" ? adminSecurityKpis : null}
@@ -6596,7 +6849,11 @@ export function AdminPage() {
 
           {activeSection === "logs" ? logsSection : null}
 
-	          {activeSection === "recovery" ? <div className={desktopControlCenter ? "meridian-legacy-flow" : undefined}>{recoverySection}</div> : null}
+	          {activeSection === "recovery"
+            ? (desktopControlCenter
+              ? <RecoveryPanel onToast={setBanner} />
+              : <div>{recoverySection}</div>)
+            : null}
 
 	          {activeSection === "panel" ? desktopCreateUserCard : null}
 
@@ -6631,6 +6888,7 @@ export function AdminPage() {
 	                    {invitePending ? "Generating..." : "Generate invite code"}
 	                  </button> : null}
 	                </div>
+                {desktopResourceNotice("invites", "Invite codes")}
                 {desktopControlCenter && inviteAgeModalOpen ? (
                   <form className="meridian-invite-age-panel" data-visual-landmark="inline-invite-age-panel" id="admin-invite-age-panel" onSubmit={handleGenerateInviteCode}>
                     <span className="meridian-invite-age-panel__eyebrow">INVITE CODE</span>
@@ -6739,7 +6997,7 @@ export function AdminPage() {
                           </div>
                         );
                       })
-                    ) : (
+                    ) : desktopResourceHasNoUsableData("invites") ? null : (
                       <p className="page-subnote">No visible invite codes.</p>
                     )}
                   </div>
@@ -6803,6 +7061,7 @@ export function AdminPage() {
         </div>
       ) : null}
       {userActionsModal}
+      {downloadDiscardModal}
       {exposurePlannerModal}
       {terminateWorkerConfirmationModal}
       {dismissPlaybackStatusConfirmationModal}

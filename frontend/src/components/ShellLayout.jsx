@@ -2,13 +2,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { PosterContextMenuProvider } from "./PosterContextMenu";
-import { apiRequest } from "../lib/api";
-import { resolveBrowserPlaybackSessionRoot } from "../lib/browserPlayback";
 import {
   markLibraryReturnPending,
   readLibraryReturnTarget,
 } from "../lib/libraryNavigation";
-import { buildLogoutPlaybackWorkerPrompt } from "../lib/playbackWorkerOwnership";
 import {
   applyUserBackgroundTheme,
   normalizeUserBackgroundSettings,
@@ -32,6 +29,8 @@ import {
 import { classifyControlCenterPath, isDesktopControlCenterDevice } from "../lib/controlCenterRoutes.js";
 import { applyControlCenterPaint } from "../lib/controlCenterPaint.js";
 import { readControlCenterTheme } from "../lib/controlCenterSession.js";
+import { usePlaybackAwareLogout } from "../features/auth/usePlaybackAwareLogout.js";
+import { PlaybackWorkerLogoutDialog } from "../features/auth/PlaybackWorkerLogoutDialog.jsx";
 
 function normalizePosterCardAppearance(value) {
   if (value === "modern" || value === "clean") {
@@ -41,7 +40,7 @@ function normalizePosterCardAppearance(value) {
 }
 
 function ShellLayoutContent({ children }) {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const userSettingsQuery = useUserSettingsQuery(user);
@@ -56,9 +55,6 @@ function ShellLayoutContent({ children }) {
     [userSettingsQuery.data],
   );
   const [accountExpanded, setAccountExpanded] = useState(false);
-  const [logoutWorkerModal, setLogoutWorkerModal] = useState(null);
-  const [logoutWorkerPending, setLogoutWorkerPending] = useState("");
-  const [logoutWorkerError, setLogoutWorkerError] = useState("");
   const collapseTimerRef = useRef(0);
   const floatingNavRef = useRef(null);
   const floatingLinkRefs = useRef([]);
@@ -143,6 +139,7 @@ function ShellLayoutContent({ children }) {
     width: `${floatingNavIndicatorFrame.width}px`,
     transform: floatingNavDragging ? `translateX(${floatingNavDragOffset}px)` : "translateX(0)",
   };
+  const logoutCoordinator = usePlaybackAwareLogout({ onBeforeLogout: clearLogoutInteractionState });
 
   function clearLogoutInteractionState() {
     if (typeof window !== "undefined" && collapseTimerRef.current) {
@@ -160,95 +157,6 @@ function ShellLayoutContent({ children }) {
       document.documentElement?.removeAttribute("inert");
     }
     setAccountExpanded(false);
-    setLogoutWorkerModal(null);
-    setLogoutWorkerError("");
-  }
-
-  async function completeLogout() {
-    clearLogoutInteractionState();
-    await logout();
-    navigate("/login", { replace: true });
-  }
-
-  async function handleLogout() {
-    setLogoutWorkerError("");
-    try {
-      const sessionRoot = resolveBrowserPlaybackSessionRoot();
-      const activeSession = await apiRequest(`${sessionRoot}/active`);
-      if (!activeSession?.session_id) {
-        await completeLogout();
-        return;
-      }
-      let movieTitle = "This movie";
-      try {
-        const itemPayload = await apiRequest(`/api/library/item/${encodeURIComponent(activeSession.media_item_id)}`);
-        if (typeof itemPayload?.title === "string" && itemPayload.title.trim()) {
-          movieTitle = itemPayload.title.trim();
-        }
-      } catch {
-        // Fall back to the generic title if the item detail lookup fails.
-      }
-      setLogoutWorkerModal({
-        movieTitle,
-        sessionId: String(activeSession.session_id),
-        stopUrl: typeof activeSession.stop_url === "string" ? activeSession.stop_url : "",
-        sessionRoot,
-      });
-    } catch (requestError) {
-      if (requestError?.status === 401 || requestError?.status === 403) {
-        await completeLogout();
-        return;
-      }
-      await completeLogout();
-    }
-  }
-
-  function closeLogoutWorkerModal() {
-    if (logoutWorkerPending) {
-      return;
-    }
-    setLogoutWorkerModal(null);
-    setLogoutWorkerError("");
-  }
-
-  async function handleLogoutKeepPreparing() {
-    if (!logoutWorkerModal || logoutWorkerPending) {
-      return;
-    }
-    setLogoutWorkerPending("keep");
-    setLogoutWorkerError("");
-    try {
-      await completeLogout();
-    } catch (requestError) {
-      setLogoutWorkerModal((current) => current || logoutWorkerModal);
-      setLogoutWorkerError(requestError.message || "Failed to log out");
-    } finally {
-      setLogoutWorkerPending("");
-    }
-  }
-
-  async function handleLogoutTerminateProcess() {
-    if (!logoutWorkerModal?.sessionId || logoutWorkerPending) {
-      return;
-    }
-    setLogoutWorkerPending("terminate");
-    setLogoutWorkerError("");
-    const stopUrl =
-      logoutWorkerModal.stopUrl
-      || `${logoutWorkerModal.sessionRoot}/sessions/${encodeURIComponent(logoutWorkerModal.sessionId)}/stop`;
-    try {
-      await apiRequest(stopUrl, { method: "POST" });
-    } catch {
-      // Logout is explicit user intent here; a failed worker stop must not trap the session.
-    }
-    try {
-      await completeLogout();
-    } catch (requestError) {
-      setLogoutWorkerModal((current) => current || logoutWorkerModal);
-      setLogoutWorkerError(requestError.message || "Failed to log out");
-    } finally {
-      setLogoutWorkerPending("");
-    }
   }
 
   function navigateToFloatingItem(item) {
@@ -454,23 +362,6 @@ function ShellLayoutContent({ children }) {
     }
   }, []);
 
-  useEffect(() => {
-    if (!logoutWorkerModal || typeof window === "undefined") {
-      return undefined;
-    }
-
-    function handleKeyDown(event) {
-      if (event.key === "Escape") {
-        closeLogoutWorkerModal();
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [logoutWorkerModal, logoutWorkerPending]);
-
   return (
     <PosterContextMenuProvider enabled={desktopPosterContextMenuEnabled}>
       <div
@@ -518,56 +409,12 @@ function ShellLayoutContent({ children }) {
         </div>
       ) : null}
 
-      {logoutWorkerModal ? (
-        <div
-          aria-labelledby="logout-playback-worker-modal-title"
-          aria-modal="true"
-          className="browser-resume-modal"
-          role="dialog"
-        >
-          <div
-            aria-hidden="true"
-            className="browser-resume-modal__backdrop"
-            onClick={closeLogoutWorkerModal}
-          />
-          <div className="browser-resume-modal__card detail-info-modal__card playback-worker-choice-modal">
-            <div className="detail-info-modal__copy">
-              <p className="eyebrow detail-info-modal__eyebrow">PLAYBACK WORKER</p>
-              <p className="detail-info-modal__title" id="logout-playback-worker-modal-title">
-                {buildLogoutPlaybackWorkerPrompt(logoutWorkerModal.movieTitle)}
-              </p>
-              {logoutWorkerError ? (
-                <p className="page-subnote playback-worker-choice-modal__error" role="alert">
-                  {logoutWorkerError}
-                </p>
-              ) : null}
-            </div>
-            <div className="browser-resume-modal__actions playback-worker-choice-modal__actions">
-              <button
-                className="primary-button"
-                disabled={Boolean(logoutWorkerPending)}
-                onClick={handleLogoutKeepPreparing}
-                type="button"
-              >
-                Keep Preparing
-              </button>
-              <button
-                className="ghost-button ghost-button--danger"
-                disabled={Boolean(logoutWorkerPending)}
-                onClick={handleLogoutTerminateProcess}
-                type="button"
-              >
-                Terminate Process
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <PlaybackWorkerLogoutDialog coordinator={logoutCoordinator} />
 
       {showDesktopLibraryIsland ? (
         <DesktopLibraryIsland
           libraryState={protectedDesktopLibraryState}
-          onLogout={handleLogout}
+          onLogout={logoutCoordinator.requestLogout}
           position={desktopFloatingIslandPosition}
           user={user}
         />
@@ -629,7 +476,7 @@ function ShellLayoutContent({ children }) {
               <span aria-hidden="true" className="account-badge__icon" />
               {accountExpanded ? <span className="account-badge__label">{user?.username}</span> : null}
             </button>
-            <button className="ghost-button ghost-button--inline ghost-button--floating" type="button" onClick={handleLogout}>
+            <button className="ghost-button ghost-button--inline ghost-button--floating" type="button" onClick={logoutCoordinator.requestLogout}>
               Logout
             </button>
           </div>

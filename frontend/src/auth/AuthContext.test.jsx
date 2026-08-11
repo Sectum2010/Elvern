@@ -18,6 +18,10 @@ import {
   writeControlCenterTheme,
 } from "../lib/controlCenterSession";
 import { LoginPage } from "../pages/LoginPage";
+import {
+  PENDING_LOGOUT_STORAGE_KEY,
+  writePendingLogoutMarker,
+} from "../lib/pendingLogout.js";
 
 
 const standardUser = {
@@ -26,6 +30,7 @@ const standardUser = {
   role: "standard_user",
   assistant_beta_enabled: false,
   age_credential: 18,
+  session_id: 22,
 };
 
 function jsonResponse(payload, status = 200) {
@@ -83,6 +88,7 @@ describe("AuthProvider maintenance mode handling", () => {
   beforeEach(() => {
     queryClient.clear();
     window.sessionStorage.clear();
+    window.localStorage.clear();
     window.scrollTo = vi.fn();
   });
 
@@ -247,6 +253,52 @@ describe("AuthProvider maintenance mode handling", () => {
     expect(readControlCenterTheme()).toBe("light");
     expect(readControlCenterTab("settings")).toBe("appearance");
     expect(readControlCenterTab("admin")).toBe("overview");
+  });
+
+  test("finishes a persisted logout before auth me can restore protected content", async () => {
+    writePendingLogoutMarker({
+      version: 1,
+      userId: String(standardUser.id),
+      sessionId: String(standardUser.session_id),
+      createdAt: new Date().toISOString(),
+    });
+    const fetchMock = vi.fn(async (requestPath) => {
+      if (requestPath === "/api/auth/logout") {
+        return jsonResponse({ detail: "Session already ended" }, 401);
+      }
+      throw new Error(`Unexpected request: ${requestPath}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderAuthRoutes();
+
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/auth/logout",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock.mock.calls.some(([path]) => path === "/api/auth/me")).toBe(false);
+    expect(window.localStorage.getItem(PENDING_LOGOUT_STORAGE_KEY)).toBeNull();
+  });
+
+  test("failed server logout keeps protected content obscured and exposes Retry", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (requestPath) => {
+      if (requestPath === "/api/auth/me") {
+        return jsonResponse({ user: standardUser });
+      }
+      if (requestPath === "/api/auth/logout") {
+        return jsonResponse({ detail: "Server error" }, 500);
+      }
+      throw new Error(`Unexpected request: ${requestPath}`);
+    }));
+
+    renderAuthRoutes();
+    expect(await screen.findByText("Protected content")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Log out" }));
+
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(PENDING_LOGOUT_STORAGE_KEY)).not.toBeNull();
   });
 
   test("a business 403 revalidates the same identity without clearing library cache", async () => {

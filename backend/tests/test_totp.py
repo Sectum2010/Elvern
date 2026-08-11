@@ -346,6 +346,8 @@ class TestLoginFlow:
         assert _login(client).status_code == 200
         skip = client.post("/api/auth/totp/skip")
         assert skip.status_code == 200
+        admin_response = client.get("/api/admin/users")
+        assert admin_response.status_code == 200
         _logout(client)
         response = _login(client)
         assert response.json()["totp_setup_required"] is False

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -60,12 +60,39 @@ describe("DesktopControlCenterLayout privilege boundaries", () => {
   });
 
   test("mounts the shared System Status rail for an administrator", () => {
-    authState.user = { id: 1, username: "admin", role: "admin" };
+    authState.user = { id: 1, username: "admin", role: "admin", assistant_beta_enabled: true };
     renderLayout();
 
     expect(screen.getByText("System status rail mounted")).toBeInTheDocument();
     expect(railState.renders).toBe(1);
     expect(screen.getByRole("button", { name: "Switch to Admin Panel" })).toBeInTheDocument();
+  });
+
+  test("account popover contains only the permitted actions and Escape is a no-op", () => {
+    authState.user = { id: 1, username: "admin", role: "admin", assistant_beta_enabled: true };
+    renderLayout();
+
+    fireEvent.click(screen.getByRole("button", { name: /admin administrator/i }));
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Assistant",
+      "Sign out",
+    ]);
+    expect(within(menu).queryByText("Settings")).not.toBeInTheDocument();
+    expect(within(menu).queryByText("Admin Panel")).not.toBeInTheDocument();
+    expect(within(menu).queryByText("Profile")).not.toBeInTheDocument();
+    expect(within(menu).queryByText("Account")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+
+  test("standard user without Assistant permission sees only Sign out", () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole("button", { name: /display-user standard user/i }));
+
+    expect(within(screen.getByRole("menu")).getAllByRole("menuitem")).toHaveLength(1);
+    expect(within(screen.getByRole("menu")).getByText("Sign out")).toBeInTheDocument();
   });
 
   test("uses the Meridian page title and exact subtitle for the active route", () => {

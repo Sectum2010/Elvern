@@ -3,6 +3,7 @@ import {
   AUTH_REVALIDATION_REQUESTED_EVENT,
   apiRequest,
   isMaintenanceModeError,
+  isTransientNetworkError,
   MAINTENANCE_MODE_BLOCKED_EVENT,
   MAINTENANCE_MODE_MESSAGE,
 } from "../lib/api";
@@ -10,10 +11,19 @@ import { clearProtectedQueryCache } from "../lib/queryClient";
 import { prepareAuthViewportExit } from "../lib/authViewportNavigation.js";
 import { PAGE_RESUME_EVENT } from "../lib/pageResume.js";
 import { clearControlCenterSessionState } from "../lib/controlCenterSession.js";
+import {
+  clearPendingLogoutMarker,
+  createPendingLogoutMarker,
+  PENDING_LOGOUT_STORAGE_KEY,
+  readPendingLogoutMarker,
+  writePendingLogoutMarker,
+} from "../lib/pendingLogout.js";
+import { LogoutPendingView } from "../components/LogoutPendingView.jsx";
 
 
 const AuthContext = createContext(null);
 const SESSION_HEARTBEAT_MS = 15000;
+const LOGOUT_RETRY_DELAYS_MS = Object.freeze([0, 400, 1200, 2800]);
 
 
 function getProtectedCacheIdentity(user) {
@@ -39,7 +49,11 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [authNotice, setAuthNotice] = useState("");
+  const [logoutPending, setLogoutPending] = useState(() => Boolean(readPendingLogoutMarker()));
+  const [logoutPendingError, setLogoutPendingError] = useState("");
+  const [logoutRetrying, setLogoutRetrying] = useState(false);
   const refreshInFlightRef = useRef(false);
+  const logoutInFlightRef = useRef(null);
   const userRef = useRef(null);
 
   const applyAuthenticatedUser = useCallback((nextUser) => {
@@ -165,24 +179,109 @@ export function AuthProvider({ children }) {
     return refreshAuth();
   }
 
-  async function logout() {
+  const finishConfirmedLogout = useCallback(() => {
+    clearPendingLogoutMarker();
     clearProtectedQueryCache();
     clearControlCenterSessionState();
-    try {
-      await apiRequest("/api/auth/logout", { method: "POST" });
-    } finally {
-      setAuthNotice("");
-      applyAuthenticatedUser(null);
+    setAuthNotice("");
+    applyAuthenticatedUser(null);
+    setLogoutPending(false);
+    setLogoutPendingError("");
+    setLogoutRetrying(false);
+  }, [applyAuthenticatedUser]);
+
+  const confirmPendingLogout = useCallback(async () => {
+    if (logoutInFlightRef.current) {
+      return logoutInFlightRef.current;
     }
-  }
+    const attempt = (async () => {
+      setLogoutPending(true);
+      setLogoutPendingError("");
+      setLogoutRetrying(true);
+      let lastError = null;
+      for (const delayMs of LOGOUT_RETRY_DELAYS_MS) {
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
+        try {
+          await apiRequest("/api/auth/logout", { method: "POST" });
+          finishConfirmedLogout();
+          return true;
+        } catch (error) {
+          if (error?.status === 401 || error?.status === 403) {
+            finishConfirmedLogout();
+            return true;
+          }
+          lastError = error;
+          if (!isTransientNetworkError(error)) {
+            break;
+          }
+        }
+      }
+      setLogoutRetrying(false);
+      setLogoutPendingError(
+        lastError?.message || "Elvern could not confirm sign out. Check your connection and retry.",
+      );
+      return false;
+    })();
+    logoutInFlightRef.current = attempt;
+    try {
+      return await attempt;
+    } finally {
+      logoutInFlightRef.current = null;
+    }
+  }, [finishConfirmedLogout]);
+
+  const logout = useCallback(async () => {
+    if (!readPendingLogoutMarker()) {
+      const marker = createPendingLogoutMarker(userRef.current);
+      if (!marker.userId || !marker.sessionId) {
+        throw new Error("Elvern could not identify the active session for logout.");
+      }
+      writePendingLogoutMarker(marker);
+    }
+    clearProtectedQueryCache();
+    clearControlCenterSessionState();
+    setAuthNotice("");
+    applyAuthenticatedUser(null);
+    setLogoutPending(true);
+    return confirmPendingLogout();
+  }, [applyAuthenticatedUser, confirmPendingLogout]);
 
   function clearAuthNotice() {
     setAuthNotice("");
   }
 
   useEffect(() => {
+    if (readPendingLogoutMarker()) {
+      setLoading(false);
+      void confirmPendingLogout();
+      return;
+    }
     void refreshAuth();
-  }, [refreshAuth]);
+  }, [confirmPendingLogout, refreshAuth]);
+
+  useEffect(() => {
+    function handleStorage(event) {
+      if (event.key !== PENDING_LOGOUT_STORAGE_KEY || event.newValue !== null) {
+        return;
+      }
+      finishConfirmedLogout();
+    }
+
+    function handleOnline() {
+      if (readPendingLogoutMarker()) {
+        void confirmPendingLogout();
+      }
+    }
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener("online", handleOnline);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("online", handleOnline);
+    };
+  }, [confirmPendingLogout, finishConfirmedLogout]);
 
   useEffect(() => {
     function handleAuthRevalidationRequested() {
@@ -237,12 +336,20 @@ export function AuthProvider({ children }) {
         loading,
         login,
         logout,
+        logoutPending,
+        retryLogout: confirmPendingLogout,
         refreshAuth,
         authNotice,
         clearAuthNotice,
       }}
     >
-      {children}
+      {logoutPending ? (
+        <LogoutPendingView
+          error={logoutPendingError}
+          onRetry={confirmPendingLogout}
+          retrying={logoutRetrying}
+        />
+      ) : children}
     </AuthContext.Provider>
   );
 }

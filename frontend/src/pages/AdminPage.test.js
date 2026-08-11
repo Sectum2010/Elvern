@@ -502,6 +502,17 @@ describe("AdminPage desktop Control Center contracts", () => {
     expect(source).toContain("shouldPollDesktopPlaybackWorkers");
     expect(source).toContain("document.visibilityState === \"visible\"");
     expect(source.slice(streamEventsStart, streamEventsStart + 500)).not.toContain("stream_connected");
+    expect(source).toContain("...ADMIN_BACKUP_EVENT_TYPES");
+    expect(source).toContain("dispatchAdminBackupEvent(event.type)");
+  });
+
+  test("protects dirty download drafts during Control Center navigation and closes deleted targets safely", () => {
+    const source = readAdminPage();
+
+    expect(source).toContain("CONTROL_CENTER_BEFORE_NAVIGATION_EVENT");
+    expect(source).toContain('action: "route"');
+    expect(source).toContain("pendingAction.proceed?.()");
+    expect(source).toContain("is no longer available.");
   });
 
   test("uses in-app own-2FA dialogs and locks URL rotation while pending", () => {

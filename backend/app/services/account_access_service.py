@@ -10,10 +10,11 @@ from fastapi import HTTPException, status
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
-from ..models import AuthenticatedUser
 from ..security import generate_session_token, hash_password, hash_token_hmac
 from .audit_service import log_audit_event
-from .library_service import get_media_item_detail
+from ..models import AuthenticatedUser
+from .library_service import get_media_item_detail, search_library
+from .media_age_access_service import load_accessible_media_item_ids_by_age
 from .media_age_access_service import (
     assert_user_can_access_media_by_age,
     format_age_for_display,
@@ -626,11 +627,16 @@ def get_download_access_for_user(settings: Settings, *, user_id: int) -> dict[st
         if (target_user["role"] or "standard_user") == "admin"
         else DOWNLOAD_ACCESS_NONE
     )
-    access_mode = grant["access_mode"] if grant else default_access_mode
+    access_mode = default_access_mode if default_access_mode == DOWNLOAD_ACCESS_ALL else (
+        grant["access_mode"] if grant else default_access_mode
+    )
+    selected_items = [] if default_access_mode == DOWNLOAD_ACCESS_ALL else [
+        _serialize_download_movie(row) for row in selected_rows
+    ]
     return {
         "user_id": user_id,
         "access_mode": access_mode,
-        "selected_items": [_serialize_download_movie(row) for row in selected_rows],
+        "selected_items": selected_items,
         "updated_at": grant["updated_at"] if grant else None,
         "updated_by_user_id": grant["updated_by_user_id"] if grant else None,
     }
@@ -653,11 +659,16 @@ def update_download_access_for_user(
     now = utcnow_iso()
     with get_connection(settings) as connection:
         target_user = connection.execute(
-            "SELECT id FROM users WHERE id = ?",
+            "SELECT id, role FROM users WHERE id = ?",
             (user_id,),
         ).fetchone()
         if target_user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        if (target_user["role"] or "standard_user") == "admin" and normalized_mode != DOWNLOAD_ACCESS_ALL:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Admin accounts always have full download access",
+            )
         if selected_ids:
             placeholders = ",".join("?" for _ in selected_ids)
             existing_ids = {
@@ -714,6 +725,64 @@ def update_download_access_for_user(
     return get_download_access_for_user(settings, user_id=user_id)
 
 
+def search_downloadable_media_for_user(
+    settings: Settings,
+    *,
+    user_id: int,
+    query: str,
+    limit: int = 40,
+) -> dict[str, object]:
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        return {"user_id": user_id, "items": []}
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT id, username, role, enabled, COALESCE(age_credential, 18) AS age_credential
+            FROM users
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        if not bool(row["enabled"]):
+            return {"user_id": user_id, "items": []}
+    target_user = AuthenticatedUser(
+        id=int(row["id"]),
+        username=str(row["username"]),
+        role=str(row["role"] or "standard_user"),
+        enabled=bool(row["enabled"]),
+        assistant_beta_enabled=False,
+        age_credential=int(row["age_credential"] or 18),
+        session_id=None,
+    )
+    payload = search_library(settings, user_id=user_id, query=normalized_query)
+    items = list(payload.get("items") or [])
+    with get_connection(settings) as connection:
+        accessible_ids = load_accessible_media_item_ids_by_age(
+            connection,
+            user=target_user,
+            item_ids=[int(item["id"]) for item in items],
+        )
+    return {
+        "user_id": user_id,
+        "items": [
+            {
+                "id": int(item["id"]),
+                "title": str(item.get("title") or "Untitled"),
+                "original_filename": str(item.get("original_filename") or item.get("title") or "Untitled"),
+                "source_kind": str(item.get("source_kind") or "local"),
+                "file_size": int(item.get("file_size") or 0),
+                "year": item.get("year"),
+            }
+            for item in items
+            if int(item["id"]) in accessible_ids
+        ][: max(1, min(int(limit), 100))],
+    }
+
+
 def is_item_download_allowed(settings: Settings, *, user_id: int, item_id: int) -> bool:
     detail = get_media_item_detail(settings, user_id=user_id, item_id=item_id, allow_globally_hidden=False)
     if detail is None or bool(detail.get("hidden_for_user")) or bool(detail.get("hidden_globally")):
@@ -731,11 +800,9 @@ def is_item_download_allowed(settings: Settings, *, user_id: int, item_id: int) 
         ).fetchone()
         if grant is None:
             return False
-        access_mode = grant["access_mode"] if grant["access_mode"] is not None else (
-            DOWNLOAD_ACCESS_ALL
-            if (grant["role"] or "standard_user") == "admin"
-            else DOWNLOAD_ACCESS_NONE
-        )
+        if (grant["role"] or "standard_user") == "admin":
+            return True
+        access_mode = grant["access_mode"] if grant["access_mode"] is not None else DOWNLOAD_ACCESS_NONE
         if access_mode == DOWNLOAD_ACCESS_NONE:
             return False
         if access_mode == DOWNLOAD_ACCESS_ALL:

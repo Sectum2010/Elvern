@@ -8,7 +8,6 @@ from fastapi import HTTPException, status
 from ..auth import (
     cleanup_expired_sessions,
     revoke_session_by_id,
-    revoke_sessions_for_user,
     revoke_sessions_for_user_in_connection,
     session_activity_cutoff_iso,
     session_live_cutoff_iso,
@@ -276,8 +275,26 @@ def update_user(
             """,
             (next_role, int(next_enabled), next_age_credential, int(enable_totp_prompt), now, user_id),
         )
-        if not next_enabled:
-            revoked_session_count = revoke_sessions_for_user_in_connection(
+        if role_changed:
+            revoked_session_count = _revoke_user_security_boundary_in_connection(
+                connection,
+                user_id=user_id,
+                reason="user_role_changed",
+                now=now,
+            )
+            connection.execute("DELETE FROM download_access_items WHERE user_id = ?", (user_id,))
+            connection.execute("DELETE FROM download_access_grants WHERE user_id = ?", (user_id,))
+            if next_role == "standard_user":
+                connection.execute(
+                    """
+                    INSERT INTO download_access_grants (
+                        user_id, access_mode, created_at, updated_at, updated_by_user_id
+                    ) VALUES (?, 'none', ?, ?, ?)
+                    """,
+                    (user_id, now, now, actor.id),
+                )
+        elif not next_enabled:
+            revoked_session_count = _revoke_user_security_boundary_in_connection(
                 connection,
                 user_id=user_id,
                 reason="user_disabled",
@@ -296,6 +313,8 @@ def update_user(
         revoked_session_count += int(age_revoke_summary.get("revoked_desktop") or 0)
 
     payload = _get_user(settings, user_id=user_id)
+    payload["_role_changed"] = role_changed
+    payload["_security_boundary_revoked"] = bool(role_changed or not next_enabled)
     if age_revoke_summary is not None:
         payload["_age_revoke_summary"] = age_revoke_summary
     if enabled_changed:
@@ -376,9 +395,16 @@ def update_user_password(
             """,
             (hash_password(new_password, settings), now, user_id),
         )
+        revoked_session_count = _revoke_user_security_boundary_in_connection(
+            connection,
+            user_id=user_id,
+            reason="user_password_changed",
+            now=now,
+        )
         connection.commit()
 
     payload = _get_user(settings, user_id=user_id)
+    payload["_security_boundary_revoked"] = True
     log_audit_event(
         settings,
         action="admin.user.password.update",
@@ -391,9 +417,74 @@ def update_user_password(
         target_id=user_id,
         ip_address=ip_address,
         user_agent=user_agent,
-        details={"username": payload["username"]},
+        details={
+            "username": payload["username"],
+            "revoked_session_count": revoked_session_count,
+            "requires_fresh_login": True,
+        },
     )
     return payload
+
+
+def _revoke_user_security_boundary_in_connection(
+    connection,
+    *,
+    user_id: int,
+    reason: str,
+    now: str,
+) -> int:
+    revoked_count = revoke_sessions_for_user_in_connection(
+        connection,
+        user_id=user_id,
+        reason=reason,
+        now=now,
+    )
+    connection.execute(
+        """
+        UPDATE native_playback_sessions
+        SET revoked_at = COALESCE(revoked_at, ?)
+        WHERE user_id = ? AND revoked_at IS NULL AND closed_at IS NULL
+        """,
+        (now, user_id),
+    )
+    connection.execute(
+        """
+        UPDATE desktop_vlc_handoffs
+        SET revoked_at = COALESCE(revoked_at, ?)
+        WHERE user_id = ? AND revoked_at IS NULL
+        """,
+        (now, user_id),
+    )
+    connection.execute(
+        """
+        UPDATE download_sessions
+        SET revoked_at = COALESCE(revoked_at, ?),
+            last_error = COALESCE(last_error, ?)
+        WHERE user_id = ? AND revoked_at IS NULL AND completed_at IS NULL
+        """,
+        (now, reason, user_id),
+    )
+    connection.execute("DELETE FROM google_oauth_states WHERE user_id = ?", (user_id,))
+    connection.execute("DELETE FROM google_oauth_account_candidates WHERE user_id = ?", (user_id,))
+    connection.execute("DELETE FROM google_oauth_operations WHERE user_id = ?", (user_id,))
+    return revoked_count
+
+
+def revoke_user_security_boundary(
+    settings: Settings,
+    *,
+    user_id: int,
+    reason: str,
+) -> int:
+    with get_connection(settings) as connection:
+        revoked_count = _revoke_user_security_boundary_in_connection(
+            connection,
+            user_id=user_id,
+            reason=reason,
+            now=utcnow_iso(),
+        )
+        connection.commit()
+    return revoked_count
 
 
 def delete_self(
@@ -430,7 +521,7 @@ def delete_self(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Confirm deletion before removing your own account",
         )
-    revoke_sessions_for_user(settings, user_id=actor.id, reason="self_deleted")
+    revoke_user_security_boundary(settings, user_id=actor.id, reason="self_deleted")
     log_audit_event(
         settings,
         action="admin.user.self_delete",
@@ -498,31 +589,11 @@ def delete_user(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Cannot delete the last remaining enabled admin",
                 )
-        revoke_sessions_for_user_in_connection(connection, user_id=user_id, reason="user_deleted")
-        connection.execute(
-            """
-            UPDATE native_playback_sessions
-            SET revoked_at = COALESCE(revoked_at, ?)
-            WHERE user_id = ? AND revoked_at IS NULL
-            """,
-            (now, user_id),
-        )
-        connection.execute(
-            """
-            UPDATE desktop_vlc_handoffs
-            SET revoked_at = COALESCE(revoked_at, ?)
-            WHERE user_id = ? AND revoked_at IS NULL
-            """,
-            (now, user_id),
-        )
-        connection.execute(
-            """
-            UPDATE download_sessions
-            SET revoked_at = COALESCE(revoked_at, ?),
-                last_error = COALESCE(last_error, 'user_deleted')
-            WHERE user_id = ? AND revoked_at IS NULL
-            """,
-            (now, user_id),
+        _revoke_user_security_boundary_in_connection(
+            connection,
+            user_id=user_id,
+            reason="user_deleted",
+            now=now,
         )
         deleted_payload = {
             "id": int(row["id"]),

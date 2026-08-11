@@ -386,6 +386,84 @@ TABLE_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS recovery_recent_auth (
+        auth_session_id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        verified_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS backup_passphrase_attempts (
+        auth_session_id INTEGER NOT NULL,
+        checkpoint_id TEXT NOT NULL,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        window_started_at TEXT NOT NULL,
+        blocked_until TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (auth_session_id, checkpoint_id),
+        FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS backup_jobs (
+        id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        progress_current INTEGER NOT NULL DEFAULT 0,
+        progress_total INTEGER NOT NULL DEFAULT 100,
+        progress_percent INTEGER NOT NULL DEFAULT 0,
+        stage_progress_current INTEGER,
+        stage_progress_total INTEGER,
+        stage_progress_unit TEXT,
+        message TEXT NOT NULL DEFAULT '',
+        key_source TEXT NOT NULL,
+        checkpoint_id TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        initiated_by_user_id INTEGER NOT NULL,
+        initiated_by_username TEXT NOT NULL DEFAULT '',
+        auth_session_id INTEGER NOT NULL,
+        idempotency_key TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        FOREIGN KEY (initiated_by_user_id) REFERENCES users (id) ON DELETE CASCADE,
+        FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE CASCADE,
+        CHECK (state IN (
+            'queued', 'snapshotting_database', 'collecting_components',
+            'sealing_manifest', 'archiving', 'encrypting', 'writing_checkpoint',
+            'verifying_checkpoint', 'completed', 'failed', 'interrupted'
+        )),
+        UNIQUE (auth_session_id, idempotency_key)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS backup_catalog (
+        checkpoint_id TEXT PRIMARY KEY,
+        path TEXT NOT NULL,
+        created_at_utc TEXT,
+        backup_format_version INTEGER,
+        backup_trigger TEXT,
+        auto_checkpoint INTEGER NOT NULL DEFAULT 0,
+        backup_storage TEXT,
+        backup_encrypted INTEGER NOT NULL DEFAULT 1,
+        backup_key_source TEXT,
+        contains_secrets INTEGER NOT NULL DEFAULT 1,
+        total_size_bytes INTEGER NOT NULL DEFAULT 0,
+        file_count INTEGER NOT NULL DEFAULT 0,
+        catalog_status TEXT NOT NULL DEFAULT 'available',
+        key_id TEXT,
+        last_verification_state TEXT,
+        last_verified_at TEXT,
+        verification_fingerprint TEXT,
+        job_id TEXT,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS provider_identities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         provider TEXT NOT NULL,
@@ -1095,6 +1173,11 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_download_access_items_media_item_id ON download_access_items (media_item_id)",
     "CREATE INDEX IF NOT EXISTS idx_download_sessions_user_media ON download_sessions (user_id, media_item_id)",
     "CREATE INDEX IF NOT EXISTS idx_download_sessions_expires_at ON download_sessions (expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_recovery_recent_auth_expires_at ON recovery_recent_auth (expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_backup_jobs_state_updated ON backup_jobs (state, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_backup_jobs_actor_created ON backup_jobs (initiated_by_user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_backup_catalog_created ON backup_catalog (created_at_utc DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_backup_passphrase_attempts_updated ON backup_passphrase_attempts (updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_google_drive_accounts_user_id ON google_drive_accounts (user_id)",
     "CREATE INDEX IF NOT EXISTS idx_google_drive_accounts_identity ON google_drive_accounts (provider_identity_id)",
     "CREATE INDEX IF NOT EXISTS idx_provider_identities_provider_subject ON provider_identities (provider, subject_hash)",
@@ -1309,6 +1392,15 @@ def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings
     _ensure_column(connection, "password_help_requests", "requester_ip_address", "TEXT")
     _ensure_column(connection, "password_help_requests", "requester_user_agent", "TEXT")
     _ensure_column(connection, "invite_codes", "assigned_age", "INTEGER NOT NULL DEFAULT 18")
+    _ensure_column(connection, "backup_jobs", "initiated_by_username", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "backup_jobs", "stage_progress_current", "INTEGER")
+    _ensure_column(connection, "backup_jobs", "stage_progress_total", "INTEGER")
+    _ensure_column(connection, "backup_jobs", "stage_progress_unit", "TEXT")
+    _ensure_column(connection, "backup_catalog", "key_id", "TEXT")
+    _ensure_column(connection, "backup_catalog", "last_verification_state", "TEXT")
+    _ensure_column(connection, "backup_catalog", "last_verified_at", "TEXT")
+    _ensure_column(connection, "backup_catalog", "verification_fingerprint", "TEXT")
+    _ensure_column(connection, "backup_catalog", "job_id", "TEXT")
     _run_account_short_token_hmac_migration(connection)
     _run_floating_position_retirement_migration(connection)
     _run_poster_width_control_center_migration(connection)
