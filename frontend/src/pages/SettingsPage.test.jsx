@@ -600,7 +600,7 @@ describe("SettingsPage section navigation and consolidation", () => {
     }
   });
 
-  test("keeps provider callbacks in Libraries instead of treating them as OAuth setup links", async () => {
+  test("leaves provider callback ownership outside Settings while preserving the Libraries view", async () => {
     mockApi();
     render(
       <MemoryRouter initialEntries={[{
@@ -616,10 +616,10 @@ describe("SettingsPage section navigation and consolidation", () => {
 
     expect(await screen.findByText("My Libraries")).toBeInTheDocument();
     expect(screen.getByTestId("settings-location")).toHaveTextContent(
-      "/settings?section=libraries#my-libraries|REPLACE|preserved",
+      "/settings?googleDriveStatus=connected&section=libraries#my-libraries|POP|preserved",
     );
     expect(screen.getByRole("tab", { name: "Libraries" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText("Google Drive connected.")).toBeInTheDocument();
+    expect(screen.queryByText("Google Drive connected.")).not.toBeInTheDocument();
   });
 
   test("section changes replace history while preserving query, hash, and state", async () => {
@@ -913,7 +913,10 @@ describe("SettingsPage section navigation and consolidation", () => {
 
     fireEvent.click(await screen.findByText("Hidden for me"));
     expect(await screen.findByText("Preserved Hidden Copy")).toBeInTheDocument();
-    expect(await screen.findByText("Elvern could not complete the request.")).toBeInTheDocument();
+    await waitFor(() => expect(apiRequest.mock.calls.filter(
+      ([requestPath]) => requestPath === "/api/cloud-libraries",
+    )).toHaveLength(1));
+    expect(screen.queryByText("Elvern could not complete the request.")).not.toBeInTheDocument();
     const hiddenReadsBefore = apiRequest.mock.calls.filter(
       ([requestPath]) => requestPath === "/api/user-hidden-items",
     ).length;
@@ -1016,7 +1019,8 @@ describe("SettingsPage section navigation and consolidation", () => {
         <SettingsPage />
       </MemoryRouter>,
     );
-    expect(await screen.findByText("Elvern could not complete the request.")).toBeInTheDocument();
+    await waitFor(() => expect(cloudReads).toBe(1));
+    expect(screen.queryByText("Elvern could not complete the request.")).not.toBeInTheDocument();
 
     const recovery = publishConnectivityRecovery({
       generation: 6,

@@ -13,7 +13,7 @@ import {
 import { RecoveryPanel } from "../components/RecoveryPanel.jsx";
 import { MeridianScanIcon } from "../components/meridian/MeridianScanIcon.jsx";
 import { useAuth } from "../auth/AuthContext";
-import { apiRequest } from "../lib/api";
+import { apiRequest, isAbortError, isTransientNetworkError } from "../lib/api";
 import {
   ADMIN_LIVE_AUDIT_TICKER_LINE,
   desktopAdminResourcesForTab,
@@ -60,7 +60,10 @@ import {
 import {
   fetchControlCenterResource,
   getControlCenterResourceData,
+  runControlCenterRecoveryTasks,
 } from "../lib/controlCenterQueries.js";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/connectivityRecoveryStore.js";
+import { isExternalNavigationSuspendedForIdentity } from "../lib/externalNavigationCoordinator.js";
 import {
   ADMIN_BACKUP_EVENT_TYPES,
   dispatchAdminBackupEvent,
@@ -1231,6 +1234,7 @@ export function AdminPage() {
   const desktopRequestGenerationRef = useRef(0);
   const desktopRequestControllerRef = useRef(null);
   const activeDesktopAdminTabRef = useRef("");
+  const desktopResourceStatesRef = useRef({});
   const sectionCollapseTimerRef = useRef(0);
   const ownTotpDialogRef = useRef(null);
   const ownTotpReturnFocusRef = useRef(null);
@@ -1247,6 +1251,7 @@ export function AdminPage() {
     detectClientPlatform(),
   ) && initialControlCenterPath.area === "admin" && Boolean(initialControlCenterPath.tab);
   const desktopAdminTab = desktopControlCenter ? initialControlCenterPath.tab : "";
+  const desktopControlCenterIdentity = `${String(user?.id ?? "")}:${String(user?.role || "").trim().toLowerCase()}`;
   activeDesktopAdminTabRef.current = desktopAdminTab;
   const [activeSection, setActiveSection] = useState(() => (
     initialControlCenterPath.area === "admin" && initialControlCenterPath.tab
@@ -1433,39 +1438,55 @@ export function AdminPage() {
           loaded: Boolean(current[resource]?.loaded),
           loading: true,
           error: "",
+          transient: false,
+          failureId: 0,
+          incidentId: 0,
+          lastRecoveryGeneration: Number(current[resource]?.lastRecoveryGeneration) || 0,
         };
       });
       return next;
     });
   }
 
-  function setDesktopResourceResult(resource, { error = "" } = {}) {
+  function setDesktopResourceResult(resource, { error = "", transient = false, requestError = null } = {}) {
     setDesktopResourceStates((current) => ({
       ...current,
       [resource]: {
         loaded: error ? Boolean(current[resource]?.loaded) : true,
         loading: false,
         error,
+        transient,
+        failureId: Number(requestError?.failureId) || 0,
+        incidentId: Number(requestError?.incidentId) || 0,
+        lastRecoveryGeneration: Number(current[resource]?.lastRecoveryGeneration) || 0,
       },
     }));
   }
 
   async function refreshDesktopAdminResource(resource) {
+    if (isExternalNavigationSuspendedForIdentity(desktopControlCenterIdentity)) {
+      return;
+    }
     setDesktopResourceLoading([resource]);
     try {
       const payload = await desktopAdminResourceRequest(resource, { force: true });
       applyDesktopAdminResource(resource, payload);
       setDesktopResourceResult(resource);
     } catch (requestError) {
-      if (requestError?.name !== "AbortError") {
+      if (!isAbortError(requestError)) {
         setDesktopResourceResult(resource, {
           error: requestError?.message || `Failed to load ${resource}`,
+          transient: isTransientNetworkError(requestError),
+          requestError,
         });
       }
     }
   }
 
   async function loadDesktopAdminSection(tab, { signal, force = false } = {}) {
+    if (isExternalNavigationSuspendedForIdentity(desktopControlCenterIdentity)) {
+      return;
+    }
     const generation = desktopRequestGenerationRef.current + 1;
     desktopRequestGenerationRef.current = generation;
     const resources = desktopAdminResourcesForTab(tab);
@@ -1497,12 +1518,15 @@ export function AdminPage() {
         setDesktopResourceResult(resources[index]);
         return;
       }
-      if (result.reason?.name !== "AbortError") {
+      if (!isAbortError(result.reason)) {
+        const transient = isTransientNetworkError(result.reason);
         failures.push(result.reason?.message || `Failed to load ${resources[index]}`);
         setDesktopResourceResult(resources[index], {
           error: result.reason?.message || `Failed to load ${resources[index]}`,
+          transient,
+          requestError: result.reason,
         });
-        if (resources[index] === "passwordHelp") {
+        if (resources[index] === "passwordHelp" && !transient) {
           setPasswordHelpStatus((current) => ({
             ...current,
             error: result.reason?.message || "Failed to load password help requests",
@@ -2285,6 +2309,12 @@ export function AdminPage() {
   }
 
   async function loadAdminRealtimeState() {
+    if (
+      desktopControlCenter
+      && isExternalNavigationSuspendedForIdentity(desktopControlCenterIdentity)
+    ) {
+      return;
+    }
     if (realtimeRefreshInFlightRef.current) {
       realtimeRefreshQueuedRef.current = true;
       return;
@@ -2319,7 +2349,12 @@ export function AdminPage() {
         return;
       }
     } catch (requestError) {
-      if (requestError.status !== 401 && requestError.status !== 403) {
+      if (
+        !isAbortError(requestError)
+        && !isTransientNetworkError(requestError)
+        && requestError.status !== 401
+        && requestError.status !== 403
+      ) {
         console.error("Failed to refresh admin realtime data", requestError);
       }
     } finally {
@@ -2365,6 +2400,44 @@ export function AdminPage() {
   useEffect(() => {
     setDesktopResourceStates({});
   }, [user?.id, user?.role]);
+
+  desktopResourceStatesRef.current = desktopResourceStates;
+
+  useEffect(() => {
+    if (!desktopControlCenter) {
+      return undefined;
+    }
+    function recoverVisibleAdminResources(event) {
+      const generation = Number(event?.detail?.generation) || 0;
+      const incidentId = Number(event?.detail?.incidentId) || 0;
+      const recoveredThroughFailureId = Number(event?.detail?.recoveredThroughFailureId) || 0;
+      const resources = desktopAdminResourcesForTab(activeDesktopAdminTabRef.current);
+      const tasks = resources.flatMap((resource) => {
+        const state = desktopResourceStatesRef.current[resource];
+        if (
+          !state?.transient
+          || Number(state.lastRecoveryGeneration || 0) >= generation
+          || (state.incidentId && Number(state.incidentId) !== incidentId)
+          || (state.failureId && Number(state.failureId) > recoveredThroughFailureId)
+        ) {
+          return [];
+        }
+        setDesktopResourceStates((current) => ({
+          ...current,
+          [resource]: {
+            ...current[resource],
+            lastRecoveryGeneration: generation,
+          },
+        }));
+        return [() => refreshDesktopAdminResource(resource)];
+      });
+      void runControlCenterRecoveryTasks(tasks);
+    }
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, recoverVisibleAdminResources);
+    return () => {
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, recoverVisibleAdminResources);
+    };
+  }, [desktopControlCenter, desktopControlCenterIdentity]);
 
   useEffect(() => {
     if (!desktopControlCenter || !inviteAgeModalOpen) {
@@ -3825,6 +3898,11 @@ export function AdminPage() {
       return null;
     }
     const resourceState = desktopResourceStates[resource];
+    if (resourceState?.transient) {
+      return resourceState.loaded
+        ? null
+        : <p className="meridian-muted-copy" role="status">Loading {label.toLowerCase()}…</p>;
+    }
     if (resourceState?.error) {
       return (
         <div className="meridian-resource-error" role="alert">

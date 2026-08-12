@@ -1,11 +1,31 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { DesktopControlCenterLayout } from "./DesktopControlCenterLayout.jsx";
+import {
+  CONNECTIVITY_MANUAL_RETRY_EVENT,
+  registerConnectivityFailure,
+  resetConnectivityRecoveryStoreForTests,
+  setConnectivityIncidentProlonged,
+} from "../lib/connectivityRecoveryStore.js";
+import { resetExternalNavigationCoordinatorForTests } from "../lib/externalNavigationCoordinator.js";
 
 const authState = vi.hoisted(() => ({ user: { id: 7, username: "display-user", role: "standard_user" } }));
 const railState = vi.hoisted(() => ({ renders: 0 }));
+const providerState = vi.hoisted(() => ({
+  acknowledgeProviderAuthOutcome: vi.fn(),
+  providerAuthTransaction: {
+    state: "idle",
+    message: "",
+    outcomeId: "",
+    identity: "",
+  },
+}));
+const queryState = vi.hoisted(() => ({
+  invalidateCloudLibraries: vi.fn(() => Promise.resolve()),
+  invalidateControlCenter: vi.fn(() => Promise.resolve()),
+}));
 
 vi.mock("../auth/AuthContext.jsx", () => ({
   useAuth: () => authState,
@@ -14,6 +34,18 @@ vi.mock("../auth/AuthContext.jsx", () => ({
 vi.mock("../lib/libraryNavigation.js", () => ({
   markLibraryReturnPending: vi.fn(),
   readLibraryReturnTarget: vi.fn(() => null),
+}));
+
+vi.mock("../auth/ProviderAuthContext.jsx", () => ({
+  useOptionalProviderAuth: () => providerState,
+}));
+
+vi.mock("../lib/libraryQueries.js", () => ({
+  invalidateCloudLibraryQueriesForIdentity: queryState.invalidateCloudLibraries,
+}));
+
+vi.mock("../lib/controlCenterQueries.js", () => ({
+  invalidateControlCenterResource: queryState.invalidateControlCenter,
 }));
 
 vi.mock("./ControlCenterSessionContext.jsx", () => ({
@@ -46,6 +78,17 @@ describe("DesktopControlCenterLayout privilege boundaries", () => {
   beforeEach(() => {
     authState.user = { id: 7, username: "display-user", role: "standard_user" };
     railState.renders = 0;
+    providerState.acknowledgeProviderAuthOutcome.mockClear();
+    providerState.providerAuthTransaction = {
+      state: "idle",
+      message: "",
+      outcomeId: "",
+      identity: "",
+    };
+    queryState.invalidateCloudLibraries.mockClear();
+    queryState.invalidateControlCenter.mockClear();
+    resetConnectivityRecoveryStoreForTests();
+    resetExternalNavigationCoordinatorForTests();
   });
 
   test("does not mount the admin System Status rail for a standard user", () => {
@@ -125,5 +168,70 @@ describe("DesktopControlCenterLayout privilege boundaries", () => {
     expect(screen.getByRole("heading", { name: "Cloud & Sharing" })).toBeInTheDocument();
     expect(screen.getByText("Google Drive libraries — yours and the ones shared with everyone."))
       .toBeInTheDocument();
+  });
+
+  test("shows healthy reconnect cancellation once without creating a connectivity incident", async () => {
+    providerState.providerAuthTransaction = {
+      state: "cancelled_or_incomplete",
+      message: "Reconnect was not completed.",
+      outcomeId: "7:standard_user:operation-1:1",
+      identity: "7:standard_user",
+    };
+    renderLayout("/settings/cloud-sharing");
+
+    expect(await screen.findByText("Reconnect was not completed.")).toBeInTheDocument();
+    expect(screen.queryByText("Connection interrupted. Elvern will retry automatically."))
+      .not.toBeInTheDocument();
+    expect(queryState.invalidateControlCenter).not.toHaveBeenCalled();
+    expect(queryState.invalidateCloudLibraries).not.toHaveBeenCalled();
+    expect(providerState.acknowledgeProviderAuthOutcome).toHaveBeenCalledTimes(1);
+  });
+
+  test("successful reconnect invalidates only Cloud resources for the active identity", async () => {
+    providerState.providerAuthTransaction = {
+      state: "connected",
+      message: "Google Drive connected.",
+      outcomeId: "7:standard_user:operation-2:1",
+      identity: "7:standard_user",
+    };
+    renderLayout("/settings/cloud-sharing");
+
+    expect(await screen.findByText("Google Drive connected.")).toBeInTheDocument();
+    await waitFor(() => expect(queryState.invalidateControlCenter).toHaveBeenCalledWith({
+      userId: 7,
+      role: "standard_user",
+      resource: "cloudLibraries",
+    }));
+    expect(queryState.invalidateCloudLibraries).toHaveBeenCalledWith({
+      userId: 7,
+      role: "standard_user",
+      refetchType: "none",
+    });
+    expect(providerState.acknowledgeProviderAuthOutcome).toHaveBeenCalledTimes(1);
+  });
+
+  test("renders one shared non-blocking notice for a confirmed transport incident", () => {
+    registerConnectivityFailure();
+    renderLayout("/settings/library");
+
+    expect(screen.getAllByText("Connection interrupted. Elvern will retry automatically."))
+      .toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  test("shows one shared Retry only after the incident is prolonged", async () => {
+    const retryListener = vi.fn();
+    window.addEventListener(CONNECTIVITY_MANUAL_RETRY_EVENT, retryListener);
+    registerConnectivityFailure();
+    renderLayout("/settings/library");
+
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    setConnectivityIncidentProlonged(true);
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+
+    fireEvent.click(retry);
+    expect(retryListener).toHaveBeenCalledTimes(1);
+    window.removeEventListener(CONNECTIVITY_MANUAL_RETRY_EVENT, retryListener);
   });
 });

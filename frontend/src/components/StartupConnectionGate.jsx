@@ -14,6 +14,10 @@ import {
   STARTUP_CONNECTIVITY_FAILURE_EVENT,
   STARTUP_SHELL_REVEAL_DELAY_MS,
 } from "../lib/startupConnection.js";
+import {
+  CONNECTIVITY_MANUAL_RETRY_EVENT,
+  setConnectivityIncidentProlonged,
+} from "../lib/connectivityRecoveryStore.js";
 
 
 const READY_TRANSITION_MS = 180;
@@ -189,6 +193,16 @@ export function StartupConnectionGate({ children, controller: providedController
     window.__elvernStaticConnectionShellCleanup?.();
     controller.start();
     return () => controller.stop();
+  }, [controller]);
+
+  useEffect(() => {
+    setConnectivityIncidentProlonged(snapshot.runtimeReady && snapshot.status === "unreachable");
+  }, [snapshot.runtimeReady, snapshot.status]);
+
+  useEffect(() => {
+    const retry = () => void controller.retry();
+    window.addEventListener(CONNECTIVITY_MANUAL_RETRY_EVENT, retry);
+    return () => window.removeEventListener(CONNECTIVITY_MANUAL_RETRY_EVENT, retry);
   }, [controller]);
 
   useEffect(() => {

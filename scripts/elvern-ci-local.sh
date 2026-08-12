@@ -131,11 +131,12 @@ hide_frontend_dist_for_backend_pytest() {
   fi
 }
 
-run "$PYTHON_BIN" -m pip install --upgrade pip
-run "$PYTHON_BIN" -m pip install -r backend/requirements-test.txt
+run "$PYTHON_BIN" -m pip install pip==26.2.1
+run "$PYTHON_BIN" -m pip install -r backend/requirements-test.lock.txt
 
 hide_frontend_dist_for_backend_pytest
-run "$PYTHON_BIN" -m pytest
+mkdir -p "$ROOT_DIR/tmp"
+run "$PYTHON_BIN" -m pytest --junitxml="$ROOT_DIR/tmp/backend-junit.xml"
 restore_frontend_dist
 
 check_dotnet_version
@@ -150,9 +151,9 @@ run npm test
 run npm run build
 popd >/dev/null
 
-run "$PYTHON_BIN" -m pip install pip-audit "bandit[toml]"
-run "$PIP_AUDIT_BIN" -r backend/requirements.txt --strict
-run "$PIP_AUDIT_BIN" -r backend/requirements-test.txt --strict
+run "$PYTHON_BIN" -m pip install -r backend/requirements-ci-tools.lock.txt
+run "$PIP_AUDIT_BIN" -r backend/requirements.lock.txt --strict
+run "$PIP_AUDIT_BIN" -r backend/requirements-test.lock.txt --strict
 run "$BANDIT_BIN" -r backend/app -ll -ii --exclude backend/app/__pycache__
 
 pushd frontend >/dev/null

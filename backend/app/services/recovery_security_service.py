@@ -33,7 +33,7 @@ def verify_recovery_recent_auth(settings, *, actor, current_admin_password: str)
         ok, new_hash = verify_password(current_admin_password, row["password_hash"], settings)
         if not ok:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={
                     "code": "recovery_password_invalid",
                     "message": "Current admin password is incorrect.",

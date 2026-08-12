@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi import HTTPException
@@ -143,9 +144,51 @@ def test_operation_id_is_hmac_stored_session_bound_and_single_use(initialized_se
         operation_id=operation_id,
     )
     assert cancelled["status"] == "cancelled"
+    repeated_cancel = cloud_provider_auth_service.cancel_google_oauth_operation(
+        initialized_settings,
+        user_id=1,
+        auth_session_id=session_id,
+        operation_id=operation_id,
+    )
+    assert repeated_cancel["status"] == "cancelled"
     with pytest.raises(HTTPException) as replay:
         _begin(initialized_settings, session_id=session_id, operation_id=operation_id)
     assert replay.value.status_code == 409
+
+
+def test_access_denied_callback_is_a_terminal_cancelled_operation(
+    client,
+    initialized_settings,
+) -> None:
+    _configure(initialized_settings)
+    session_id, _token = _session(initialized_settings)
+    operation_id = "access-denied-operation-000001"
+    response = _begin(
+        initialized_settings,
+        session_id=session_id,
+        operation_id=operation_id,
+    )
+    state = parse_qs(urlsplit(response["authorization_url"]).query)["state"][0]
+
+    callback = client.get(
+        "/api/cloud-libraries/google/callback",
+        params={"state": state, "error": "access_denied"},
+        follow_redirects=False,
+    )
+
+    assert callback.status_code == 303
+    location = urlsplit(callback.headers["location"])
+    callback_query = parse_qs(location.query)
+    assert location.path == "/settings/cloud-sharing"
+    assert callback_query["googleDriveStatus"] == ["cancelled"]
+    assert callback_query["googleDriveMessage"] == ["Google Drive sign-in was cancelled or denied."]
+    operation = cloud_provider_auth_service.get_google_oauth_operation_payload(
+        initialized_settings,
+        user_id=1,
+        auth_session_id=session_id,
+        operation_id=operation_id,
+    )
+    assert operation["status"] == "cancelled"
 
 
 def test_operation_expires_and_is_removed_when_session_is_revoked(initialized_settings) -> None:

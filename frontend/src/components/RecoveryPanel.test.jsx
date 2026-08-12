@@ -90,17 +90,19 @@ describe("RecoveryPanel", () => {
     expect(screen.queryByText("· No checkpoint yet")).not.toBeInTheDocument();
   });
 
-  test("validates both manual passphrase fields before recent-auth or job creation", async () => {
+  test("uses the demo-style single manual passphrase field", async () => {
     installApi();
     render(<RecoveryPanel />);
     await screen.findByText("1 · Create");
 
     fireEvent.click(screen.getByRole("button", { name: "Manual passphrase" }));
-    fireEvent.change(screen.getByPlaceholderText("Passphrase"), { target: { value: "long-enough-passphrase" } });
-    fireEvent.change(screen.getByPlaceholderText("Confirm passphrase"), { target: { value: "different-passphrase" } });
+    expect(screen.getByPlaceholderText("Enter a strong passphrase")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Confirm passphrase")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Enter a strong passphrase"), { target: { value: "short" } });
     fireEvent.click(screen.getByRole("button", { name: "Create encrypted backup" }));
 
-    expect(await screen.findByText("Passphrases do not match.")).toBeInTheDocument();
+    expect(await screen.findByText("Use a passphrase between 12 and 1024 characters.")).toBeInTheDocument();
     expect(apiRequest).not.toHaveBeenCalledWith(
       "/api/admin/backups/recent-auth/status",
       expect.anything(),
@@ -109,6 +111,33 @@ describe("RecoveryPanel", () => {
       "/api/admin/backup-jobs",
       expect.anything(),
     );
+  });
+
+  test("submits the single manual passphrase as the backend confirmation value", async () => {
+    let submittedPayload = null;
+    apiRequest.mockImplementation(async (path, options = {}) => {
+      if (path === "/api/admin/backups") return { backups_dir: "backups", checkpoints: [CHECKPOINT] };
+      if (path === "/api/admin/audit?limit=100") return { events: [] };
+      if (path === "/api/admin/backup-jobs/active") return { job: null };
+      if (path === "/api/admin/backups/recent-auth/status") return { verified: true };
+      if (path === "/api/admin/backup-jobs" && options.method === "POST") {
+        submittedPayload = options.data;
+        return INTERRUPTED_JOB;
+      }
+      throw new Error(`Unexpected request: ${options.method || "GET"} ${path}`);
+    });
+    render(<RecoveryPanel />);
+    await screen.findByText("1 · Create");
+
+    fireEvent.click(screen.getByRole("button", { name: "Manual passphrase" }));
+    fireEvent.change(screen.getByPlaceholderText("Enter a strong passphrase"), {
+      target: { value: "long-enough-passphrase" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create encrypted backup" }));
+
+    await waitFor(() => expect(submittedPayload).not.toBeNull());
+    expect(submittedPayload.passphrase).toBe("long-enough-passphrase");
+    expect(submittedPayload.passphrase_confirmation).toBe("long-enough-passphrase");
   });
 
   test("keeps a catalog failure localized instead of showing a healthy count", async () => {

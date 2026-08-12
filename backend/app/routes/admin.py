@@ -1194,7 +1194,7 @@ def admin_create_backup_job(
         passphrase = validate_backup_passphrase(payload.passphrase or "")
         if passphrase != (payload.passphrase_confirmation or ""):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "backup_passphrase_mismatch", "message": "Backup passphrases do not match."},
             )
     job = get_backup_job_manager(request.app.state.settings).start_job(
@@ -1372,7 +1372,7 @@ def _admin_inspect_backup_with_passphrase(
             details={"checkpoint_id": checkpoint_id},
         )
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "backup_passphrase_invalid", "message": "Wrong backup passphrase."},
         )
     if passphrase and inspection.get("valid"):
@@ -1488,17 +1488,17 @@ def _admin_backup_restore_plan_with_passphrase(
             details={"checkpoint_id": checkpoint_id, "operation": "restore_plan"},
         )
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "backup_passphrase_invalid", "message": "Wrong backup passphrase."},
         ) from exc
     except BackupPassphraseRequiredError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
     except BackupEncryptionError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": exc.code, "message": "Checkpoint verification failed."},
         ) from exc
     except (OSError, ValueError) as exc:
@@ -1534,12 +1534,12 @@ def admin_preview_backup(
                 checkpoint_id=checkpoint_id,
             )
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
     except BackupEncryptionError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": exc.code, "message": "Checkpoint verification failed."},
         ) from exc
     except (OSError, ValueError) as exc:

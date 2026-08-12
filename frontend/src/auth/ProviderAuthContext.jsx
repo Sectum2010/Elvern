@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { ProviderReconnectModal } from "../components/ProviderReconnectModal";
-import { apiRequest } from "../lib/api";
+import { apiRequest, isAbortError, isTransientNetworkError } from "../lib/api";
+import { CONNECTIVITY_RECOVERED_EVENT } from "../lib/connectivityRecoveryStore";
 import { PAGE_RESUME_EVENT } from "../lib/pageResume";
 import {
   buildProviderAuthReturnPath,
@@ -9,6 +10,7 @@ import {
   getProviderAuthIdentity,
   getProviderAuthRequirementFromStatus,
   isProviderAuthReconnectCapable,
+  navigateToProviderAuthorization,
   PROVIDER_RECONNECT_CANCELLED_MESSAGE,
   readProviderAuthIntent,
   saveProviderAuthIntent,
@@ -16,6 +18,15 @@ import {
   shouldUseProviderAuthPassiveNotice,
   startGoogleDriveReconnect,
 } from "../lib/providerAuth";
+import {
+  beginExternalNavigation,
+  clearExternalNavigationForIdentityChange,
+  completeExternalNavigation,
+  markExternalNavigationNavigating,
+  markExternalNavigationReconciling,
+  prepareExternalNavigation,
+  createExternalNavigationAwareRequestOwner,
+} from "../lib/externalNavigationCoordinator";
 import { useAuth } from "./AuthContext";
 
 
@@ -28,6 +39,7 @@ const IDLE_TRANSACTION = Object.freeze({
   operationId: "",
   outcomeId: "",
   identity: "",
+  operationContext: null,
 });
 
 
@@ -67,7 +79,8 @@ export function ProviderAuthProvider({ children }) {
   const identityRef = useRef(identity);
   const transactionRef = useRef(IDLE_TRANSACTION);
   const reconcileInFlightRef = useRef(null);
-  const lastResumeCheckAtRef = useRef(0);
+  const externalNavigationHandleRef = useRef(null);
+  const handledResumeGenerationsRef = useRef(new Set());
 
   const updateTransaction = useCallback((nextTransaction) => {
     transactionRef.current = nextTransaction;
@@ -76,7 +89,11 @@ export function ProviderAuthProvider({ children }) {
 
   identityRef.current = identity;
 
-  const refreshProviderAuthStatus = useCallback(async ({ signal, ignoreDismissal = false } = {}) => {
+  const refreshProviderAuthStatus = useCallback(async ({
+    signal,
+    ignoreDismissal = false,
+    ownExternalNavigation = true,
+  } = {}) => {
     if (!user) {
       setRequirement(null);
       requirementRef.current = null;
@@ -87,7 +104,16 @@ export function ProviderAuthProvider({ children }) {
     }
     const requestIdentity = identity;
     try {
-      const payload = await apiRequest("/api/cloud-libraries/google/provider-auth-status", { signal });
+      const requestOwner = ownExternalNavigation
+        ? createExternalNavigationAwareRequestOwner({
+          identity: requestIdentity,
+          resource: "provider_auth_status",
+        })
+        : undefined;
+      const payload = await apiRequest("/api/cloud-libraries/google/provider-auth-status", {
+        signal,
+        requestOwner,
+      });
       if (identityRef.current !== requestIdentity) {
         return null;
       }
@@ -111,7 +137,7 @@ export function ProviderAuthProvider({ children }) {
       }
       return nextRequirement;
     } catch (requestError) {
-      if (requestError?.name !== "AbortError") {
+      if (!isAbortError(requestError)) {
         console.error("Failed to load Google Drive provider auth status", requestError);
       }
       return requirementRef.current;
@@ -123,6 +149,10 @@ export function ProviderAuthProvider({ children }) {
     const operationId = String(intent?.operationId || transactionRef.current.operationId || "");
     const operationIdentity = String(intent?.identity || identityRef.current || "");
     clearProviderAuthIntent();
+    if (externalNavigationHandleRef.current) {
+      completeExternalNavigation(externalNavigationHandleRef.current);
+      externalNavigationHandleRef.current = null;
+    }
     updateTransaction({
       state: nextState,
       message,
@@ -131,6 +161,12 @@ export function ProviderAuthProvider({ children }) {
       operationId,
       outcomeId: operationId ? `${operationIdentity}:${operationId}` : "",
       identity: operationIdentity,
+      operationContext: intent ? {
+        actionType: String(intent.actionType || ""),
+        mediaItemId: Number(intent.mediaItemId || 0) || null,
+        platform: String(intent.platform || "") || null,
+        returnPath: String(intent.returnPath || ""),
+      } : null,
     });
   }, [updateTransaction]);
 
@@ -142,13 +178,21 @@ export function ProviderAuthProvider({ children }) {
     return true;
   }, [updateTransaction]);
 
-  const reconcileProviderAuthTransaction = useCallback(async () => {
+  const reconcileProviderAuthTransaction = useCallback(async ({
+    resumeGeneration = 0,
+    resumeSource = "resume",
+  } = {}) => {
     if (!user || !identity) {
       return null;
     }
     const intent = readProviderAuthIntent({ identity });
     if (!intent?.operationId) {
       return null;
+    }
+    const normalizedGeneration = Number(resumeGeneration) || 0;
+    const reconciliationKey = `${identity}:${intent.operationId}:${resumeSource}:${normalizedGeneration}`;
+    if (handledResumeGenerationsRef.current.has(reconciliationKey)) {
+      return transactionRef.current;
     }
     const currentInFlight = reconcileInFlightRef.current;
     if (
@@ -161,12 +205,23 @@ export function ProviderAuthProvider({ children }) {
       currentInFlight.controller.abort();
     }
     const controller = new AbortController();
+    handledResumeGenerationsRef.current.add(reconciliationKey);
+    if (handledResumeGenerationsRef.current.size > 128) {
+      handledResumeGenerationsRef.current.delete(handledResumeGenerationsRef.current.values().next().value);
+    }
+    const navigationHandle = beginExternalNavigation({
+      identity,
+      provider: intent.provider || "google_drive",
+      operationId: intent.operationId,
+    });
+    externalNavigationHandleRef.current = navigationHandle;
+    markExternalNavigationReconciling(navigationHandle);
     let task;
     task = (async () => {
       const operationIdentity = identity;
       const operationId = intent.operationId;
       updateTransaction({
-        state: "reconciling",
+        state: "reconciling_return",
         message: "",
         candidate: null,
         result: null,
@@ -184,7 +239,7 @@ export function ProviderAuthProvider({ children }) {
         });
       } catch (requestError) {
         if (
-          requestError?.name === "AbortError"
+          isAbortError(requestError)
           || identityRef.current !== operationIdentity
           || readProviderAuthIntent({ identity: operationIdentity })?.operationId !== operationId
         ) {
@@ -236,25 +291,38 @@ export function ProviderAuthProvider({ children }) {
           return next;
         } catch (requestError) {
           if (
-            requestError?.name === "AbortError"
+            isAbortError(requestError)
             || identityRef.current !== operationIdentity
             || readProviderAuthIntent({ identity: operationIdentity })?.operationId !== operationId
           ) {
             return transactionRef.current;
           }
-          finishTransaction(
-            "error",
-            requestError.message || "Google Drive account replacement expired.",
-            null,
-            intent,
-          );
+          if (isTransientNetworkError(requestError)) {
+            updateTransaction({
+              state: "unknown",
+              message: "Google Drive reconnect status is temporarily unknown. Elvern will check again.",
+              candidate: null,
+              result: null,
+              operationId,
+              outcomeId: "",
+              identity: operationIdentity,
+              operationContext: null,
+            });
+          } else {
+            finishTransaction(
+              "error",
+              requestError.message || "Google Drive account replacement expired.",
+              null,
+              intent,
+            );
+          }
           removeGoogleDriveCallbackParams();
           return transactionRef.current;
         }
       }
 
       if (operation?.status === "connected") {
-        const nextRequirement = await refreshProviderAuthStatus();
+        const nextRequirement = await refreshProviderAuthStatus({ ownExternalNavigation: false });
         if (
           identityRef.current !== operationIdentity
           || readProviderAuthIntent({ identity: operationIdentity })?.operationId !== operationId
@@ -272,14 +340,32 @@ export function ProviderAuthProvider({ children }) {
       }
 
       if (operation?.status === "pending") {
+        let cancellation;
         try {
-          await apiRequest("/api/cloud-libraries/google/operation/cancel", {
+          cancellation = await apiRequest("/api/cloud-libraries/google/operation/cancel", {
             method: "POST",
             data: { operation_id: operationId },
             signal: controller.signal,
           });
-        } catch {
-          // The pending operation may have expired between status and cancellation.
+        } catch (requestError) {
+          if (
+            isAbortError(requestError)
+            || identityRef.current !== operationIdentity
+            || readProviderAuthIntent({ identity: operationIdentity })?.operationId !== operationId
+          ) {
+            return transactionRef.current;
+          }
+          updateTransaction({
+            state: "pending_confirmation",
+            message: "Google Drive reconnect cancellation is awaiting confirmation.",
+            candidate: null,
+            result: null,
+            operationId,
+            outcomeId: "",
+            identity: operationIdentity,
+          });
+          removeGoogleDriveCallbackParams();
+          return transactionRef.current;
         }
         if (
           identityRef.current !== operationIdentity
@@ -287,12 +373,32 @@ export function ProviderAuthProvider({ children }) {
         ) {
           return transactionRef.current;
         }
+        if (!["cancelled", "expired"].includes(String(cancellation?.status || ""))) {
+          updateTransaction({
+            state: "pending_confirmation",
+            message: "Google Drive reconnect cancellation is awaiting confirmation.",
+            candidate: null,
+            result: null,
+            operationId,
+            outcomeId: "",
+            identity: operationIdentity,
+          });
+          removeGoogleDriveCallbackParams();
+          return transactionRef.current;
+        }
         finishTransaction("cancelled_or_incomplete", PROVIDER_RECONNECT_CANCELLED_MESSAGE, null, intent);
         removeGoogleDriveCallbackParams();
         return transactionRef.current;
       }
 
-      if (operation?.status === "error") {
+      if (["cancelled", "expired"].includes(String(operation?.status || ""))) {
+        finishTransaction(
+          "cancelled_or_incomplete",
+          PROVIDER_RECONNECT_CANCELLED_MESSAGE,
+          null,
+          intent,
+        );
+      } else if (operation?.status === "error") {
         finishTransaction(
           "error",
           operation.message || callbackMessage || "Google Drive reconnect failed.",
@@ -300,16 +406,24 @@ export function ProviderAuthProvider({ children }) {
           intent,
         );
       } else {
-        finishTransaction(
-          "cancelled_or_incomplete",
-          callbackMessage || PROVIDER_RECONNECT_CANCELLED_MESSAGE,
-          null,
-          intent,
-        );
+        updateTransaction({
+          state: "pending_confirmation",
+          message: "Google Drive reconnect status is awaiting confirmation.",
+          candidate: null,
+          result: null,
+          operationId,
+          outcomeId: "",
+          identity: operationIdentity,
+          operationContext: null,
+        });
       }
       removeGoogleDriveCallbackParams();
       return transactionRef.current;
     })().finally(() => {
+      if (externalNavigationHandleRef.current === navigationHandle) {
+        completeExternalNavigation(navigationHandle);
+        externalNavigationHandleRef.current = null;
+      }
       if (reconcileInFlightRef.current?.promise === task) {
         reconcileInFlightRef.current = null;
       }
@@ -353,11 +467,15 @@ export function ProviderAuthProvider({ children }) {
     }
   }
 
-  async function startProviderReconnect({ allowWithoutRequirement = false } = {}) {
+  async function startProviderReconnect({
+    allowWithoutRequirement = false,
+    returnPath: requestedReturnPath = "",
+    intentMetadata = null,
+  } = {}) {
     const currentRequirement = requirementRef.current;
     const currentState = transactionRef.current.state;
     if (
-      ["starting", "navigating_external", "reconciling"].includes(currentState)
+      ["starting", "preparing_external_navigation", "navigating_external", "reconciling_return", "pending_confirmation", "unknown"].includes(currentState)
       || (!allowWithoutRequirement && !currentRequirement)
       || currentRequirement?.allowReconnect === false
       || !user
@@ -365,14 +483,30 @@ export function ProviderAuthProvider({ children }) {
       return null;
     }
     const operationId = createProviderAuthOperationId();
+    const returnPath = String(requestedReturnPath || "").trim()
+      || buildProviderAuthReturnPath(window.location);
     const intent = {
       provider: "google_drive",
       operationId,
       identity,
-      returnPath: buildProviderAuthReturnPath(window.location),
+      returnPath,
       state: "starting",
+      ...(intentMetadata && typeof intentMetadata === "object" ? intentMetadata : {}),
     };
-    saveProviderAuthIntent(intent);
+    if (!saveProviderAuthIntent(intent)) {
+      const message = "Google Drive reconnect could not be started because this browser could not save the operation.";
+      updateTransaction({
+        ...IDLE_TRANSACTION,
+        state: "error",
+        message,
+        operationId,
+        outcomeId: `${identity}:${operationId}`,
+        identity,
+        operationContext: null,
+      });
+      setModalError(message);
+      return null;
+    }
     updateTransaction({
       state: "starting",
       message: "",
@@ -381,19 +515,42 @@ export function ProviderAuthProvider({ children }) {
       operationId,
       outcomeId: "",
       identity,
+      operationContext: null,
     });
     setModalError("");
+    let operationStarted = false;
     try {
       const payload = await startGoogleDriveReconnect({
         operationId,
         returnPath: intent.returnPath,
       });
+      operationStarted = true;
       if (
         identityRef.current !== identity
         || readProviderAuthIntent({ identity })?.operationId !== operationId
       ) {
         return null;
       }
+      const navigationHandle = beginExternalNavigation({
+        identity,
+        operationContext: null,
+        provider: "google_drive",
+        operationId,
+      });
+      externalNavigationHandleRef.current = navigationHandle;
+      saveProviderAuthIntent({ ...intent, state: "preparing_external_navigation" });
+      updateTransaction({
+        state: "preparing_external_navigation",
+        message: "",
+        candidate: null,
+        result: null,
+        operationId,
+        outcomeId: "",
+        identity,
+        operationContext: null,
+      });
+      prepareExternalNavigation(navigationHandle);
+      saveProviderAuthIntent({ ...intent, state: "navigating_external" });
       updateTransaction({
         state: "navigating_external",
         message: "",
@@ -403,13 +560,54 @@ export function ProviderAuthProvider({ children }) {
         outcomeId: "",
         identity,
       });
+      markExternalNavigationNavigating(navigationHandle);
+      navigateToProviderAuthorization(payload.authorization_url);
       return payload;
     } catch (requestError) {
       if (identityRef.current !== identity) {
         return null;
       }
-      finishTransaction("error", requestError.message || "Failed to start Google Drive reconnect.");
-      setModalError(requestError.message || "Failed to start Google Drive reconnect.");
+      if (!operationStarted) {
+        finishTransaction(
+          "error",
+          requestError.message || "Failed to start Google Drive reconnect.",
+          null,
+          intent,
+        );
+        setModalError(requestError.message || "Failed to start Google Drive reconnect.");
+        return null;
+      }
+      if (externalNavigationHandleRef.current) {
+        completeExternalNavigation(externalNavigationHandleRef.current);
+        externalNavigationHandleRef.current = null;
+      }
+      let cancellationStatus = "";
+      try {
+        const cancellation = await apiRequest("/api/cloud-libraries/google/operation/cancel", {
+          method: "POST",
+          data: { operation_id: operationId },
+        });
+        cancellationStatus = String(cancellation?.status || "");
+      } catch {
+        // Keep the identity-bound intent so a later confirmed recovery can reconcile it.
+      }
+      const message = requestError.message || "Failed to start Google Drive reconnect.";
+      if (["cancelled", "expired", "error"].includes(cancellationStatus)) {
+        finishTransaction("error", message, null, intent);
+        setModalError(message);
+        return null;
+      }
+      updateTransaction({
+        state: "pending_confirmation",
+        message,
+        candidate: null,
+        result: null,
+        operationId,
+        outcomeId: "",
+        identity,
+        operationContext: null,
+      });
+      setModalError(message);
       return null;
     }
   }
@@ -458,6 +656,8 @@ export function ProviderAuthProvider({ children }) {
       reconcileInFlightRef.current?.controller.abort();
       reconcileInFlightRef.current = null;
     }
+    clearExternalNavigationForIdentityChange(identity);
+    handledResumeGenerationsRef.current.clear();
     if (!user || !identity) {
       clearProviderAuthIntent();
       updateTransaction(IDLE_TRANSACTION);
@@ -473,7 +673,7 @@ export function ProviderAuthProvider({ children }) {
     dismissedThisSessionRef.current = false;
     void refreshProviderAuthStatus({ signal: controller.signal, ignoreDismissal: true });
     if (readProviderAuthIntent({ identity })) {
-      void reconcileProviderAuthTransaction();
+      void reconcileProviderAuthTransaction({ resumeGeneration: 0, resumeSource: "initial" });
     }
     return () => controller.abort();
   }, [authLoading, identity, reconcileProviderAuthTransaction, refreshProviderAuthStatus, updateTransaction, user]);
@@ -482,29 +682,40 @@ export function ProviderAuthProvider({ children }) {
     if (!user || typeof window === "undefined") {
       return undefined;
     }
-    function reconcileAfterResume() {
+    function reconcileAfterResume(event) {
       if (document.visibilityState === "hidden" || !readProviderAuthIntent({ identity })) {
         return;
       }
-      const now = Date.now();
-      if (now - lastResumeCheckAtRef.current < 500) {
-        return;
-      }
-      lastResumeCheckAtRef.current = now;
-      void reconcileProviderAuthTransaction();
-    }
-    function handleVisibilityChange() {
-      if (document.visibilityState === "visible") {
-        reconcileAfterResume();
-      }
+      void reconcileProviderAuthTransaction({
+        resumeGeneration: Number(event?.detail?.generation) || 0,
+        resumeSource: "page_resume",
+      });
     }
     window.addEventListener(PAGE_RESUME_EVENT, reconcileAfterResume);
-    window.addEventListener("pageshow", reconcileAfterResume);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       window.removeEventListener(PAGE_RESUME_EVENT, reconcileAfterResume);
-      window.removeEventListener("pageshow", reconcileAfterResume);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [identity, reconcileProviderAuthTransaction, user]);
+
+  useEffect(() => {
+    if (!user || typeof window === "undefined") {
+      return undefined;
+    }
+    function reconcileAfterConnectivityRecovery(event) {
+      if (
+        !["unknown", "pending_confirmation"].includes(transactionRef.current.state)
+        || !readProviderAuthIntent({ identity })
+      ) {
+        return;
+      }
+      void reconcileProviderAuthTransaction({
+        resumeGeneration: Number(event?.detail?.generation) || 0,
+        resumeSource: "connectivity_recovery",
+      });
+    }
+    window.addEventListener(CONNECTIVITY_RECOVERED_EVENT, reconcileAfterConnectivityRecovery);
+    return () => {
+      window.removeEventListener(CONNECTIVITY_RECOVERED_EVENT, reconcileAfterConnectivityRecovery);
     };
   }, [identity, reconcileProviderAuthTransaction, user]);
 
@@ -515,7 +726,14 @@ export function ProviderAuthProvider({ children }) {
     }
   }, [dismissedThisSession, requirement]);
 
-  const reconnectPending = ["starting", "navigating_external", "reconciling"].includes(transaction.state);
+  const reconnectPending = [
+    "starting",
+    "preparing_external_navigation",
+    "navigating_external",
+    "reconciling_return",
+    "pending_confirmation",
+    "unknown",
+  ].includes(transaction.state);
   const contextValue = {
     providerAuthControllerAvailable: true,
     providerAuthRequirement: requirement,

@@ -18,29 +18,39 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
       - name: Install backend and test dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r backend/requirements-test.txt
+          python -m pip install pip==26.2.1
+          python -m pip install -r backend/requirements-test.lock.txt
 
       - name: Run Linux installer tests with polluted runner XDG environment
         run: |
+          mkdir -p tmp
           mkdir -p "$RUNNER_TEMP/outer-xdg-config" "$RUNNER_TEMP/outer-xdg-data"
           CI=true \
           XDG_CONFIG_HOME="$RUNNER_TEMP/outer-xdg-config" \
           XDG_DATA_HOME="$RUNNER_TEMP/outer-xdg-data" \
           ELVERN_INSTALL_TEST_FAIL_AT="outside-fixture" \
-          python -m pytest backend/tests/test_desktop_helper_linux_installer.py -q
+          python -m pytest backend/tests/test_desktop_helper_linux_installer.py -q --junitxml=tmp/backend-linux-installer-junit.xml
 
       - name: Run backend tests
-        run: python -m pytest
+        run: python -m pytest --junitxml=tmp/backend-junit.xml
+
+      - name: Upload backend JUnit failures
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: backend-junit-${{ github.run_id }}
+          path: tmp/backend-*-junit.xml
+          if-no-files-found: warn
+          retention-days: 7
 
   desktop_helper_tests:
     name: Desktop helper tests
@@ -49,10 +59,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: "10.0.x"
 
@@ -73,10 +83,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22.12.0"
           cache: npm
@@ -99,29 +109,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
       - name: Install pip-audit and bandit
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pip-audit "bandit[toml]"
+          python -m pip install pip==26.2.1
+          python -m pip install -r backend/requirements-ci-tools.lock.txt
 
       - name: Run pip-audit on backend dependencies
-        run: pip-audit -r backend/requirements.txt --strict
+        run: pip-audit -r backend/requirements.lock.txt --strict
 
       - name: Run pip-audit on test dependencies
-        run: pip-audit -r backend/requirements-test.txt --strict
+        run: pip-audit -r backend/requirements-test.lock.txt --strict
 
       - name: Run bandit on backend source
         run: bandit -r backend/app -ll -ii --exclude backend/app/__pycache__
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22.12.0"
           cache: npm
@@ -141,7 +151,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Run production Docker smoke
         run: ./scripts/docker-smoke.sh
@@ -152,10 +162,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22.12.0"
           cache: npm
@@ -171,7 +181,7 @@ jobs:
         run: echo "version=$(node -p 'require("./node_modules/@playwright/test/package.json").version')" >> "$GITHUB_OUTPUT"
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}-${{ steps.playwright-version.outputs.version }}
@@ -203,7 +213,7 @@ jobs:
 
       - name: Upload sanitized browser failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: production-browser-failure-${{ github.run_id }}
           path: tmp/playwright-phase7-*

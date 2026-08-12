@@ -352,10 +352,12 @@ def build_google_connect_callback_redirect(
     success: bool,
     message: str,
     return_path: str | None = None,
+    status_value: str | None = None,
 ) -> str:
     return _build_google_connect_callback_redirect_impl(
         settings,
         success=success,
         message=message,
         return_path=return_path,
+        status_value=status_value,
     )

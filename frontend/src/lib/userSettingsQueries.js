@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "./api";
 import { useBoundedQueryRecovery } from "./boundedQueryRecovery";
 import { queryClient } from "./queryClient";
+import { createExternalNavigationAwareRequestOwner } from "./externalNavigationCoordinator";
 import { DEFAULT_BACKGROUND_SETTINGS } from "./userBackground";
 
 
@@ -64,14 +65,23 @@ export function useUserSettingsQuery(user) {
   const queryKey = buildUserSettingsQueryKey({ userId: user?.id, role: user?.role });
   const query = useQuery({
     queryKey,
-    queryFn: ({ signal }) => apiRequest("/api/user-settings", {
-      signal,
-      abortOnPageHide: true,
-    }),
+    queryFn: ({ signal }) => {
+      const identity = `${String(user?.id ?? "").trim()}:${String(user?.role || "").trim().toLowerCase()}`;
+      const requestOwner = createExternalNavigationAwareRequestOwner({
+        identity,
+        resource: "userSettings",
+      });
+      return apiRequest("/api/user-settings", {
+        signal,
+        requestOwner,
+        abortOnPageHide: true,
+      });
+    },
     enabled: Boolean(user?.id),
     staleTime: USER_SETTINGS_QUERY_STALE_TIME_MS,
     gcTime: USER_SETTINGS_QUERY_GC_TIME_MS,
     retry: false,
+    refetchOnWindowFocus: false,
   });
   // A transient transport failure keeps cached settings (or defaults) usable and
   // recovers once per confirmed connectivity generation without duplicating the

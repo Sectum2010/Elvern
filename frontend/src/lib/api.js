@@ -7,6 +7,11 @@ import {
   combineAbortSignals,
   getPageLifecycleSignal,
 } from "./pageLifecycle.js";
+import {
+  getExternalNavigationRequestOwnerSignal,
+  isExpectedExternalNavigationReason,
+  releaseExternalNavigationAwareRequestOwner,
+} from "./externalNavigationCoordinator.js";
 
 
 function joinMessages(values) {
@@ -49,6 +54,16 @@ export class ApiResponseError extends Error {
 }
 
 
+export class ApiCancellationError extends Error {
+  constructor(reason) {
+    super("The request was cancelled for external navigation.");
+    this.name = "ApiCancellationError";
+    this.category = "cancellation";
+    this.cancellationReason = reason?.reason || "expected_external_navigation";
+  }
+}
+
+
 // A malformed body surfaces as a SyntaxError (JSON.parse) — the server DID
 // respond, so this is a protocol/response failure, never a transport outage
 // and never an abort. Everything else thrown while consuming the body stream
@@ -60,7 +75,13 @@ function isMalformedBodyError(error) {
 
 
 export function isAbortError(error) {
-  return error?.name === "AbortError";
+  return error?.name === "AbortError" || error?.category === "cancellation";
+}
+
+
+export function isExpectedExternalNavigationCancellation(error) {
+  return error?.category === "cancellation"
+    && error?.cancellationReason === "expected_external_navigation";
 }
 
 
@@ -74,7 +95,10 @@ export function isHttpError(error) {
 }
 
 
-function createAbortError() {
+function createAbortError(reason = null) {
+  if (isExpectedExternalNavigationReason(reason)) {
+    return new ApiCancellationError(reason);
+  }
   if (typeof DOMException === "function") {
     return new DOMException("The request was aborted.", "AbortError");
   }
@@ -234,11 +258,17 @@ export async function apiRequest(path, options = {}) {
     mode,
     redirect,
     referrerPolicy,
+    requestOwner,
     signal,
   } = options;
+  const requestOwnerSignal = getExternalNavigationRequestOwnerSignal(requestOwner);
+  if (requestOwner && !requestOwnerSignal) {
+    throw new TypeError("apiRequest received an invalid request owner.");
+  }
   const requestHeaders = { ...headers };
   const combinedSignal = combineAbortSignals([
     signal,
+    requestOwnerSignal,
     abortOnPageHide ? getPageLifecycleSignal() : null,
   ]);
 
@@ -276,7 +306,7 @@ export async function apiRequest(path, options = {}) {
       });
     } catch (error) {
       if (combinedSignal.signal?.aborted || isAbortError(error)) {
-        throw createAbortError();
+        throw createAbortError(combinedSignal.signal?.reason);
       }
       throw createNetworkError(path, error);
     }
@@ -311,7 +341,7 @@ export async function apiRequest(path, options = {}) {
         : await response.text();
     } catch (error) {
       if (combinedSignal.signal?.aborted || isAbortError(error)) {
-        throw createAbortError();
+        throw createAbortError(combinedSignal.signal?.reason);
       }
       if (isMalformedBodyError(error)) {
         // The server responded but the body is unreadable: a protocol/response
@@ -339,6 +369,9 @@ export async function apiRequest(path, options = {}) {
     // Stage 7: remove the combined AbortSignal listeners only after all body
     // work has completed.
     combinedSignal.cleanup();
+    if (requestOwner) {
+      releaseExternalNavigationAwareRequestOwner(requestOwner);
+    }
   }
 
   return payload;

@@ -22,6 +22,30 @@ desktop helper build, frontend install/tests/build, `pip-audit`, `bandit`, and
 `npm audit --audit-level=high`. If the workflow changes, update the script in
 the same PR so local checks and GitHub Actions stay in lockstep.
 
+Backend dependency ranges remain human-edited in `backend/requirements.txt`
+and `backend/requirements-test.txt`. CI installs the complete Python 3.12
+resolutions in `backend/requirements.lock.txt` and
+`backend/requirements-test.lock.txt`; security tools use
+`backend/requirements-ci-tools.lock.txt`. Regenerate a lock intentionally by
+resolving the matching direct requirements with `python3 -m pip install
+--dry-run --ignore-installed --report <report.json> -r <requirements-file>`,
+reviewing every resolved version, updating the exact lock, and running fresh
+CI. Hashes are omitted because the same lock is installed on the local ARM64
+host and GitHub's x64 runner, whose wheel hashes differ. GitHub Actions and the
+local mirror must always consume the same lock files.
+
+For large final-worktree validations, the fixed-command proof runner can record
+the exact dirty-tree evidence without accepting arbitrary shell input:
+
+```bash
+.venv/bin/python scripts/elvern-final-validation-proof.py --list
+```
+
+Its report is written atomically to the ignored
+`tmp/final-validation-proof.json`. A proof is valid only for the file hashes and
+working-tree state recorded after its last command; modifying files afterward
+requires rerunning the affected checks and generating a new proof.
+
 Use the fresh CI mirror before claiming GitHub parity:
 
 ```bash

@@ -243,6 +243,65 @@ Concurrent requests for the same protected resource are asserted to collapse to
 one request in `controlCenterQueries.test.js`; the rail's first-open budget is
 seven requests in `SystemStatusRail.test.jsx`.
 
+## External navigation and connection recovery
+
+Google reconnect has one operation owner: `ProviderAuthProvider`. It creates an
+identity-bound operation intent before leaving Elvern and delegates request
+cancellation to the opaque-handle coordinator in
+`externalNavigationCoordinator.js`. The handle binds user/role identity,
+provider, operation ID, page-lifecycle generation, and a 15-minute maximum age.
+Only coordinator-owned requests can receive the typed
+`expected_external_navigation` cancellation reason. That cancellation remains
+an abort and never becomes a connectivity incident or resource error, even when
+a browser reports navigation teardown as a `TypeError` or body-stream failure.
+
+The reconnect sequence is connect request, authorization URL response,
+`preparing_external_navigation`, cancellation of owned background reads,
+`navigating_external`, and browser navigation. ProviderAuth consumes only the
+shared `PAGE_RESUME_EVENT`; raw `pageshow` and `visibilitychange` are not extra
+reconciliation owners. Reconciliation is single-flight and deduplicated by
+identity, operation ID, source, and resume generation.
+
+An operation intent is removed only after the backend reports a terminal
+`connected`, `cancelled`, `expired`, or error state. A pending operation receives
+one idempotent cancellation request after an abandoned provider navigation. If
+status or cancellation cannot be confirmed because transport is unavailable,
+the intent remains in `unknown` or `pending_confirmation` and is reconciled once
+after confirmed connectivity recovery. Logout, identity loss, or role change
+clears the old identity's coordinator state and intent.
+
+A healthy abandoned reconnect produces one neutral
+`Reconnect was not completed.` outcome and no cloud/Library invalidation. A
+successful reconnect invalidates only provider status, the Cloud & Sharing
+resource, and current-identity Library queries whose source is `cloud` or `all`.
+Account mismatch continues through the existing candidate confirmation flow;
+the currently connected account is never silently replaced.
+
+Desktop Control Center read resources share identity-scoped TanStack keys and
+external-navigation-aware request ownership. Their default focus refetch is
+disabled where the page-resume/recovery coordinator is authoritative. During
+external navigation, loaded data stays mounted and missing data retains a stable
+skeleton. On a real transport incident, the shell displays exactly one fixed,
+non-blocking notice:
+
+```text
+Connection interrupted. Elvern will retry automatically.
+```
+
+Per-card copies of that transport error and their Retry controls are suppressed.
+Confirmed recovery retries only transient resources needed by the visible tab,
+with at most two concurrent requests. A single shared Retry appears only when
+the existing startup connectivity runtime marks the incident prolonged; it
+requests one health retry and does not introduce another timer.
+
+Production browser fixtures reject every undeclared same-origin `/api/**`
+request. Failure artifacts include a sanitized request ledger, unhandled routes,
+resume generations, provider states, connectivity incident IDs, screenshots,
+diffs, and traces. OAuth state, authorization URLs, tokens, account labels,
+cookies, and secrets are never attached. The reviewed Chromium baseline uses
+the current private Meridian source and its 252px sidebar; the established
+0.5% changed-pixel and 1.5 mean-channel-delta gates remain unchanged.
+
 ## Motion and accessibility
 
 The Settings/Admin card switches the real route at the midpoint of an
@@ -381,3 +440,10 @@ overrides can be used.
 The completion report records the authoritative commands and final pass/fail
 counts. Real-device review remains required for Windows, macOS, Linux, 1024 px
 desktop overlay behavior, and phone/tablet visual parity.
+
+For a final dirty-worktree proof, run the fixed-command validator in
+`scripts/elvern-final-validation-proof.py`. It writes the ignored
+`tmp/final-validation-proof.json` after every command with HEAD, status/diff
+summaries, dependency/baseline hashes, UTC timestamps, durations, and exit
+codes. The proof is local evidence only; it does not claim that remote GitHub
+Actions validated an uncommitted working tree.

@@ -158,11 +158,12 @@ describe("SystemStatusRail", () => {
     await waitFor(() => expect(apiRequest).not.toHaveBeenCalled());
   });
 
-  test("preserves last known values and labels failed refreshes stale", async () => {
+  test("preserves last known values and labels scheduled refresh failures stale", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     render(<SystemStatusRail />);
     expect(await screen.findByText("92")).toBeInTheDocument();
     apiRequest.mockRejectedValue(new Error("offline"));
-    fireEvent(document, new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(SYSTEM_STATUS_RAIL_REFRESH_MS);
     expect((await screen.findAllByLabelText("Last known value")).length).toBeGreaterThan(0);
     expect(screen.getByText("92")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Refresh system status" })).not.toBeInTheDocument();

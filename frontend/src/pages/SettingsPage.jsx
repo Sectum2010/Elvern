@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { useOptionalProviderAuth } from "../auth/ProviderAuthContext";
@@ -12,7 +12,10 @@ import {
   formatGoogleConnectionHealthLabel,
   formatGoogleDriveSetupLabel,
 } from "../lib/cloudSyncStatus";
-import { invalidateLibraryQueries } from "../lib/libraryQueries";
+import {
+  invalidateCloudLibraryQueriesForIdentity,
+  invalidateLibraryQueries,
+} from "../lib/libraryQueries";
 import {
   BACKGROUND_PRESETS,
   DEFAULT_BACKGROUND_SETTINGS,
@@ -53,8 +56,14 @@ import {
 import {
   fetchControlCenterResource,
   invalidateControlCenterResource,
+  runControlCenterRecoveryTasks,
   setControlCenterResourceData,
 } from "../lib/controlCenterQueries.js";
+import {
+  getExternalNavigationSnapshot,
+  isExternalNavigationSuspendedForIdentity,
+  subscribeExternalNavigation,
+} from "../lib/externalNavigationCoordinator.js";
 
 const USER_SETTINGS_CHANGED_EVENT = "elvern:user-settings-changed";
 const SETTINGS_RESOURCE_KEYS = Object.freeze([
@@ -77,6 +86,7 @@ const EMPTY_RESOURCE_STATUS = Object.freeze({
   loading: false,
   loaded: false,
   error: "",
+  transient: false,
 });
 const HIDDEN_RECONCILIATION_MAX_AGE_MS = 2 * 60 * 1000;
 
@@ -1133,7 +1143,6 @@ function BackgroundResetConfirmModal({ open, pending, onCancel, onConfirm }) {
 export function SettingsPage() {
   const { user } = useAuth();
   const {
-    providerAuthControllerAvailable,
     providerAuthReconnectPending,
     providerAuthTransaction,
     acknowledgeProviderAuthOutcome,
@@ -1370,12 +1379,19 @@ export function SettingsPage() {
     user?.role,
     desktopSettingsTab,
   );
+  const externalNavigation = useSyncExternalStore(
+    subscribeExternalNavigation,
+    getExternalNavigationSnapshot,
+    getExternalNavigationSnapshot,
+  );
   const activeResourceErrors = Object.entries(resourceStatus)
     .filter(([key]) => activeResourceKeys.includes(key))
-    .filter(([, status]) => status.error)
+    .filter(([, status]) => status.error && !status.transient)
     .map(([key, status]) => ({ key, message: status.error }));
 
   currentIdentityRef.current = settingsIdentity;
+  const activeResourceKeysRef = useRef(activeResourceKeys);
+  activeResourceKeysRef.current = activeResourceKeys;
 
   const clearPendingHiddenExpiryTimer = useCallback(() => {
     if (pendingHiddenExpiryTimerRef.current !== null) {
@@ -1615,7 +1631,11 @@ export function SettingsPage() {
   }, [settingsIdentity, userSettingsQuery.data]);
 
   useEffect(() => {
-    if (userSettingsQuery.error && userSettingsQuery.error.name !== "AbortError") {
+    if (
+      userSettingsQuery.error
+      && !isAbortError(userSettingsQuery.error)
+      && !isTransientNetworkError(userSettingsQuery.error)
+    ) {
       setUserSettingsLoadError(
         userSettingsQuery.error.message || "Failed to load settings",
       );
@@ -1876,6 +1896,9 @@ export function SettingsPage() {
     resourceKey,
     { force = false, recoveryGeneration = 0 } = {},
   ) => {
+    if (showDesktopControlCenter && isExternalNavigationSuspendedForIdentity(settingsIdentity)) {
+      return { outcome: "suspended" };
+    }
     const existing = resourceRequestsRef.current.get(resourceKey);
     if (
       resourceKey === "ageGroups"
@@ -1914,7 +1937,7 @@ export function SettingsPage() {
     resourceRequestsRef.current.set(resourceKey, requestState);
     setResourceStatus((current) => ({
       ...current,
-      [resourceKey]: { loading: true, loaded: Boolean(existing?.loaded), error: "" },
+      [resourceKey]: { loading: true, loaded: Boolean(existing?.loaded), error: "", transient: false },
     }));
 
     try {
@@ -1966,17 +1989,38 @@ export function SettingsPage() {
       } else if (resourceKey === "mediaReference") {
         result = {
           outcome: "applied",
-          payload: await apiRequest("/api/admin/media-library-reference", { signal: controller.signal }),
+          payload: showDesktopControlCenter
+            ? await fetchControlCenterResource({
+              userId: user?.id,
+              role: user?.role,
+              resource: "mediaReference",
+              force,
+            })
+            : await apiRequest("/api/admin/media-library-reference", { signal: controller.signal }),
         };
       } else if (resourceKey === "posterReference") {
         result = {
           outcome: "applied",
-          payload: await apiRequest("/api/admin/poster-reference-location", { signal: controller.signal }),
+          payload: showDesktopControlCenter
+            ? await fetchControlCenterResource({
+              userId: user?.id,
+              role: user?.role,
+              resource: "posterReference",
+              force,
+            })
+            : await apiRequest("/api/admin/poster-reference-location", { signal: controller.signal }),
         };
       } else if (resourceKey === "totp") {
         result = {
           outcome: "applied",
-          payload: await apiRequest("/api/auth/totp/status", { signal: controller.signal }),
+          payload: showDesktopControlCenter
+            ? await fetchControlCenterResource({
+              userId: user?.id,
+              role: user?.role,
+              resource: "ownTotp",
+              force,
+            })
+            : await apiRequest("/api/auth/totp/status", { signal: controller.signal }),
         };
       } else {
         return;
@@ -2031,7 +2075,7 @@ export function SettingsPage() {
       });
       setResourceStatus((status) => ({
         ...status,
-        [resourceKey]: { loading: false, loaded: true, error: "" },
+        [resourceKey]: { loading: false, loaded: true, error: "", transient: false },
       }));
       return { outcome: "applied", payload };
     } catch (requestError) {
@@ -2061,6 +2105,7 @@ export function SettingsPage() {
           loading: false,
           loaded: Boolean(existing?.loaded),
           error: messageText,
+          transient,
         },
       }));
       if (transient) {
@@ -2101,6 +2146,7 @@ export function SettingsPage() {
             ...status[resourceKey],
             loading: false,
             loaded: Boolean(current.loaded || status[resourceKey]?.loaded),
+            transient: Boolean(status[resourceKey]?.transient),
           },
         }));
       }
@@ -2114,6 +2160,9 @@ export function SettingsPage() {
   ]);
 
   useEffect(() => {
+    if (externalNavigation.active && externalNavigation.identity === settingsIdentity) {
+      return;
+    }
     const resources = settingsResourcesForSection(
       activeSettingsSection,
       user?.role,
@@ -2122,15 +2171,26 @@ export function SettingsPage() {
     resources.forEach((resourceKey) => {
       void loadSettingsResource(resourceKey);
     });
-  }, [activeSettingsSection, desktopSettingsTab, loadSettingsResource, user?.role]);
+  }, [
+    activeSettingsSection,
+    desktopSettingsTab,
+    externalNavigation.active,
+    externalNavigation.identity,
+    loadSettingsResource,
+    settingsIdentity,
+    user?.role,
+  ]);
 
   useEffect(() => {
     const handleConnectivityRecovered = (event) => {
       const detail = event?.detail || {};
       const recoveredGeneration = Number(detail.generation) || 0;
+      const tasks = [];
+      const visibleResources = new Set(activeResourceKeysRef.current);
       for (const [resourceKey, request] of resourceRequestsRef.current.entries()) {
         if (
-          !request.transient
+          !visibleResources.has(resourceKey)
+          || !request.transient
           || request.identity !== settingsIdentity
           || request.lastRecoveryGeneration >= recoveredGeneration
           || (request.incidentId && request.incidentId !== Number(detail.incidentId))
@@ -2139,11 +2199,12 @@ export function SettingsPage() {
           continue;
         }
         request.lastRecoveryGeneration = recoveredGeneration;
-        void loadSettingsResource(resourceKey, {
+        tasks.push(() => loadSettingsResource(resourceKey, {
           force: true,
           recoveryGeneration: recoveredGeneration,
-        });
+        }));
       }
+      void runControlCenterRecoveryTasks(tasks);
       const pending = pendingHiddenReconciliationRef.current;
       if (
         pending
@@ -2411,39 +2472,6 @@ export function SettingsPage() {
   ]);
 
   useEffect(() => {
-    if (providerAuthControllerAvailable) {
-      return;
-    }
-    const params = new URLSearchParams(location.search);
-    if (!params.has("googleDriveStatus") && !params.has("googleDriveMessage")) {
-      return;
-    }
-    const callbackStatus = params.get("googleDriveStatus");
-    const callbackMessage = params.get("googleDriveMessage")?.trim();
-    if (callbackStatus === "connected") {
-      setMessage(callbackMessage || "Google Drive connected.");
-      setError("");
-    } else if (callbackStatus) {
-      setError(callbackMessage || "Reconnect was not completed.");
-      setMessage("");
-    }
-    params.delete("googleDriveStatus");
-    params.delete("googleDriveMessage");
-    const nextSearch = params.toString();
-    navigate(
-      `${location.pathname}${nextSearch ? `?${nextSearch}` : ""}${location.hash || ""}`,
-      { replace: true, state: location.state },
-    );
-  }, [
-    location.hash,
-    location.pathname,
-    location.search,
-    location.state,
-    navigate,
-    providerAuthControllerAvailable,
-  ]);
-
-  useEffect(() => {
     if (
       !providerAuthTransaction
       || !providerAuthTransaction.outcomeId
@@ -2455,29 +2483,32 @@ export function SettingsPage() {
     if (!["connected", "cancelled_or_incomplete", "error"].includes(transactionState)) {
       return;
     }
-    handledProviderAuthTransactionRef.current = providerAuthTransaction.outcomeId;
-    if (transactionState === "connected") {
-      if (!showDesktopControlCenter) {
-        setMessage(providerAuthTransaction.message || "Google Drive connected.");
-        setError("");
-      }
-      void invalidateLibraryQueries();
-      void loadSettingsResource("cloud", { force: true });
-      if (!showDesktopControlCenter) {
-        acknowledgeProviderAuthOutcome(providerAuthTransaction.outcomeId);
-      }
+    if (showDesktopControlCenter) {
       return;
     }
-    if (!showDesktopControlCenter) {
-      setError(providerAuthTransaction.message || "Reconnect was not completed.");
-      setMessage("");
+    handledProviderAuthTransactionRef.current = providerAuthTransaction.outcomeId;
+    if (transactionState === "connected") {
+      setMessage(providerAuthTransaction.message || "Google Drive connected.");
+      setError("");
+      void invalidateCloudLibraryQueriesForIdentity({
+        userId: user?.id,
+        role: user?.role,
+        refetchType: "none",
+      });
+      void loadSettingsResource("cloud", { force: true });
       acknowledgeProviderAuthOutcome(providerAuthTransaction.outcomeId);
+      return;
     }
+    setError(providerAuthTransaction.message || "Reconnect was not completed.");
+    setMessage("");
+    acknowledgeProviderAuthOutcome(providerAuthTransaction.outcomeId);
   }, [
     acknowledgeProviderAuthOutcome,
     loadSettingsResource,
     providerAuthTransaction,
     showDesktopControlCenter,
+    user?.id,
+    user?.role,
   ]);
 
   function applyUserSettingsPayload(payload) {

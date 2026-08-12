@@ -157,6 +157,24 @@ export function invalidateLibraryQueriesForIdentity({ userId, role, refetchType 
 }
 
 
+export function invalidateCloudLibraryQueriesForIdentity({ userId, role, refetchType = "active" } = {}) {
+  const identity = normalizeLibraryProtectedIdentity({ userId, role });
+  if (!identity) {
+    return Promise.resolve();
+  }
+  return queryClient.invalidateQueries({
+    predicate: (query) => {
+      if (!matchesLibraryQueryProtectedIdentity(query.queryKey, identity)) {
+        return false;
+      }
+      const source = normalizeString(query.queryKey[2]?.source, "all").toLowerCase();
+      return source === "all" || source === "cloud";
+    },
+    refetchType,
+  });
+}
+
+
 export function markLibraryQueriesStale({ refetchType = "none" } = {}) {
   return invalidateLibraryQueries({ refetchType });
 }

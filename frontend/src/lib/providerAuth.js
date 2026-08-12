@@ -146,7 +146,7 @@ export function createProviderAuthOperationId() {
 
 export function saveProviderAuthIntent(intent) {
   if (typeof window === "undefined" || !intent || typeof intent !== "object") {
-    return;
+    return false;
   }
   try {
     window.sessionStorage.setItem(
@@ -156,8 +156,9 @@ export function saveProviderAuthIntent(intent) {
         savedAt: Date.now(),
       }),
     );
+    return true;
   } catch {
-    // Ignore sessionStorage failures and let the current action fail visibly.
+    return false;
   }
 }
 
@@ -173,6 +174,7 @@ export function readProviderAuthIntent({ identity = "" } = {}) {
     }
     const payload = JSON.parse(raw);
     if (!payload || typeof payload !== "object") {
+      clearProviderAuthIntent();
       return null;
     }
     if (Date.now() - Number(payload.savedAt || 0) > PROVIDER_AUTH_INTENT_MAX_AGE_MS) {
@@ -185,6 +187,7 @@ export function readProviderAuthIntent({ identity = "" } = {}) {
     }
     return payload;
   } catch {
+    clearProviderAuthIntent();
     return null;
   }
 }
@@ -219,8 +222,13 @@ export async function startGoogleDriveReconnect({ operationId, returnPath } = {}
   if (!payload?.authorization_url) {
     throw new Error("Google Drive reconnect did not return an authorization URL.");
   }
-  if (typeof window !== "undefined") {
-    window.location.assign(payload.authorization_url);
-  }
   return payload;
+}
+
+
+export function navigateToProviderAuthorization(authorizationUrl) {
+  if (typeof window === "undefined") {
+    throw new Error("Google Drive reconnect navigation is unavailable.");
+  }
+  window.location.assign(authorizationUrl);
 }

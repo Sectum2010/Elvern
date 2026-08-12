@@ -1,9 +1,11 @@
 import { apiRequest } from "./api.js";
 import { queryClient } from "./queryClient.js";
+import { createExternalNavigationAwareRequestOwner } from "./externalNavigationCoordinator.js";
 
 export const CONTROL_CENTER_QUERY_PREFIX = Object.freeze(["control-center", "v1"]);
 export const CONTROL_CENTER_RESOURCE_STALE_TIME_MS = 30_000;
 export const CONTROL_CENTER_RESOURCE_GC_TIME_MS = 4 * 60 * 60 * 1000;
+export const CONTROL_CENTER_RECOVERY_MAX_CONCURRENCY = 2;
 
 const STATIC_RESOURCE_PATHS = Object.freeze({
   system: "/api/system/status",
@@ -18,6 +20,8 @@ const STATIC_RESOURCE_PATHS = Object.freeze({
   backups: "/api/admin/backups",
   cloudLibraries: "/api/cloud-libraries",
   googleDriveSetup: "/api/admin/google-drive-setup",
+  mediaReference: "/api/admin/media-library-reference",
+  posterReference: "/api/admin/poster-reference-location",
   ageGroups: "/api/library/age-groups",
   hiddenTitles: "/api/settings/hidden-titles",
   userSettings: "/api/user-settings",
@@ -70,16 +74,37 @@ export function fetchControlCenterResource({
   force = false,
 } = {}) {
   const queryKey = buildControlCenterResourceQueryKey({ userId, role, resource, platform, deviceId });
+  const identity = `${String(userId ?? "").trim()}:${normalize(role)}`;
   return queryClient.fetchQuery({
     queryKey,
-    queryFn: ({ signal }) => apiRequest(
-      controlCenterResourcePath({ resource, platform, deviceId }),
-      { signal, abortOnPageHide: true },
-    ),
+    queryFn: ({ signal }) => {
+      const requestOwner = createExternalNavigationAwareRequestOwner({ identity, resource });
+      return apiRequest(
+        controlCenterResourcePath({ resource, platform, deviceId }),
+        { signal, requestOwner, abortOnPageHide: true },
+      );
+    },
     staleTime: force ? 0 : CONTROL_CENTER_RESOURCE_STALE_TIME_MS,
     gcTime: CONTROL_CENTER_RESOURCE_GC_TIME_MS,
     retry: false,
   });
+}
+
+
+export async function runControlCenterRecoveryTasks(tasks, {
+  maxConcurrency = CONTROL_CENTER_RECOVERY_MAX_CONCURRENCY,
+} = {}) {
+  const queue = Array.isArray(tasks) ? tasks.filter((task) => typeof task === "function") : [];
+  const workerCount = Math.min(Math.max(1, Number(maxConcurrency) || 1), queue.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < queue.length) {
+      const taskIndex = nextIndex;
+      nextIndex += 1;
+      await queue[taskIndex]();
+    }
+  }
+  await Promise.all(Array.from({ length: workerCount }, worker));
 }
 
 export function setControlCenterResourceData({

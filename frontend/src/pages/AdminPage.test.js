@@ -407,11 +407,27 @@ describe("AdminPage desktop Control Center contracts", () => {
   test("keeps active/background/pending status motion distinct and reduced-motion safe", () => {
     const styles = readControlCenterStyles();
 
-    expect(styles).toContain(".user-status-indicator--green { animation: merUserActive");
-    expect(styles).toContain(".user-status-indicator--yellow { animation: merUserBackground");
-    expect(styles).toContain(".user-status-indicator--orange { animation: merUserPending");
-    expect(styles).toMatch(/\.user-status-indicator--grey,[\s\S]*\.user-status-indicator--red\s*\{ animation: none; \}/);
+    expect(styles).toContain(".user-status-indicator--green { animation: merOverviewUserActive");
+    expect(styles).toContain(".user-status-indicator--yellow { animation: merOverviewUserBackground");
+    expect(styles).toContain(".user-status-indicator--orange { animation: merOverviewUserPending");
+    expect(styles).toMatch(/@keyframes merOverviewUserActive[\s\S]*box-shadow: 0 0 0 4\.05px/);
+    expect(styles).toMatch(/@keyframes merOverviewUserBackground[\s\S]*transform: scale\(0\.93\)/);
+    expect(styles).toMatch(/@keyframes merOverviewUserPending[\s\S]*box-shadow: 0 0 0 3\.16px/);
+    expect(styles).toMatch(/\.user-status-indicator--grey,[\s\S]*\.user-status-indicator--red\s*\{[\s\S]*inline-size: 7\.2px;[\s\S]*block-size: 7\.2px;/);
+    expect(styles).toContain(".meridian-user-actions__status-dot--active {\n  animation: merUserActive");
+    expect(styles).toMatch(/\.user-status-indicator--grey,[\s\S]*\.user-status-indicator--red\s*\{[\s\S]*animation: none;/);
     expect(styles).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.meridian-users-card \.user-status-indicator\s*\{[\s\S]*animation: none !important;/);
+  });
+
+  test("keeps Control Center hover, account-action, and compact modal styles locally scoped", () => {
+    const styles = readControlCenterStyles();
+
+    expect(styles).toContain("--mer-account-menu-hover:");
+    expect(styles).toContain("background: var(--mer-account-menu-hover)");
+    expect(styles).toContain(".meridian-users-card .admin-user-row__priority .meridian-account-enable-button");
+    expect(styles).toContain(".meridian-user-actions__account-actions .ghost-button");
+    expect(styles).toContain(".meridian-user-actions__panel--assistant .assistant-access-toggle--modal strong");
+    expect(styles).toContain(".meridian-user-actions__panel--downloads .settings-toggle small");
   });
 
   test("keeps the inline Invite age flow and dedicated Password Help resource states", () => {

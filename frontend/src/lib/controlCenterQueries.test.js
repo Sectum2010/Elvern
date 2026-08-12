@@ -5,6 +5,7 @@ import {
   buildControlCenterResourceQueryKey,
   controlCenterResourcePath,
   fetchControlCenterResource,
+  runControlCenterRecoveryTasks,
 } from "./controlCenterQueries.js";
 import { clearProtectedQueryCache, queryClient } from "./queryClient.js";
 
@@ -73,5 +74,33 @@ describe("Control Center resource cache", () => {
     queryClient.setQueryData(key, { total_media_items: 12 });
     clearProtectedQueryCache();
     expect(queryClient.getQueryData(key)).toBeUndefined();
+  });
+
+  test("bounds visible-resource recovery to two concurrent requests", async () => {
+    let active = 0;
+    let maximum = 0;
+    let started = 0;
+    const releases = [];
+    const tasks = Array.from({ length: 5 }, () => () => new Promise((resolve) => {
+      started += 1;
+      active += 1;
+      maximum = Math.max(maximum, active);
+      releases.push(() => {
+        active -= 1;
+        resolve();
+      });
+    }));
+
+    const recovery = runControlCenterRecoveryTasks(tasks);
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    while (started < tasks.length) {
+      const previousStarted = started;
+      releases.shift()();
+      await vi.waitFor(() => expect(started).toBe(previousStarted + 1));
+    }
+    while (releases.length) releases.shift()();
+    await recovery;
+
+    expect(maximum).toBe(2);
   });
 });

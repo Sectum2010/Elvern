@@ -52,19 +52,12 @@ import { DETAIL_PERFORMANCE_MARKS, markDetailPerformance } from "../lib/detailPe
 import { resolveUserSettings, useUserSettingsQuery } from "../lib/userSettingsQueries";
 import { getCloudReconnectPrompt, isCloudReconnectRequired } from "../lib/cloudSyncStatus";
 import {
-  clearProviderAuthIntent,
-  getGoogleDriveStatusFromLocation,
   getProviderAuthPassiveNoticeMessage,
   getProviderAuthRequirement,
   PROVIDER_RECONNECT_CANCELLED_MESSAGE,
-  PROVIDER_RECONNECT_PENDING_RESET_MS,
-  readProviderAuthIntent,
-  saveProviderAuthIntent,
   shouldShowProviderAuthActionModal,
   shouldGuardGoogleDriveAction,
   shouldUseProviderAuthPassiveNotice,
-  shouldResetProviderReconnectPending,
-  startGoogleDriveReconnect,
 } from "../lib/providerAuth";
 import {
   buildActivePlaybackConflictPrompt,
@@ -74,7 +67,6 @@ import {
   getConnectivityIncidentRecoveryGeneration,
   subscribeConnectivityRecovery,
 } from "../lib/connectivityRecoveryStore";
-import { PAGE_RESUME_EVENT } from "../lib/pageResume";
 
 
 const SEEK_HEADROOM_SECONDS = 2;
@@ -588,13 +580,16 @@ export function DetailPage() {
   const userSettingsQuery = useUserSettingsQuery(user);
   const userSettings = resolveUserSettings(userSettingsQuery.data);
   const {
+    acknowledgeProviderAuthOutcome,
     providerAuthRequirement,
+    providerAuthTransaction,
     showProviderAuthPrompt,
     refreshProviderAuthStatus,
+    startProviderReconnect,
   } = useProviderAuth();
   const providerReconnectContinuationRef = useRef(null);
-  const providerReconnectPendingRef = useRef(false);
   const providerReconnectModalRef = useRef(null);
+  const handledProviderReconnectOutcomeRef = useRef("");
   const detailScrollResetItemRef = useRef(null);
   const libraryReturnPreparedRef = useRef(false);
   const cachedDetailPreview = useMemo(() => findLibraryItemDetailPreview({
@@ -612,7 +607,6 @@ export function DetailPage() {
   const [vlcLaunchMessage, setVlcLaunchMessage] = useState("");
   const [vlcLaunchError, setVlcLaunchError] = useState("");
   const [providerReconnectPending, setProviderReconnectPending] = useState(false);
-  const [providerReconnectResult, setProviderReconnectResult] = useState(null);
   const [providerReconnectModal, setProviderReconnectModal] = useState({
     open: false,
     provider: "",
@@ -733,10 +727,6 @@ export function DetailPage() {
   }, [itemId]);
 
   useEffect(() => {
-    providerReconnectPendingRef.current = providerReconnectPending;
-  }, [providerReconnectPending]);
-
-  useEffect(() => {
     providerReconnectModalRef.current = providerReconnectModal;
   }, [providerReconnectModal]);
 
@@ -748,59 +738,6 @@ export function DetailPage() {
     window.clearInterval(downloadStallTimerRef.current);
     window.clearTimeout(downloadHandoffTimerRef.current);
   }, []);
-
-  function resetLocalProviderReconnectPendingAfterReturn() {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const googleDriveStatus = getGoogleDriveStatusFromLocation(window.location);
-    if (googleDriveStatus === "connected") {
-      providerReconnectPendingRef.current = false;
-      setProviderReconnectPending(false);
-      return;
-    }
-    const visibilityState = typeof document === "undefined"
-      ? "visible"
-      : document.visibilityState;
-    if (!shouldResetProviderReconnectPending({
-      reconnectPending: providerReconnectPendingRef.current,
-      googleDriveStatus,
-      visibilityState,
-    })) {
-      return;
-    }
-    providerReconnectPendingRef.current = false;
-    setProviderReconnectPending(false);
-    if (providerReconnectModalRef.current?.open) {
-      setProviderReconnectModal((current) => ({
-        ...current,
-        errorMessage: PROVIDER_RECONNECT_CANCELLED_MESSAGE,
-      }));
-    }
-  }
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return undefined;
-    }
-    const handlePageReturn = () => resetLocalProviderReconnectPendingAfterReturn();
-    window.addEventListener(PAGE_RESUME_EVENT, handlePageReturn);
-    return () => {
-      window.removeEventListener(PAGE_RESUME_EVENT, handlePageReturn);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!providerReconnectPending || typeof window === "undefined") {
-      return undefined;
-    }
-    const resetTimer = window.setTimeout(() => {
-      resetLocalProviderReconnectPendingAfterReturn();
-    }, PROVIDER_RECONNECT_PENDING_RESET_MS);
-    return () => {
-      window.clearTimeout(resetTimer);
-    };
-  }, [providerReconnectPending]);
 
   useEffect(() => {
     if (typeof document === "undefined") {
@@ -1035,8 +972,6 @@ export function DetailPage() {
 
   function closeProviderReconnectModal() {
     providerReconnectContinuationRef.current = null;
-    clearProviderAuthIntent();
-    providerReconnectPendingRef.current = false;
     setProviderReconnectModal({
       open: false,
       provider: "",
@@ -1292,26 +1227,6 @@ export function DetailPage() {
   }, [iosExternalAppCallback, itemId]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const currentUrl = new URL(window.location.href);
-    const statusValue = currentUrl.searchParams.get("googleDriveStatus");
-    if (!statusValue) {
-      return;
-    }
-    const statusMessage = currentUrl.searchParams.get("googleDriveMessage") || "";
-    setProviderReconnectResult({
-      provider: "google_drive",
-      status: statusValue,
-      message: statusMessage,
-    });
-    currentUrl.searchParams.delete("googleDriveStatus");
-    currentUrl.searchParams.delete("googleDriveMessage");
-    window.history.replaceState({}, "", `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
-  }, [itemId]);
-
-  useEffect(() => {
     let cancelled = false;
 
     async function loadMediaLibraryReferenceInfo() {
@@ -1361,23 +1276,18 @@ export function DetailPage() {
   }, [user?.id, user?.role, userSettingsQuery.data, userSettingsQuery.error]);
 
   useEffect(() => {
-    if (!providerReconnectResult) {
-      return;
-    }
-    const pendingIntent = readProviderAuthIntent();
+    const outcomeId = providerAuthTransaction?.outcomeId;
+    const operationContext = providerAuthTransaction?.operationContext;
     if (
-      !pendingIntent
-      || pendingIntent.provider !== "google_drive"
-      || Number(pendingIntent.mediaItemId ?? pendingIntent.itemId) !== Number(itemId)
+      !outcomeId
+      || handledProviderReconnectOutcomeRef.current === outcomeId
+      || Number(operationContext?.mediaItemId) !== Number(itemId)
     ) {
-      providerReconnectPendingRef.current = false;
-      setProviderReconnectPending(false);
-      setProviderReconnectResult(null);
       return;
     }
-    const actionType = String(pendingIntent.actionType || "");
-    if (providerReconnectResult.status !== "connected") {
-      providerReconnectPendingRef.current = false;
+    handledProviderReconnectOutcomeRef.current = outcomeId;
+    const actionType = String(operationContext.actionType || "");
+    if (providerAuthTransaction.state !== "connected") {
       setProviderReconnectPending(false);
       openProviderReconnectModal(
         {
@@ -1387,12 +1297,12 @@ export function DetailPage() {
         },
         actionType,
         {
-          errorMessage: providerReconnectResult.message || "Google Drive reconnect was cancelled or failed.",
+          errorMessage: providerAuthTransaction.message || PROVIDER_RECONNECT_CANCELLED_MESSAGE,
           secondaryLabel: PROVIDER_RECONNECT_CONTINUE_LABEL,
           onSecondaryAction: () => retrySavedProviderAction(actionType),
         },
       );
-      setProviderReconnectResult(null);
+      acknowledgeProviderAuthOutcome(outcomeId);
       return;
     }
     if (
@@ -1401,12 +1311,17 @@ export function DetailPage() {
     ) {
       return;
     }
-    clearProviderAuthIntent();
     closeProviderReconnectModal();
     void loadCloudLibrariesHealth();
-    setProviderReconnectResult(null);
     retrySavedProviderAction(actionType);
-  }, [desktopPlayback, item, itemId, providerReconnectResult]);
+    acknowledgeProviderAuthOutcome(outcomeId);
+  }, [
+    acknowledgeProviderAuthOutcome,
+    desktopPlayback,
+    item,
+    itemId,
+    providerAuthTransaction,
+  ]);
 
   useEffect(() => {
     if (error || playbackError) {
@@ -2026,18 +1941,25 @@ export function DetailPage() {
     currentUrl.searchParams.delete("googleDriveStatus");
     currentUrl.searchParams.delete("googleDriveMessage");
     const returnPath = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`;
-    saveProviderAuthIntent({
-      provider: "google_drive",
-      actionType: providerReconnectModal.actionType || PROVIDER_ACTION_DESKTOP_VLC,
-      mediaItemId: Number(item.id),
-      platform: desktopPlayback?.platform || desktopPlatform || null,
-      returnPath,
-    });
-    providerReconnectPendingRef.current = true;
     try {
-      await startGoogleDriveReconnect({ returnPath });
+      const payload = await startProviderReconnect({
+        allowWithoutRequirement: true,
+        returnPath,
+        intentMetadata: {
+          actionType: providerReconnectModal.actionType || PROVIDER_ACTION_DESKTOP_VLC,
+          mediaItemId: Number(item.id),
+          platform: desktopPlayback?.platform || desktopPlatform || null,
+        },
+      });
+      if (payload) {
+        return;
+      }
+      setProviderReconnectPending(false);
+      setProviderReconnectModal((current) => ({
+        ...current,
+        errorMessage: "Failed to start Google Drive reconnect.",
+      }));
     } catch (requestError) {
-      providerReconnectPendingRef.current = false;
       setProviderReconnectPending(false);
       setProviderReconnectModal((current) => ({
         ...current,

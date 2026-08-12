@@ -4,6 +4,7 @@ import {
   ADMIN_BACKUP_EVENT,
   ADMIN_BACKUP_STREAM_STATUS_EVENT,
 } from "../lib/adminEvents.js";
+import { MeridianScanIcon } from "./meridian/MeridianScanIcon.jsx";
 import { NonLoginSecretInput } from "./NonLoginSecretInput";
 
 const CHECKPOINT_LIMIT = 4;
@@ -134,7 +135,6 @@ export function RecoveryPanel({ identityKey = "anonymous", onToast }) {
   const [phase, setPhase] = useState("create");
   const [keySource, setKeySource] = useState("auto");
   const [passphrase, setPassphrase] = useState("");
-  const [passphraseConfirmation, setPassphraseConfirmation] = useState("");
   const [catalog, setCatalog] = useState([]);
   const [backupsDirectory, setBackupsDirectory] = useState("backups");
   const [catalogState, setCatalogState] = useState({ loading: true, loaded: false, error: "" });
@@ -421,7 +421,6 @@ export function RecoveryPanel({ identityKey = "anonymous", onToast }) {
     completionHandledRef.current = job.id;
     setNewCheckpointId(job.checkpoint_id);
     setPassphrase("");
-    setPassphraseConfirmation("");
     loadCatalog({ preferredId: job.checkpoint_id }).then(() => setPhase("checkpoints"));
     onToast?.({ tone: "success", text: "Encrypted backup checkpoint created." });
   }, [job, loadCatalog, onToast]);
@@ -502,10 +501,6 @@ export function RecoveryPanel({ identityKey = "anonymous", onToast }) {
         setResult({ mode: "", payload: null, error: "Use a passphrase between 12 and 1024 characters." });
         return;
       }
-      if (passphrase !== passphraseConfirmation) {
-        setResult({ mode: "", payload: null, error: "Passphrases do not match." });
-        return;
-      }
     }
     if (!createIntentRef.current.idempotencyKey) {
       createIntentRef.current.idempotencyKey = crypto.randomUUID();
@@ -547,7 +542,6 @@ export function RecoveryPanel({ identityKey = "anonymous", onToast }) {
       if (isRequestAbort(error)) return;
       if (errorCode(error) === "recent_auth_required") {
         setPassphrase("");
-        setPassphraseConfirmation("");
         createIntentRef.current.pending = false;
         await runWithRecentAuth({ ...intent, reenterPassphrase: true });
         return;
@@ -558,7 +552,6 @@ export function RecoveryPanel({ identityKey = "anonymous", onToast }) {
       setResult({ mode: "", payload: null, error: error.message || "Backup creation could not start." });
     } finally {
       setPassphrase("");
-      setPassphraseConfirmation("");
       createIntentRef.current.pending = false;
       setActionPending("");
     }
@@ -734,25 +727,29 @@ export function RecoveryPanel({ identityKey = "anonymous", onToast }) {
         <div className="meridian-recovery__stage">
         {phase === "create" ? (
           <div className="meridian-recovery__phase" key="create">
-            <p className="meridian-recovery__label">ENCRYPTION KEY</p>
-            <div className="meridian-recovery__segments" role="group" aria-label="Backup encryption key">
-              <button className={keySource === "auto" ? "is-active" : ""} onClick={() => setKeySource("auto")} type="button">Auto key</button>
-              <button className={keySource === "passphrase" ? "is-active" : ""} onClick={() => setKeySource("passphrase")} type="button">Manual passphrase</button>
+            <div className="meridian-recovery__key-controls">
+              <div>
+                <p className="meridian-recovery__label">ENCRYPTION KEY</p>
+                <div className="meridian-recovery__segments" role="group" aria-label="Backup encryption key">
+                  <button className={keySource === "auto" ? "is-active" : ""} onClick={() => setKeySource("auto")} type="button">Auto key</button>
+                  <button className={keySource === "passphrase" ? "is-active" : ""} onClick={() => setKeySource("passphrase")} type="button">Manual passphrase</button>
+                </div>
+              </div>
+              {keySource === "passphrase" ? (
+                <div className="meridian-recovery__manual-passphrase">
+                  <p className="meridian-recovery__label">PASSPHRASE</p>
+                  <NonLoginSecretInput autoComplete="new-password" onChange={(event) => setPassphrase(event.target.value)} placeholder="Enter a strong passphrase" purpose="recovery-create-passphrase" value={passphrase} />
+                </div>
+              ) : null}
             </div>
             <p className="meridian-recovery__note">
               {keySource === "auto"
                 ? "Convenient server-local rollback protection using Elvern’s independent backup keyring."
                 : "Recommended for long-term or off-host recovery. Elvern never stores the passphrase."}
             </p>
-            {keySource === "passphrase" ? (
-              <div className="meridian-recovery__passphrases">
-                <NonLoginSecretInput autoComplete="new-password" onChange={(event) => setPassphrase(event.target.value)} placeholder="Passphrase" purpose="recovery-create-passphrase" value={passphrase} />
-                <NonLoginSecretInput autoComplete="new-password" onChange={(event) => setPassphraseConfirmation(event.target.value)} placeholder="Confirm passphrase" purpose="recovery-create-passphrase-confirm" value={passphraseConfirmation} />
-              </div>
-            ) : null}
             <div className="meridian-recovery__actions">
-              <button className="primary-button" disabled={running || createIntentRef.current.pending || actionPending === "create" || recentAuthState.checking} onClick={createBackup} type="button">Create encrypted backup</button>
-              <button className="ghost-button" disabled={catalogState.loading} onClick={() => { loadCatalog(); loadAuditWarnings(); }} type="button">{catalogState.loading ? "Refreshing…" : "Refresh"}</button>
+              <button className="primary-button meridian-recovery__create-button" disabled={running || createIntentRef.current.pending || actionPending === "create" || recentAuthState.checking} onClick={createBackup} type="button"><MeridianScanIcon />Create encrypted backup</button>
+              <button className="ghost-button meridian-recovery__refresh-button" disabled={catalogState.loading} onClick={() => { loadCatalog(); loadAuditWarnings(); }} type="button"><MeridianScanIcon spinning={catalogState.loading} />Refresh</button>
             </div>
             {job ? (
               <div className={`meridian-recovery__terminal${job.state === "failed" || job.state === "interrupted" ? " is-error" : ""}`}>

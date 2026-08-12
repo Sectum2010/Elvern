@@ -17,6 +17,10 @@ KEY_BYTES = 32
 KEYRING_LOCK_TIMEOUT_SECONDS = 5.0
 KEYRING_STALE_LOCK_SECONDS = 30.0
 
+_open_directory = os.open
+_fsync_descriptor = os.fsync
+_close_descriptor = os.close
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -25,6 +29,22 @@ def _utcnow_iso() -> str:
 def _set_private_permissions(path: Path, *, directory: bool) -> None:
     if os.name != "nt":
         os.chmod(path, 0o700 if directory else 0o600)
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    """Best-effort directory durability without weakening the atomic file write."""
+    try:
+        directory_fd = _open_directory(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        try:
+            _fsync_descriptor(directory_fd)
+        except OSError:
+            # Directory fsync is unsupported on some Windows/filesystem combinations.
+            pass
+    finally:
+        _close_descriptor(directory_fd)
 
 
 @dataclass(frozen=True)
@@ -162,19 +182,7 @@ class BackupKeyringService:
                 os.fsync(handle.fileno())
             os.replace(temporary_path, self.path)
             _set_private_permissions(self.path, directory=False)
-            try:
-                directory_fd = os.open(self.path.parent, os.O_RDONLY)
-            except OSError:
-                directory_fd = None
-            if directory_fd is not None:
-                try:
-                    try:
-                        os.fsync(directory_fd)
-                    except OSError:
-                        # Directory fsync is unsupported on some Windows/filesystem combinations.
-                        pass
-                finally:
-                    os.close(directory_fd)
+            _fsync_parent_directory(self.path.parent)
         finally:
             if temporary_path is not None and temporary_path.exists():
                 temporary_path.unlink(missing_ok=True)

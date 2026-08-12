@@ -11,7 +11,7 @@ import {
   Shield,
   Users,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext.jsx";
@@ -23,7 +23,17 @@ import {
 import { useControlCenterSession } from "./ControlCenterSessionContext.jsx";
 import { SystemStatusRail } from "./SystemStatusRail.jsx";
 import { applyControlCenterPaint } from "../lib/controlCenterPaint.js";
-import { invalidateLibraryQueries } from "../lib/libraryQueries.js";
+import { invalidateCloudLibraryQueriesForIdentity } from "../lib/libraryQueries.js";
+import {
+  getConnectivityRecoverySnapshot,
+  requestConnectivityManualRetry,
+  subscribeConnectivityRecovery,
+} from "../lib/connectivityRecoveryStore.js";
+import {
+  getExternalNavigationSnapshot,
+  subscribeExternalNavigation,
+} from "../lib/externalNavigationCoordinator.js";
+import { invalidateControlCenterResource } from "../lib/controlCenterQueries.js";
 import {
   canAccessAssistant,
   resolveAssistantNavigationTarget,
@@ -128,6 +138,17 @@ export function DesktopControlCenterLayout() {
   const [providerOutcomeToast, setProviderOutcomeToast] = useState(null);
   const providerOutcomeTimerRef = useRef(0);
   const assistantTarget = resolveAssistantNavigationTarget(user);
+  const connectivity = useSyncExternalStore(
+    subscribeConnectivityRecovery,
+    getConnectivityRecoverySnapshot,
+    getConnectivityRecoverySnapshot,
+  );
+  const externalNavigation = useSyncExternalStore(
+    subscribeExternalNavigation,
+    getExternalNavigationSnapshot,
+    getExternalNavigationSnapshot,
+  );
+  const controlCenterIdentity = `${String(user?.id ?? "")}:${String(user?.role || "").trim().toLowerCase()}`;
 
   useEffect(() => () => window.clearTimeout(switchTimerRef.current), []);
 
@@ -143,11 +164,20 @@ export function DesktopControlCenterLayout() {
       return;
     }
     setProviderOutcomeToast({
-      tone: state === "connected" ? "success" : "error",
+      tone: state === "error" ? "error" : state === "connected" ? "success" : "neutral",
       text: providerAuthTransaction.message || (state === "connected" ? "Google Drive connected." : "Reconnect was not completed."),
     });
     if (state === "connected") {
-      void invalidateLibraryQueries();
+      void invalidateControlCenterResource({
+        userId: user?.id,
+        role: user?.role,
+        resource: "cloudLibraries",
+      });
+      void invalidateCloudLibraryQueriesForIdentity({
+        userId: user?.id,
+        role: user?.role,
+        refetchType: "none",
+      });
     }
     acknowledgeProviderAuthOutcome(outcomeId);
     window.clearTimeout(providerOutcomeTimerRef.current);
@@ -250,7 +280,9 @@ export function DesktopControlCenterLayout() {
       data-control-center-area={area}
       data-control-center-tab={tab}
       data-control-center-theme={theme}
+      data-connectivity-incident-id={connectivity.active ? connectivity.activeIncidentId : ""}
       data-meridian-theme={theme}
+      data-provider-auth-state={providerAuthTransaction?.state || "idle"}
       data-visual-landmark="control-center-root"
     >
       <aside className="meridian-sidebar" data-visual-landmark="sidebar">
@@ -373,6 +405,20 @@ export function DesktopControlCenterLayout() {
           role="status"
         >
           {providerOutcomeToast.text}
+        </div>
+      ) : null}
+
+      {connectivity.active && !(externalNavigation.active && externalNavigation.identity === controlCenterIdentity) ? (
+        <div
+          aria-live="polite"
+          className="meridian-connectivity-notice"
+          data-incident-id={connectivity.activeIncidentId}
+          role="status"
+        >
+          <span>Connection interrupted. Elvern will retry automatically.</span>
+          {connectivity.prolonged ? (
+            <button onClick={requestConnectivityManualRetry} type="button">Retry</button>
+          ) : null}
         </div>
       ) : null}
 

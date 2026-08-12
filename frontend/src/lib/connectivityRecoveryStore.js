@@ -1,4 +1,5 @@
 export const CONNECTIVITY_RECOVERED_EVENT = "elvern:connectivity-recovered";
+export const CONNECTIVITY_MANUAL_RETRY_EVENT = "elvern:connectivity-manual-retry";
 
 const MAX_RECOVERED_INCIDENTS = 64;
 
@@ -11,6 +12,7 @@ let snapshot = {
   latestRecoveredFailureId: 0,
   latestRecoveredIncidentId: 0,
   latestRecoveryGeneration: 0,
+  prolonged: false,
 };
 const listeners = new Set();
 const incidents = new Map();
@@ -43,6 +45,7 @@ export function registerConnectivityFailure() {
     incidentId,
     firstFailureId: existing?.firstFailureId || failureId,
     latestFailureId: failureId,
+    prolonged: false,
     active: true,
     recovered: false,
     recoveryGeneration: 0,
@@ -83,6 +86,7 @@ export function publishConnectivityRecovery({
     latestRecoveredFailureId: normalizedFailureId,
     latestRecoveredIncidentId: incidentId,
     latestRecoveryGeneration: recoveryGeneration,
+    prolonged: false,
   };
   const activeIncident = incidents.get(incidentId);
   rememberIncident({
@@ -165,6 +169,25 @@ export function subscribeConnectivityRecovery(listener) {
 }
 
 
+export function setConnectivityIncidentProlonged(prolonged) {
+  const nextValue = snapshot.active && prolonged === true;
+  if (snapshot.prolonged === nextValue) {
+    return;
+  }
+  snapshot = { ...snapshot, prolonged: nextValue };
+  emit();
+}
+
+
+export function requestConnectivityManualRetry() {
+  if (typeof window === "undefined" || typeof window.dispatchEvent !== "function") {
+    return false;
+  }
+  window.dispatchEvent(new CustomEvent(CONNECTIVITY_MANUAL_RETRY_EVENT));
+  return true;
+}
+
+
 export function resetConnectivityRecoveryStoreForTests() {
   incidentSequence = 0;
   recoveryGeneration = 0;
@@ -175,6 +198,7 @@ export function resetConnectivityRecoveryStoreForTests() {
     latestRecoveredFailureId: 0,
     latestRecoveredIncidentId: 0,
     latestRecoveryGeneration: 0,
+    prolonged: false,
   };
   incidents.clear();
   emit();

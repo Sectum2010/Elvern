@@ -7,6 +7,10 @@ import { getOrCreateDeviceId } from "../lib/device.js";
 import { detectClientPlatform } from "../lib/platformDetection.js";
 import { queryClient } from "../lib/queryClient.js";
 import {
+  createExternalNavigationAwareRequestOwner,
+  isExternalNavigationSuspendedForIdentity,
+} from "../lib/externalNavigationCoordinator.js";
+import {
   buildUserSettingsQueryKey,
   USER_SETTINGS_QUERY_GC_TIME_MS,
   USER_SETTINGS_QUERY_STALE_TIME_MS,
@@ -95,9 +99,20 @@ export function buildSystemStatusRailRows({ payloads, platform, deviceId }) {
 }
 
 async function fetchRailUserSettings(user, force) {
+  const identity = `${String(user?.id ?? "").trim()}:${String(user?.role || "").trim().toLowerCase()}`;
   return queryClient.fetchQuery({
     queryKey: buildUserSettingsQueryKey({ userId: user?.id, role: user?.role }),
-    queryFn: ({ signal }) => apiRequest("/api/user-settings", { signal, abortOnPageHide: true }),
+    queryFn: ({ signal }) => {
+      const requestOwner = createExternalNavigationAwareRequestOwner({
+        identity,
+        resource: "userSettings",
+      });
+      return apiRequest("/api/user-settings", {
+        signal,
+        requestOwner,
+        abortOnPageHide: true,
+      });
+    },
     staleTime: force ? 0 : USER_SETTINGS_QUERY_STALE_TIME_MS,
     gcTime: USER_SETTINGS_QUERY_GC_TIME_MS,
     retry: false,
@@ -117,6 +132,8 @@ export function SystemStatusRail() {
 
   const load = useCallback(async ({ force = false } = {}) => {
     if (!statusRailOpen || user?.role !== "admin" || inFlightRef.current) return;
+    const identity = `${String(user?.id ?? "").trim()}:${String(user?.role || "").trim().toLowerCase()}`;
+    if (isExternalNavigationSuspendedForIdentity(identity)) return;
     inFlightRef.current = true;
     const generation = generationRef.current + 1;
     generationRef.current = generation;
@@ -168,13 +185,8 @@ export function SystemStatusRail() {
     const intervalId = window.setInterval(() => {
       if (document.visibilityState === "visible") void load({ force: true });
     }, SYSTEM_STATUS_RAIL_REFRESH_MS);
-    function handleVisibilityChange() {
-      if (document.visibilityState === "visible") void load({ force: true });
-    }
-    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       window.clearInterval(intervalId);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [load, statusRailOpen, user?.role]);
 

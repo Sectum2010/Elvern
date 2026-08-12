@@ -24,13 +24,53 @@ import {
   STARTUP_CONNECTIVITY_FAILURE_EVENT,
 } from "./startupConnection.js";
 import { resetConnectivityRecoveryStoreForTests } from "./connectivityRecoveryStore.js";
+import {
+  beginExternalNavigation,
+  createExternalNavigationAwareRequestOwner,
+  prepareExternalNavigation,
+  resetExternalNavigationCoordinatorForTests,
+} from "./externalNavigationCoordinator.js";
 
 afterEach(() => {
   resetPageLifecycleForTests();
   resetConnectivityRecoveryStoreForTests();
+  resetExternalNavigationCoordinatorForTests();
   queryClient.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+test("expected external-navigation cancellation cannot become a connectivity incident", async () => {
+  const events = [];
+  const handleFailure = () => events.push("failure");
+  window.addEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  const owner = createExternalNavigationAwareRequestOwner({
+    identity: "7:admin",
+    resource: "cloudLibraries",
+  });
+  vi.stubGlobal("fetch", vi.fn((_path, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener("abort", () => {
+      reject(new TypeError("NetworkError when attempting to fetch resource"));
+    }, { once: true });
+  })));
+
+  try {
+    const request = apiRequest("/api/cloud-libraries", { requestOwner: owner });
+    const navigation = beginExternalNavigation({
+      identity: "7:admin",
+      provider: "google_drive",
+      operationId: "operation-a",
+    });
+    prepareExternalNavigation(navigation);
+    await assert.rejects(request, (error) => {
+      assert.equal(error.category, "cancellation");
+      assert.equal(error.cancellationReason, "expected_external_navigation");
+      return true;
+    });
+    assert.deepEqual(events, []);
+  } finally {
+    window.removeEventListener(STARTUP_CONNECTIVITY_FAILURE_EVENT, handleFailure);
+  }
 });
 
 test("extractApiErrorMessage returns string detail directly", () => {

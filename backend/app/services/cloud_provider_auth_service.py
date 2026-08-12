@@ -143,11 +143,15 @@ def cancel_google_oauth_operation(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Google Drive reconnect operation is no longer available.",
             )
-        if str(row["status"]) not in {"pending", "account_mismatch"}:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Google Drive reconnect operation is already complete.",
-            )
+        operation_status = str(row["status"])
+        if operation_status not in {"pending", "account_mismatch"}:
+            connection.commit()
+            return {
+                "status": operation_status,
+                "expires_at": str(row["expires_at"]),
+                "message": str(row["error_message"] or "") or None,
+                "candidate_available": False,
+            }
         connection.execute(
             """
             UPDATE google_oauth_operations

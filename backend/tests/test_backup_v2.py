@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.services import backup_service
+from backend.app.services import backup_keyring_service, backup_service
 from backend.app.services.backup_encryption import (
     BACKUP_ALGORITHM_V2,
     HEADER_MAGIC_V2,
@@ -220,18 +220,36 @@ def test_concurrent_first_keyring_creators_converge(initialized_settings) -> Non
 
 def test_keyring_directory_fsync_unsupported_is_safe(initialized_settings, monkeypatch) -> None:
     service = BackupKeyringService(initialized_settings)
-    real_open = os.open
-
-    def compatible_open(path, flags, mode=0o777):
-        if Path(path) == service.path.parent:
-            raise OSError("directory handles unsupported")
-        return real_open(path, flags, mode)
-
-    monkeypatch.setattr(os, "open", compatible_open)
+    monkeypatch.setattr(
+        backup_keyring_service,
+        "_fsync_parent_directory",
+        lambda _path: None,
+    )
 
     active = service.active_write_key()
 
     assert service.read_key(active.key_id).key == active.key
+
+
+def test_keyring_parent_fsync_closes_descriptor_when_fsync_is_unsupported(monkeypatch, tmp_path) -> None:
+    opened = []
+    closed = []
+    monkeypatch.setattr(
+        backup_keyring_service,
+        "_open_directory",
+        lambda path, flags: opened.append((path, flags)) or 71,
+    )
+    monkeypatch.setattr(
+        backup_keyring_service,
+        "_fsync_descriptor",
+        lambda descriptor: (_ for _ in ()).throw(OSError("directory fsync unsupported")),
+    )
+    monkeypatch.setattr(backup_keyring_service, "_close_descriptor", closed.append)
+
+    backup_keyring_service._fsync_parent_directory(tmp_path)
+
+    assert opened == [(tmp_path, os.O_RDONLY)]
+    assert closed == [71]
 
 
 def test_sqlite_snapshot_reports_real_page_progress(initialized_settings, tmp_path) -> None:

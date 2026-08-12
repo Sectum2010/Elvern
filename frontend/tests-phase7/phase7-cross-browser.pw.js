@@ -13,6 +13,7 @@ const PUBLIC_PROBES = [
 ];
 const LOCAL_FAULT_ORIGINS = new Set();
 const NETWORK_GUARD_STATE = new WeakMap();
+const API_FIXTURE_GUARD_STATE = new WeakMap();
 const MERIDIAN_DEMO_PATH = process.env.ELVERN_MERIDIAN_DEMO_PATH || "";
 const UPDATE_CONTROL_CENTER_BASELINES = process.env.ELVERN_UPDATE_CONTROL_CENTER_BASELINES === "1";
 const CONTROL_CENTER_BASELINE_ROOT = resolve(
@@ -1504,6 +1505,10 @@ function meridianSafeFixtureState(overrides = {}) {
 
 
 async function installFixture(page, requests, state = {}) {
+  const guard = API_FIXTURE_GUARD_STATE.get(page.context());
+  if (!guard) {
+    throw new Error("API fixture guard must be installed before route fixtures.");
+  }
   for (const probe of PUBLIC_PROBES) {
     await page.route(probe, (route) => route.fulfill({ status: 204, body: "" }));
   }
@@ -1526,10 +1531,22 @@ async function installFixture(page, requests, state = {}) {
       body: healthy ? '{"status":"ok"}' : '{"detail":"temporarily unavailable"}',
     });
   });
+  await page.route("**/oauth-fixture/account-chooser", (route) => route.fulfill({
+    status: 200,
+    contentType: "text/html",
+    body: "<!doctype html><title>Provider account chooser</title><p>Provider account chooser</p>",
+  }));
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname.replace(/^\/[^/]+(?=\/api\/)/, "");
     requests.push(`${path}${url.search}`);
+    const requestRecord = {
+      method: route.request().method(),
+      path,
+      query_keys: [...url.searchParams.keys()].sort(),
+      state: "started",
+    };
+    guard.requestLedger.push(requestRecord);
     state.pathRequestCounts ||= {};
     state.pathRequestCounts[path] = Number(state.pathRequestCounts[path] || 0) + 1;
     if (
@@ -1569,6 +1586,24 @@ async function installFixture(page, requests, state = {}) {
       });
       return;
     }
+    if (
+      path === "/api/assistant/attachments/42"
+      && route.request().method() === "GET"
+    ) {
+      requestRecord.state = "fulfilled_200";
+      await route.fulfill({
+        status: 200,
+        contentType: "text/plain; charset=utf-8",
+        headers: { "Content-Disposition": 'inline; filename="report.txt"' },
+        body: "Safe attachment fixture",
+      });
+      return;
+    }
+    if (path === "/api/admin/events/stream") {
+      requestRecord.state = "fulfilled_204";
+      await route.fulfill({ status: 204, contentType: "text/event-stream", body: "" });
+      return;
+    }
     let payload = {};
     let status = 200;
     if (path === "/api/auth/me") {
@@ -1582,6 +1617,18 @@ async function installFixture(page, requests, state = {}) {
       } };
     } else if (path === "/api/auth/heartbeat") {
       payload = { ok: true };
+    } else if (path === "/api/admin/maintenance-mode") {
+      payload = {
+        enabled: false,
+        reason: null,
+        message: "Maintenance Mode is disabled.",
+        created_by_user_id: null,
+        created_by_username: null,
+        created_at: null,
+        updated_at: null,
+        revoked_non_admin_sessions: 0,
+        affected_non_admin_users: 0,
+      };
     } else if (path === "/api/user-settings") {
       payload = {
         hide_duplicate_movies: true,
@@ -1591,7 +1638,7 @@ async function installFixture(page, requests, state = {}) {
         poster_card_appearance: state.posterAppearance || "classic",
         poster_card_display_max_width: "1400",
       };
-    } else if (path === "/api/provider-auth/status") {
+    } else if (path === "/api/cloud-libraries/google/provider-auth-status") {
       payload = state.providerAuthStatus || { provider_auth_required: false, reconnect_required: false };
     } else if (path === "/api/cloud-libraries") {
       payload = state.cloudLibraries || {
@@ -1637,6 +1684,31 @@ async function installFixture(page, requests, state = {}) {
             : null,
         };
       }
+    } else if (/^\/api\/admin\/hidden-items\/\d+\/scope$/.test(path)) {
+      const itemId = Number(path.split("/")[4]);
+      const requestBody = route.request().postDataJSON();
+      const targetScope = requestBody?.target_scope === "personal" ? "personal" : "global";
+      const sourceItems = [
+        ...(state.hiddenItems || []),
+        ...(state.globalHiddenItems || []),
+      ];
+      const matchingItem = sourceItems.find((entry) => Number(entry.id) === itemId);
+      const hiddenAt = matchingItem?.hidden_at || "2026-08-01T04:00:00Z";
+      state.hiddenItems = (state.hiddenItems || []).filter((entry) => Number(entry.id) !== itemId);
+      state.globalHiddenItems = (state.globalHiddenItems || []).filter((entry) => Number(entry.id) !== itemId);
+      if (matchingItem) {
+        const targetList = targetScope === "personal" ? "hiddenItems" : "globalHiddenItems";
+        state[targetList] = [{ ...matchingItem, hidden_at: hiddenAt, scope: targetScope }, ...state[targetList]];
+      }
+      payload = {
+        item_id: itemId,
+        target_scope: targetScope,
+        changed: true,
+        hidden_at: hiddenAt,
+        message: targetScope === "global"
+          ? "This movie is hidden for everyone."
+          : "This movie is now hidden only for your account.",
+      };
     } else if (path === "/api/library/age-groups") {
       if (
         state.holdAgeGroupsAfterRequestCount
@@ -1758,6 +1830,8 @@ async function installFixture(page, requests, state = {}) {
         payload = { requests: state.passwordHelpRequests || [] };
       }
     } else if (path === "/api/cloud-libraries/google/connect") {
+      state.googleConnectOperationIds ||= [];
+      state.googleConnectOperationIds.push(route.request().postDataJSON()?.operation_id || "");
       if (state.holdGoogleConnect) {
         await new Promise((resolve) => {
           state.googleConnectReleases ||= [];
@@ -1769,6 +1843,8 @@ async function installFixture(page, requests, state = {}) {
         expires_in_seconds: 900,
       };
     } else if (path === "/api/cloud-libraries/google/operation/status") {
+      state.googleStatusOperationIds ||= [];
+      state.googleStatusOperationIds.push(route.request().postDataJSON()?.operation_id || "");
       payload = state.googleOperationStatus || {
         provider: "google_drive",
         status: "pending",
@@ -1776,6 +1852,8 @@ async function installFixture(page, requests, state = {}) {
         expires_at: "2026-08-01T04:15:00Z",
       };
     } else if (path === "/api/cloud-libraries/google/operation/cancel") {
+      state.googleCancelOperationIds ||= [];
+      state.googleCancelOperationIds.push(route.request().postDataJSON()?.operation_id || "");
       payload = {
         provider: "google_drive",
         status: "cancelled",
@@ -1839,28 +1917,34 @@ async function installFixture(page, requests, state = {}) {
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
       payload = { status: desktopHelperStatus(state) };
-    } else if (path === "/api/progress/1" && route.request().method() === "GET") {
+    } else if (/^\/api\/progress\/\d+$/.test(path) && route.request().method() === "GET") {
+      const mediaItemId = Number(path.split("/").at(-1));
       payload = {
-        media_item_id: 1,
+        media_item_id: mediaItemId,
         position_seconds: Number(state.progressSeconds || 0),
         duration_seconds: Number(state.progressDuration || 7200),
         completed: Boolean(state.completed),
       };
-    } else if (path === "/api/playback/1") {
+    } else if (/^\/api\/playback\/\d+$/.test(path)) {
       payload = {
         mode: "direct",
         transcode_status: "idle",
         manifest_complete: false,
       };
-    } else if (path.startsWith("/api/desktop-playback/1")) {
+    } else if (/^\/api\/desktop-playback\/\d+$/.test(path)) {
       payload = {
         available: true,
         helper_required: false,
         vlc_available: true,
       };
-    } else if (path === "/api/browser-playback/items/1/active") {
+    } else if (path === "/api/browser-playback/active") {
       payload = null;
-    } else if (path === "/api/progress/1" && route.request().method() === "POST") {
+    } else if (path === "/api/mobile-playback/active") {
+      payload = null;
+    } else if (/^\/api\/browser-playback\/items\/\d+\/active$/.test(path)) {
+      payload = null;
+    } else if (/^\/api\/progress\/\d+$/.test(path) && route.request().method() === "POST") {
+      const mediaItemId = Number(path.split("/").at(-1));
       const progress = route.request().postDataJSON();
       state.progressSeconds = Number(progress.position_seconds || 0);
       state.progressDuration = Number(progress.duration_seconds || 7200);
@@ -1868,7 +1952,7 @@ async function installFixture(page, requests, state = {}) {
       state.progressSequence = Number(state.progressSequence || 0) + 1;
       state.progressToken = opaqueToken(state.progressSequence, 5);
       payload = {
-        media_item_id: 1,
+        media_item_id: mediaItemId,
         position_seconds: state.progressSeconds,
         duration_seconds: state.progressDuration,
         completed: state.completed,
@@ -1883,6 +1967,9 @@ async function installFixture(page, requests, state = {}) {
         job_id: null,
         cloud_sync: null,
       };
+    } else if (/^\/api\/library\/item\/\d+\/track-scan$/.test(path) && route.request().method() === "POST") {
+      status = 202;
+      payload = { status: "queued" };
     } else if (/^\/api\/library\/item\/\d+$/.test(path)) {
       const itemId = Number(path.split("/").at(-1));
       const selected = ITEMS.find((entry) => entry.id === itemId);
@@ -1929,7 +2016,19 @@ async function installFixture(page, requests, state = {}) {
         age_group_key: "",
         genre_group_key: "",
       };
+    } else {
+      const unhandled = {
+        method: route.request().method(),
+        path,
+        query_keys: [...url.searchParams.keys()].sort(),
+        test: guard.testTitle,
+      };
+      requestRecord.state = "rejected_unhandled";
+      guard.unhandledRequests.push(unhandled);
+      await route.abort("blockedbyclient");
+      return;
     }
+    requestRecord.state = `fulfilled_${status}`;
     await route.fulfill({
       status,
       contentType: "application/json",
@@ -2067,13 +2166,79 @@ async function startBodyFaultServer() {
 }
 
 
-test.beforeEach(async ({ context, page, baseURL }) => {
+test.beforeEach(async ({ context, page, baseURL }, testInfo) => {
   await context.clearCookies();
+  API_FIXTURE_GUARD_STATE.set(context, {
+    testTitle: testInfo.title,
+    requestLedger: [],
+    unhandledRequests: [],
+  });
+  await page.addInitScript(() => {
+    const diagnostics = {
+      page_resume_generations: [],
+      connectivity_incident_ids: [],
+      provider_state_transitions: [],
+      resource_state_transitions: [],
+    };
+    window.__elvernTestDiagnostics = diagnostics;
+    window.addEventListener("elvern:page-resume", (event) => {
+      diagnostics.page_resume_generations.push(Number(event.detail?.generation) || 0);
+    });
+    const observeRoot = () => {
+      const root = document.querySelector("[data-control-center-area]");
+      if (!root) return false;
+      const record = () => {
+        const providerState = root.getAttribute("data-provider-auth-state") || "idle";
+        const incidentId = root.getAttribute("data-connectivity-incident-id") || "";
+        if (diagnostics.provider_state_transitions.at(-1) !== providerState) {
+          diagnostics.provider_state_transitions.push(providerState);
+        }
+        if (incidentId && diagnostics.connectivity_incident_ids.at(-1) !== incidentId) {
+          diagnostics.connectivity_incident_ids.push(incidentId);
+        }
+      };
+      record();
+      new MutationObserver(record).observe(root, {
+        attributes: true,
+        attributeFilter: ["data-provider-auth-state", "data-connectivity-incident-id"],
+      });
+      return true;
+    };
+    const observer = new MutationObserver(() => {
+      if (observeRoot()) observer.disconnect();
+    });
+    observer.observe(document, { childList: true, subtree: true });
+  });
   await installExternalNetworkGuard(context, baseURL);
   await installFixture(page, []);
 });
 
-test.afterEach(async ({ context }) => {
+test.afterEach(async ({ context, page }, testInfo) => {
+  const fixture = API_FIXTURE_GUARD_STATE.get(context) || {
+    requestLedger: [],
+    unhandledRequests: [],
+  };
+  const browserDiagnostics = await page.evaluate(
+    () => window.__elvernTestDiagnostics || null,
+  ).catch(() => null);
+  const diagnostic = {
+    test: testInfo.title,
+    request_ledger: fixture.requestLedger,
+    unhandled_requests: fixture.unhandledRequests,
+    lifecycle: browserDiagnostics,
+    external_network_requests: NETWORK_GUARD_STATE.get(context)?.externalRequests || [],
+  };
+  if (testInfo.status !== testInfo.expectedStatus || fixture.unhandledRequests.length > 0) {
+    await testInfo.attach("sanitized-runtime-diagnostics", {
+      body: Buffer.from(`${JSON.stringify(diagnostic, null, 2)}\n`),
+      contentType: "application/json",
+    });
+  }
+  if (fixture.unhandledRequests.length > 0) {
+    throw new Error(
+      `Unhandled production browser API request(s): ${JSON.stringify(fixture.unhandledRequests)}`,
+    );
+  }
   expect(NETWORK_GUARD_STATE.get(context)?.externalRequests || []).toEqual([]);
 });
 
@@ -2539,6 +2704,226 @@ test("@settings-navigation desktop Settings and Admin use their dock Back to Lib
 });
 
 
+test("@settings-navigation Google reconnect Back cancellation is terminal and side-effect free", async ({
+  page,
+  baseURL,
+}) => {
+  const requests = [];
+  const state = {
+    role: "admin",
+    cloudLibraries: {
+      google: {
+        enabled: true,
+        connected: true,
+        reconnect_required: false,
+        connected_email: "fixture-user@example.test",
+      },
+      my_libraries: [],
+      shared_libraries: [],
+    },
+    googleOperationStatus: {
+      provider: "google_drive",
+      status: "pending",
+      message: null,
+      expires_at: "2099-08-01T04:15:00Z",
+    },
+  };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, requests, state);
+  await page.goto("settings/cloud-sharing");
+  await expect(page.getByRole("button", { name: "Reconnect" })).toBeVisible();
+  await page.waitForTimeout(450);
+  const cloudCardBeforeReconnect = await page.locator(".meridian-card").first().boundingBox();
+
+  await page.getByRole("button", { name: "Reconnect" }).click();
+  await expect(page).toHaveURL(`${new URL(baseURL).origin}/oauth-fixture/account-chooser`);
+  await expect(page.getByText("Provider account chooser")).toBeVisible();
+  await page.goBack();
+
+  await expect(page).toHaveURL(`${baseURL}settings/cloud-sharing`);
+  await expect(page.getByText("Reconnect was not completed.", { exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Reconnect" })).toBeEnabled();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByText("Connection interrupted. Elvern will retry automatically."))
+    .toHaveCount(0);
+  await page.waitForTimeout(450);
+  const cloudRequestsAfterReturn = state.pathRequestCounts?.["/api/cloud-libraries"] || 0;
+  const cloudCardAfterReconnect = await page.locator(".meridian-card").first().boundingBox();
+  for (const dimension of ["x", "y", "width", "height"]) {
+    expect(Math.abs(cloudCardAfterReconnect[dimension] - cloudCardBeforeReconnect[dimension]))
+      .toBeLessThanOrEqual(0.1);
+  }
+  expect(state.pathRequestCounts?.["/api/cloud-libraries/google/operation/status"] || 0).toBe(1);
+  expect(state.pathRequestCounts?.["/api/cloud-libraries/google/operation/cancel"] || 0).toBe(1);
+  await page.waitForTimeout(450);
+  expect(state.pathRequestCounts?.["/api/cloud-libraries"] || 0).toBe(cloudRequestsAfterReturn);
+  expect(state.cloudLibraries.google.connected_email).toBe("fixture-user@example.test");
+
+  await page.evaluate(() => {
+    window.__elvernControlCenterRoot = document.querySelector("[data-control-center-area]");
+    window.__elvernControlCenterRootReplacements = 0;
+    window.__elvernControlCenterRootObserver = new MutationObserver(() => {
+      const current = document.querySelector("[data-control-center-area]");
+      if (current && current !== window.__elvernControlCenterRoot) {
+        window.__elvernControlCenterRoot = current;
+        window.__elvernControlCenterRootReplacements += 1;
+      }
+    });
+    window.__elvernControlCenterRootObserver.observe(document.body, { childList: true, subtree: true });
+  });
+
+  await expect(page.getByText("Reconnect was not completed.", { exact: true }))
+    .toHaveCount(0, { timeout: 7000 });
+  for (const [linkName, headingName] of [
+    ["Appearance", "Appearance"],
+    ["Library", "Library"],
+    ["Hidden titles", "Hidden titles"],
+    ["Playback & Apps", "Playback & Apps"],
+    ["Server & Storage", "Server & Storage"],
+  ]) {
+    await page.getByRole("link", { name: linkName, exact: true }).click();
+    await expect(page.getByRole("heading", { name: headingName, exact: true })).toBeVisible();
+  }
+  await page.getByRole("button", { name: "Switch to Admin Panel" }).click();
+  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+  for (const headingName of ["Users & Invites", "Security", "Logs", "Recovery"]) {
+    await page.getByRole("link", { name: headingName, exact: true }).click();
+    await expect(page.getByRole("heading", { name: headingName, exact: true })).toBeVisible();
+  }
+  await expect(page.getByText("Elvern could not complete the request.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  await expect(page.getByText("Connection interrupted. Elvern will retry automatically."))
+    .toHaveCount(0);
+  expect(await page.evaluate(() => window.__elvernControlCenterRootReplacements)).toBe(0);
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Recovery", exact: true })).toBeVisible();
+  await expect(page.getByText("Reconnect was not completed.", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Elvern could not complete the request.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  expect(state.pathRequestCounts?.["/api/cloud-libraries/google/operation/status"] || 0).toBe(1);
+  expect(state.pathRequestCounts?.["/api/cloud-libraries/google/operation/cancel"] || 0).toBe(1);
+});
+
+
+test("@settings-navigation two abandoned reconnects remain independent terminal operations", async ({
+  page,
+  baseURL,
+}) => {
+  const state = {
+    role: "admin",
+    cloudLibraries: {
+      google: {
+        enabled: true,
+        connected: true,
+        reconnect_required: false,
+        connected_email: "fixture-user@example.test",
+      },
+      my_libraries: [],
+      shared_libraries: [],
+    },
+  };
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], state);
+  await page.goto("settings/cloud-sharing");
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    await page.getByRole("button", { name: "Reconnect" }).click();
+    await expect(page).toHaveURL(`${new URL(baseURL).origin}/oauth-fixture/account-chooser`);
+    await page.goBack();
+    await expect(page).toHaveURL(`${baseURL}settings/cloud-sharing`);
+    await expect(page.getByText("Reconnect was not completed.", { exact: true })).toHaveCount(1);
+    await expect(page.getByText("Reconnect was not completed.", { exact: true }))
+      .toHaveCount(0, { timeout: 7000 });
+  }
+
+  expect(state.googleConnectOperationIds).toHaveLength(2);
+  expect(new Set(state.googleConnectOperationIds).size).toBe(2);
+  expect(state.googleStatusOperationIds).toEqual(state.googleConnectOperationIds);
+  expect(state.googleCancelOperationIds).toEqual(state.googleConnectOperationIds);
+  await expect(page.getByText("Elvern could not complete the request.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
+});
+
+
+test("@settings-navigation explicit provider denial is one neutral terminal outcome", async ({
+  page,
+  baseURL,
+}) => {
+  const state = meridianSafeFixtureState({
+    googleOperationStatus: {
+      provider: "google_drive",
+      status: "cancelled",
+      message: "Google Drive sign-in was cancelled or denied.",
+      expires_at: "2099-08-01T04:15:00Z",
+    },
+  });
+  const originalCloudLibraries = JSON.stringify(state.cloudLibraries);
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], state);
+  await page.goto("settings/cloud-sharing");
+
+  await page.getByRole("button", { name: "Reconnect" }).click();
+  await expect(page.getByText("Provider account chooser")).toBeVisible();
+  await page.goto(
+    `${baseURL}settings/cloud-sharing?googleDriveStatus=cancelled&googleDriveMessage=${encodeURIComponent("Google Drive sign-in was cancelled or denied.")}`,
+  );
+
+  await expect(page.getByText("Reconnect was not completed.", { exact: true })).toHaveCount(1);
+  await expect(page.getByText("Google Drive sign-in was cancelled or denied.", { exact: true }))
+    .toHaveCount(0);
+  await expect(page.getByText("Connection interrupted. Elvern will retry automatically."))
+    .toHaveCount(0);
+  await expect(page.getByText("Elvern could not complete the request.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  expect(state.googleStatusOperationIds).toEqual(state.googleConnectOperationIds);
+  expect(state.googleCancelOperationIds || []).toHaveLength(0);
+  expect(JSON.stringify(state.cloudLibraries)).toBe(originalCloudLibraries);
+});
+
+
+test("@settings-navigation successful provider return refreshes only provider and Cloud state", async ({
+  page,
+  baseURL,
+}) => {
+  const state = meridianSafeFixtureState({
+    googleOperationStatus: {
+      provider: "google_drive",
+      status: "connected",
+      message: null,
+      expires_at: "2099-08-01T04:15:00Z",
+    },
+  });
+  await page.unrouteAll({ behavior: "wait" });
+  await installFixture(page, [], state);
+  await page.goto("settings/cloud-sharing");
+  const cloudRequestsBefore = state.pathRequestCounts?.["/api/cloud-libraries"] || 0;
+  const unrelatedBefore = Object.fromEntries([
+    "/api/admin/google-drive-setup",
+    "/api/admin/media-library-reference",
+    "/api/admin/poster-reference-location",
+    "/api/settings/hidden-titles",
+    "/api/library/age-groups",
+  ].map((path) => [path, state.pathRequestCounts?.[path] || 0]));
+
+  await page.getByRole("button", { name: "Reconnect" }).click();
+  await expect(page.getByText("Provider account chooser")).toBeVisible();
+  await page.goto(`${baseURL}settings/cloud-sharing?googleDriveStatus=connected`);
+
+  await expect(page.getByText("Google Drive connected.", { exact: true })).toHaveCount(1);
+  await expect.poll(() => state.pathRequestCounts?.["/api/cloud-libraries"] || 0)
+    .toBeGreaterThan(cloudRequestsBefore);
+  expect(state.googleStatusOperationIds).toEqual(state.googleConnectOperationIds);
+  expect(state.googleCancelOperationIds || []).toHaveLength(0);
+  for (const [path, requestCount] of Object.entries(unrelatedBefore)) {
+    expect(state.pathRequestCounts?.[path] || 0).toBe(requestCount);
+  }
+  await expect(page.getByText("Connection interrupted. Elvern will retry automatically."))
+    .toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
+});
+
+
 test("@settings-navigation admin Control Center shares state, status, and real routes", async ({
   page,
   baseURL,
@@ -2707,19 +3092,11 @@ test("@control-center-baseline reviewed Control Center production baseline matri
   await captureScenario({
     name: "settings-cloud-browser-back-incomplete",
     route: "settings/cloud-sharing",
-    beforeNavigation: async (statePage) => {
-      await statePage.addInitScript(() => {
-        sessionStorage.setItem("elvern:provider-auth-intent", JSON.stringify({
-          provider: "google_drive",
-          operationId: "00000000-0000-4000-8000-000000000099",
-          identity: "1:admin",
-          returnPath: "/settings/cloud-sharing",
-          state: "starting",
-          savedAt: Date.now(),
-        }));
-      });
-    },
     prepare: async (statePage) => {
+      await expect(statePage.getByRole("button", { name: "Reconnect" })).toBeEnabled();
+      await statePage.getByRole("button", { name: "Reconnect" }).click();
+      await expect(statePage.getByText("Provider account chooser")).toBeVisible();
+      await statePage.goBack();
       await expect(statePage.getByText("Reconnect was not completed.")).toBeVisible();
       await expect(statePage.getByRole("button", { name: "Reconnect" })).toBeEnabled();
     },
@@ -4052,6 +4429,20 @@ test("two independent same-account contexts apply progress reset and catalog rev
   const pageB = await contextB.newPage();
   const requestsA = [];
   const requestsB = [];
+  API_FIXTURE_GUARD_STATE.set(contextA, {
+    testTitle: "same-account context A",
+    requestLedger: [],
+    unhandledRequests: [],
+  });
+  API_FIXTURE_GUARD_STATE.set(contextB, {
+    testTitle: "same-account context B",
+    requestLedger: [],
+    unhandledRequests: [],
+  });
+  await Promise.all([
+    installExternalNetworkGuard(contextA, baseURL),
+    installExternalNetworkGuard(contextB, baseURL),
+  ]);
   await installFixture(pageA, requestsA, sharedState);
   await installFixture(pageB, requestsB, sharedState);
   try {
@@ -4089,6 +4480,10 @@ test("two independent same-account contexts apply progress reset and catalog rev
     await dispatchGenuinePageReturn(pageB);
     await expect(pageB.getByText("Phase Seven Alpha Scan 1", { exact: true })).toBeVisible();
     await expect(pageB.getByText("Loading library...")).toHaveCount(0);
+    expect(API_FIXTURE_GUARD_STATE.get(contextA)?.unhandledRequests || []).toEqual([]);
+    expect(API_FIXTURE_GUARD_STATE.get(contextB)?.unhandledRequests || []).toEqual([]);
+    expect(NETWORK_GUARD_STATE.get(contextA)?.externalRequests || []).toEqual([]);
+    expect(NETWORK_GUARD_STATE.get(contextB)?.externalRequests || []).toEqual([]);
   } finally {
     await Promise.all([contextA.close(), contextB.close()]);
   }
@@ -4114,6 +4509,20 @@ test("two different identity contexts keep same-item progress UI isolated", asyn
   const pageB = await contextB.newPage();
   const requestsA = [];
   const requestsB = [];
+  API_FIXTURE_GUARD_STATE.set(contextA, {
+    testTitle: "identity-isolation context A",
+    requestLedger: [],
+    unhandledRequests: [],
+  });
+  API_FIXTURE_GUARD_STATE.set(contextB, {
+    testTitle: "identity-isolation context B",
+    requestLedger: [],
+    unhandledRequests: [],
+  });
+  await Promise.all([
+    installExternalNetworkGuard(contextA, baseURL),
+    installExternalNetworkGuard(contextB, baseURL),
+  ]);
   await installFixture(pageA, requestsA, stateA);
   await installFixture(pageB, requestsB, stateB);
   try {
@@ -4134,6 +4543,10 @@ test("two different identity contexts keep same-item progress UI isolated", asyn
     await dispatchGenuinePageReturn(pageB);
     await expect(pageB.getByRole("heading", { name: "Continue watching" })).toHaveCount(0);
     await expect(pageB.locator(".media-card__progress")).toHaveCount(0);
+    expect(API_FIXTURE_GUARD_STATE.get(contextA)?.unhandledRequests || []).toEqual([]);
+    expect(API_FIXTURE_GUARD_STATE.get(contextB)?.unhandledRequests || []).toEqual([]);
+    expect(NETWORK_GUARD_STATE.get(contextA)?.externalRequests || []).toEqual([]);
+    expect(NETWORK_GUARD_STATE.get(contextB)?.externalRequests || []).toEqual([]);
   } finally {
     await Promise.all([contextA.close(), contextB.close()]);
   }

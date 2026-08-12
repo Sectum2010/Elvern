@@ -49,10 +49,10 @@ export function combineAbortSignals(signals) {
     return { signal: activeSignals[0], cleanup: () => {} };
   }
   const controller = new AbortController();
-  const abort = () => controller.abort();
+  const abort = (event) => controller.abort(event?.target?.reason);
   activeSignals.forEach((signal) => {
     if (signal.aborted) {
-      controller.abort();
+      controller.abort(signal.reason);
     } else {
       signal.addEventListener("abort", abort, { once: true });
     }
