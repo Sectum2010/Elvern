@@ -1172,7 +1172,7 @@ def test_security_user_disable_still_revokes_decoupled_external_native_playback(
         user_id=user_id,
         enabled=False,
         role=None,
-        current_admin_password=None,
+        current_admin_password=initialized_settings.admin_bootstrap_password or "",
         actor=_admin_actor(initialized_settings),
         ip_address="127.0.0.1",
         user_agent="pytest",

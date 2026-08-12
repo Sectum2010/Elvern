@@ -1635,6 +1635,10 @@ class AdminUserResponse(BaseModel):
     assistant_beta_enabled: bool = False
     age_credential: int = Field(default=18, ge=1, le=18)
     age_credential_display: str = "18+"
+    age_credential_anchor_age: int | None = Field(default=None, ge=1, le=18)
+    age_credential_anchor_date: str | None = None
+    age_credential_next_increment_on: str | None = None
+    age_credential_last_manual_set_at: str | None = None
     created_at: str
     updated_at: str
     last_login_at: str | None = None

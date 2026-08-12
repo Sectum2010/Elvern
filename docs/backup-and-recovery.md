@@ -43,6 +43,12 @@ CLI also creates encrypted backups by default. Plaintext checkpoint directories 
 only for explicit developer/manual recovery scenarios and require both
 `--output-dir` and `--allow-plaintext-backup`.
 
+Auto-key checkpoints use an independent server-local backup keyring. The
+checkpoint file alone is not portable without that keyring. Manual-passphrase
+checkpoints are the independent off-host option when the passphrase is retained
+separately. A missing keyring is reported as unavailable; a read or inspect
+operation never creates a replacement keyring.
+
 ## Automatic Safety Checkpoints
 
 Elvern creates automatic checkpoints before these dangerous actions:
@@ -55,6 +61,12 @@ Those checkpoints are meant to give an admin a known recovery point before Elver
 Automatic checkpoints are best-effort by default.
 
 If automatic checkpoint creation fails, Elvern reports or audits the warning but still continues the requested admin action. Backup failure does not block the rescan or the shared local library path update by default.
+
+Asynchronous backup jobs are coordinated by a lightweight SQLite writer lease.
+The active worker heartbeats approximately every 10 seconds, and a stale lease
+can be reclaimed after approximately 45 seconds. Job identity and audit
+snapshots do not depend on keeping the initiating browser session or user row;
+logout and user deletion therefore do not erase persisted backup-job history.
 
 ## Current Recovery Limitation
 
@@ -101,6 +113,7 @@ It does not:
 - download or export backups through the browser
 - create plaintext checkpoints
 - expose standard-user recovery workflows
+- export the server backup keyring
 
 Backups stay server-local in this stage. For off-host protection, copy encrypted
 checkpoint archives from `backend/data/backups/` to an external drive, NAS, or

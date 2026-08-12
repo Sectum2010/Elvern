@@ -2420,7 +2420,10 @@ def test_admin_disable_user_route_invalidates_route2_workers(
 
     response = client.patch(
         f"/api/admin/users/{created_user['id']}",
-        json={"enabled": False},
+        json={
+            "enabled": False,
+            "current_admin_password": admin_credentials["password"],
+        },
     )
 
     assert response.status_code == 200
@@ -2930,7 +2933,7 @@ def test_native_playback_details_route_fails_immediately_after_revoke_or_disable
             user_id=int(created_user["id"]),
             enabled=False,
             role=None,
-            current_admin_password=None,
+            current_admin_password=initialized_settings.admin_bootstrap_password or "",
             actor=_admin_user(initialized_settings),
             ip_address="127.0.0.1",
             user_agent="pytest",

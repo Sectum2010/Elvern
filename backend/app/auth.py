@@ -13,6 +13,7 @@ from .services.admin_events_service import emit_admin_event
 from .services.audit_service import log_audit_event
 from .services.rate_limiter_service import SqliteRateLimiter
 from .services.security_event_service import log_security_event
+from .services.user_age_credential_service import reconcile_due_age_credentials
 from .services.at_rest_encryption import decrypt_at_rest, encrypt_at_rest
 from .services.exposure_maintenance_service import (
     is_exposure_maintenance_lock_enabled,
@@ -262,6 +263,7 @@ def authenticate_user(
     username: str,
     password: str,
 ) -> tuple[AuthenticatedUser | None, str | None]:
+    reconcile_due_age_credentials(settings, username=username)
     with get_connection(settings) as connection:
         row = connection.execute(
             """
@@ -370,6 +372,7 @@ def get_user_by_session_token(
     if not token:
         return None
     token_hash = _hash_auth_session_token(settings, token)
+    reconcile_due_age_credentials(settings, session_token_hash=token_hash)
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
     live_cutoff = session_live_cutoff_iso(now=now_dt)

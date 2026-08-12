@@ -80,10 +80,13 @@ async function installLocalMeridianDemoRuntime(context) {
     const font = readFileSync(resolve(process.cwd(), "src/assets/fonts/control-center", filename));
     return `@font-face{font-family:'${family}';font-style:normal;font-weight:100 900;font-display:block;src:url(${asDataUrl("font/woff2", font)}) format('woff2')}`;
   }).join("\n");
+  // The production app applies this global box model before Control Center CSS.
+  // Normalize the standalone private demo to that same browser environment.
+  const demoRuntimeStyles = `${fontFaces}\n*,*::before,*::after{box-sizing:border-box}`;
   await context.route("https://fonts.googleapis.com/**", (route) => route.fulfill({
     status: 200,
     contentType: "text/css",
-    body: fontFaces,
+    body: demoRuntimeStyles,
   }));
 }
 
@@ -212,6 +215,8 @@ const MERIDIAN_STYLE_PROPERTIES = [
   "paddingRight",
   "paddingBottom",
   "paddingLeft",
+  "marginTop",
+  "minHeight",
   "rowGap",
   "columnGap",
   "boxShadow",
@@ -220,22 +225,247 @@ const MERIDIAN_STYLE_PROPERTIES = [
 ];
 
 
-function geometryDelta(reference, actual) {
+function geometryDelta(reference, actual, properties = ["x", "y", "width", "height"]) {
   if (!reference || !actual) return null;
-  return Object.fromEntries(["x", "y", "width", "height"].map((key) => [
+  return Object.fromEntries(properties.map((key) => [
     key,
     Math.abs(Number(reference[key]) - Number(actual[key])),
   ]));
 }
 
 
-function styleDifferences(reference, actual) {
+function styleDifferences(reference, actual, properties = MERIDIAN_STYLE_PROPERTIES) {
   if (!reference || !actual) return null;
-  return Object.fromEntries(MERIDIAN_STYLE_PROPERTIES.flatMap((property) => (
+  return Object.fromEntries(properties.flatMap((property) => (
     reference[property] === actual[property]
       ? []
       : [[property, { reference: reference[property], actual: actual[property] }]]
   )));
+}
+
+
+const DIRECT_PARITY_STYLE_PROPERTIES = [
+  "fontFamily",
+  "fontSize",
+  "fontWeight",
+  "color",
+  "backgroundColor",
+  "borderTopColor",
+  "borderTopWidth",
+  "borderTopStyle",
+  "borderRadius",
+  "paddingTop",
+  "paddingRight",
+  "paddingBottom",
+  "paddingLeft",
+  "marginTop",
+  "minHeight",
+  "rowGap",
+  "columnGap",
+  "boxShadow",
+];
+
+
+const DIRECT_PARITY_STYLE_KEYS = Object.freeze({
+  "account-menu": {
+    root: ["backgroundColor", "borderTopColor", "borderTopWidth", "borderTopStyle", "borderRadius", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "boxShadow"],
+    "primary-item": ["fontFamily", "fontSize", "fontWeight", "color", "backgroundColor", "borderRadius", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "columnGap"],
+    "primary-icon": ["color"],
+    divider: ["backgroundColor"],
+    "danger-item": ["fontFamily", "fontSize", "fontWeight", "color", "backgroundColor", "borderRadius", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "columnGap"],
+    "danger-icon": ["color"],
+  },
+  "user-actions": {
+    root: ["backgroundColor", "borderTopColor", "borderTopWidth", "borderTopStyle", "borderRadius", "boxShadow"],
+    avatar: ["fontFamily", "fontSize", "fontWeight", "color", "backgroundColor", "borderRadius"],
+    close: ["fontFamily", "fontSize", "fontWeight", "color", "backgroundColor", "borderTopColor", "borderTopWidth", "borderTopStyle", "borderRadius", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"],
+    tabs: ["backgroundColor", "borderRadius", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"],
+    "active-tab": ["fontFamily", "fontSize", "fontWeight", "color", "backgroundColor", "borderRadius", "boxShadow"],
+    body: ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"],
+  },
+  recovery: {
+    root: ["backgroundColor", "borderTopColor", "borderTopWidth", "borderTopStyle", "borderRadius", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"],
+    "top-row": ["rowGap", "columnGap"],
+    scope: ["fontFamily", "fontSize", "fontWeight", "color", "marginTop"],
+    stages: ["marginTop", "rowGap", "columnGap"],
+    "stage-bar": ["backgroundColor", "borderRadius"],
+    "stage-label": ["fontFamily", "fontSize", "fontWeight", "color", "marginTop"],
+    stage: ["marginTop", "minHeight"],
+  },
+});
+
+
+const DIRECT_PARITY_GEOMETRY_KEYS = Object.freeze({
+  "account-menu": {
+    root: ["width", "height"],
+    "primary-item": ["x", "y", "width", "height"],
+    "primary-icon": ["x", "y", "width", "height"],
+    divider: ["x", "y", "width", "height"],
+    "danger-item": ["x", "y", "width", "height"],
+    "danger-icon": ["x", "y", "width", "height"],
+  },
+  "user-actions": {
+    root: ["width"],
+    header: ["x", "y", "width", "height"],
+    avatar: ["x", "y", "width", "height"],
+    identity: ["x", "y", "width", "height"],
+    close: ["x", "y", "width", "height"],
+    tabs: ["x", "y", "width", "height"],
+    "active-tab": ["x", "y", "width", "height"],
+    body: ["x", "y", "width"],
+  },
+  recovery: {
+    root: ["width"],
+    "top-row": ["x", "y", "width", "height"],
+    scope: ["x", "y", "width", "height"],
+    stages: ["x", "y", "width", "height"],
+    "stage-bar": ["x", "y", "width", "height"],
+    "stage-label": ["x", "y", "width", "height"],
+    stage: ["x", "y", "width"],
+  },
+});
+
+
+async function tagDirectParityRegion(page, kind, source) {
+  return page.evaluate(({ regionKind, regionSource }) => {
+    document.querySelectorAll("[data-elvern-direct-parity]").forEach((element) => {
+      element.removeAttribute("data-elvern-direct-parity");
+    });
+    const visible = (element) => {
+      if (!element) return false;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const mark = (element, name) => {
+      if (element) element.setAttribute("data-elvern-direct-parity", name);
+      return element;
+    };
+    const exactText = (text) => Array.from(document.querySelectorAll("div, p, span, button"))
+      .find((element) => visible(element) && element.children.length === 0 && element.textContent.trim() === text);
+    let root = null;
+    if (regionSource === "production") {
+      if (regionKind === "account-menu") {
+        root = document.querySelector(".meridian-account-menu");
+        mark(root, "root");
+        const items = Array.from(root?.querySelectorAll(".meridian-account-menu__item") || []);
+        mark(items[0], "primary-item");
+        mark(items[0]?.querySelector("svg"), "primary-icon");
+        mark(root?.querySelector(".meridian-account-menu__divider"), "divider");
+        mark(items.at(-1), "danger-item");
+        mark(items.at(-1)?.querySelector("svg"), "danger-icon");
+      } else if (regionKind === "user-actions") {
+        root = document.querySelector(".meridian-user-actions__card");
+        mark(root, "root");
+        mark(root?.querySelector(".meridian-user-actions__header"), "header");
+        mark(root?.querySelector(".meridian-user-actions__avatar"), "avatar");
+        mark(root?.querySelector(".meridian-user-actions__identity"), "identity");
+        mark(root?.querySelector(".meridian-user-actions__close"), "close");
+        mark(root?.querySelector(".meridian-user-actions__tabs"), "tabs");
+        mark(root?.querySelector('.meridian-user-actions__tabs button[aria-selected="true"]'), "active-tab");
+        mark(root?.querySelector(".meridian-user-actions__body"), "body");
+        mark(root?.querySelector(".meridian-user-actions__panel"), "panel");
+      } else if (regionKind === "recovery") {
+        root = document.querySelector(".meridian-recovery__card");
+        mark(root, "root");
+        mark(root?.querySelector(".meridian-recovery__top-row"), "top-row");
+        mark(root?.querySelector(".meridian-recovery__scope"), "scope");
+        mark(root?.querySelector(".meridian-recovery__stages"), "stages");
+        mark(root?.querySelector(".meridian-recovery__stages button:first-child i"), "stage-bar");
+        mark(root?.querySelector(".meridian-recovery__stages button:first-child span"), "stage-label");
+        mark(root?.querySelector(".meridian-recovery__stage"), "stage");
+        mark(root?.querySelector(".meridian-recovery__nav"), "navigation");
+      }
+    } else if (regionKind === "account-menu") {
+      root = Array.from(document.querySelectorAll("div")).find((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return visible(element)
+          && style.position === "absolute"
+          && style.borderRadius === "12px"
+          && rect.width >= 180
+          && rect.width <= 270
+          && element.textContent.replace(/\s+/g, "").trim() === "AssistantSignout";
+      });
+      mark(root, "root");
+      const items = Array.from(root?.children || []).filter((element) => getComputedStyle(element).cursor === "pointer");
+      mark(items[0], "primary-item");
+      mark(items[0]?.querySelector("svg"), "primary-icon");
+      mark(Array.from(root?.children || []).find((element) => element.getBoundingClientRect().height === 1), "divider");
+      mark(items.at(-1), "danger-item");
+      mark(items.at(-1)?.querySelector("svg"), "danger-icon");
+    } else if (regionKind === "user-actions") {
+      let candidate = exactText("USER ACTIONS");
+      while (candidate && candidate !== document.body) {
+        const rect = candidate.getBoundingClientRect();
+        if (visible(candidate) && rect.width >= 715 && rect.width <= 725 && getComputedStyle(candidate).borderRadius === "16px") {
+          root = candidate;
+          break;
+        }
+        candidate = candidate.parentElement;
+      }
+      mark(root, "root");
+      const top = root?.firstElementChild;
+      const header = top?.firstElementChild;
+      mark(header, "header");
+      mark(header?.children[0], "avatar");
+      mark(header?.children[1], "identity");
+      mark(header?.children[2], "close");
+      mark(top?.children[1], "tabs");
+      mark(Array.from(top?.children[1]?.children || []).find((element) => {
+        const style = getComputedStyle(element);
+        return style.backgroundColor !== "rgba(0, 0, 0, 0)" && style.backgroundColor !== "transparent";
+      }), "active-tab");
+      mark(root?.children[1], "body");
+      mark(root?.children[1]?.firstElementChild, "panel");
+    } else if (regionKind === "recovery") {
+      let candidate = exactText("ADMIN-ONLY");
+      while (candidate && candidate !== document.body) {
+        const rect = candidate.getBoundingClientRect();
+        const style = getComputedStyle(candidate);
+        if (visible(candidate) && rect.width > 500 && style.borderRadius === "14px" && style.borderTopWidth === "1px") {
+          root = candidate;
+          break;
+        }
+        candidate = candidate.parentElement;
+      }
+      mark(root, "root");
+      mark(root?.children[0], "top-row");
+      mark(root?.children[1], "scope");
+      mark(root?.children[2], "stages");
+      mark(root?.children[2]?.children[0]?.children[0], "stage-bar");
+      mark(root?.children[2]?.children[0]?.children[1], "stage-label");
+      mark(root?.children[3], "stage");
+      mark(root?.children[4], "navigation");
+    }
+    if (!root || !visible(root)) {
+      throw new Error(`Could not locate ${regionSource} ${regionKind} parity region.`);
+    }
+    return true;
+  }, { regionKind: kind, regionSource: source });
+}
+
+
+async function collectDirectParityEvidence(page) {
+  return page.evaluate((properties) => {
+    const root = document.querySelector('[data-elvern-direct-parity="root"]');
+    if (!root) throw new Error("Missing tagged direct parity root.");
+    const rootRect = root.getBoundingClientRect();
+    return Array.from(document.querySelectorAll("[data-elvern-direct-parity]")).map((element) => {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        name: element.getAttribute("data-elvern-direct-parity"),
+        geometry: {
+          x: Number((rect.x - rootRect.x).toFixed(3)),
+          y: Number((rect.y - rootRect.y).toFixed(3)),
+          width: Number(rect.width.toFixed(3)),
+          height: Number(rect.height.toFixed(3)),
+        },
+        computed_style: Object.fromEntries(properties.map((property) => [property, style[property]])),
+      };
+    }).sort((left, right) => left.name.localeCompare(right.name));
+  }, DIRECT_PARITY_STYLE_PROPERTIES);
 }
 
 
@@ -474,6 +704,10 @@ async function normalizeMeridianProductionFixture(page) {
         .replaceAll("127.0.0.1", "elvern-test.example")
         .replaceAll("phase7-browser", "demo-admin");
     }
+    const directUserAvatar = document.querySelector(".meridian-user-actions__avatar");
+    if (directUserAvatar?.textContent.trim() === "DE") {
+      directUserAvatar.textContent = "DC";
+    }
   });
 }
 
@@ -535,6 +769,56 @@ async function writeMeridianParityArtifacts({
     await testInfo.attach(attachmentName, { body, contentType });
   }
   return { computedStyleReport, geometryReport, outputDirectory };
+}
+
+
+async function writeDirectParityArtifacts({
+  actual,
+  actualBounds,
+  comparison,
+  fullComparison,
+  name,
+  parityActual,
+  parityReference,
+  productionEvidence,
+  reference,
+  referenceBounds,
+  referenceEvidence,
+  testInfo,
+}) {
+  const outputRoot = process.env.ELVERN_CONTROL_CENTER_SCREENSHOT_DIR
+    || resolve(process.cwd(), "../tmp/meridian-parity");
+  const outputDirectory = resolve(outputRoot, "direct-states", name);
+  mkdirSync(outputDirectory, { recursive: true });
+  const evidenceReport = {
+    state: name,
+    reference_bounds: referenceBounds,
+    actual_bounds: actualBounds,
+    reference: referenceEvidence,
+    actual: productionEvidence,
+  };
+  const pixelReport = {
+    parity_gate: { ...comparison, diff_base64: undefined },
+    full_region: { ...fullComparison, diff_base64: undefined },
+  };
+  writeFileSync(resolve(outputDirectory, "demo-reference.png"), reference);
+  writeFileSync(resolve(outputDirectory, "production-actual.png"), actual);
+  writeFileSync(resolve(outputDirectory, "demo-parity-crop.png"), parityReference);
+  writeFileSync(resolve(outputDirectory, "production-parity-crop.png"), parityActual);
+  if (comparison.diff_base64) {
+    writeFileSync(resolve(outputDirectory, "pixel-diff.png"), Buffer.from(comparison.diff_base64, "base64"));
+  }
+  writeFileSync(resolve(outputDirectory, "evidence.json"), `${JSON.stringify(evidenceReport, null, 2)}\n`, "utf8");
+  writeFileSync(resolve(outputDirectory, "pixel-report.json"), `${JSON.stringify(pixelReport, null, 2)}\n`, "utf8");
+  await testInfo.attach(`${name}-demo-reference`, { body: reference, contentType: "image/png" });
+  await testInfo.attach(`${name}-production-actual`, { body: actual, contentType: "image/png" });
+  await testInfo.attach(`${name}-demo-parity-crop`, { body: parityReference, contentType: "image/png" });
+  await testInfo.attach(`${name}-production-parity-crop`, { body: parityActual, contentType: "image/png" });
+  await testInfo.attach(`${name}-evidence`, {
+    body: Buffer.from(JSON.stringify(evidenceReport, null, 2)),
+    contentType: "application/json",
+  });
+  return outputDirectory;
 }
 
 
@@ -990,6 +1274,35 @@ function meridianSafeUsers() {
 }
 
 
+function meridianSafeBackupCatalog() {
+  const primary = [
+    ["2026-08-10T16:53:29Z", 5.26],
+    ["2026-07-30T07:10:19Z", 5.22],
+    ["2026-07-29T18:33:57Z", 5.21],
+    ["2026-06-29T04:01:30Z", 4.51],
+  ];
+  return Array.from({ length: 21 }, (_, index) => {
+    const [createdAt, sizeMb] = primary[index] || [
+      new Date(Date.UTC(2026, 5, 26 - ((index - 4) * 3) - ((index - 4) % 2), 16, 0, 0)).toISOString(),
+      4.5 - ((index - 4) * 0.02),
+    ];
+    const compactTimestamp = createdAt.replaceAll(/[-:]/g, "").replace(".000", "");
+    const checkpointId = `elvern-backup-${compactTimestamp.slice(0, 8)}-${compactTimestamp.slice(9, 15)}Z.tar.gz.enc`;
+    return {
+      checkpoint_id: checkpointId,
+      path: `/srv/elvern-test/backups/${checkpointId}`,
+      created_at_utc: createdAt,
+      backup_format_version: 2,
+      backup_trigger: "auto_before_admin_rescan",
+      auto_checkpoint: true,
+      backup_key_source: "auto",
+      total_size_bytes: Math.round(sizeMb * 1024 * 1024),
+      catalog_status: "valid",
+    };
+  });
+}
+
+
 function meridianSafeAuditEvents() {
   const baseEvents = [
     ["auth.login", "2026-07-30T23:25:00Z", "demo-admin"],
@@ -1183,6 +1496,7 @@ function meridianSafeFixtureState(overrides = {}) {
       recovery_codes_remaining: 10,
     },
     adminInviteCodes: [],
+    backupCatalog: meridianSafeBackupCatalog(),
     exposureStatus: meridianSafeExposureStatus(),
     ...overrides,
   };
@@ -1395,6 +1709,13 @@ async function installFixture(page, requests, state = {}) {
       };
     } else if (path === "/api/admin/users") {
       payload = { users: state.adminUsers || [] };
+    } else if (/^\/api\/admin\/users\/\d+\/download-access$/.test(path)) {
+      payload = state.downloadAccess || {
+        access_mode: "none",
+        selected_items: [],
+      };
+    } else if (/^\/api\/admin\/users\/\d+\/download-search$/.test(path)) {
+      payload = { items: state.downloadSearchResults || [] };
     } else if (path === "/api/admin/sessions") {
       payload = { sessions: state.adminSessions || [] };
     } else if (path === "/api/admin/audit") {
@@ -1463,6 +1784,15 @@ async function installFixture(page, requests, state = {}) {
       };
     } else if (path === "/api/admin/exposure/status") {
       payload = state.exposureStatus || meridianSafeExposureStatus();
+    } else if (path === "/api/admin/backups") {
+      payload = {
+        backups_dir: "/srv/elvern-test/backups",
+        checkpoints: state.backupCatalog || meridianSafeBackupCatalog(),
+      };
+    } else if (path === "/api/admin/backup-jobs/active") {
+      payload = { job: state.activeBackupJob || null };
+    } else if (path === "/api/admin/backups/recent-auth/status") {
+      payload = { verified: state.backupRecentAuthVerified !== false };
     } else if (path === "/api/library/v2/summary") {
       payload = v2Summary(url.searchParams.get("source") || "all", state);
     } else if (path === "/api/library/search") {
@@ -3131,6 +3461,317 @@ test("@control-center-source-generation Meridian dedicated parity matrix emits s
       );
     }
     expect(parityFailures, parityFailures.join("\n")).toEqual([]);
+  } finally {
+    await demoContext.close();
+    await demoBrowser.close();
+  }
+});
+
+
+test("@control-center-source-generation Meridian account, User Actions, and Recovery states have direct visual parity", async ({
+  browserName,
+  page,
+}, testInfo) => {
+  test.skip(browserName !== "chromium", "Direct Meridian parity uses one fixed Chromium executable for both sources.");
+  test.setTimeout(150_000);
+  requireMeridianDemoPath();
+
+  const fixedNow = "2026-08-10T17:12:04Z";
+  const installFixedClock = async (target) => target.addInitScript((isoValue) => {
+    const NativeDate = Date;
+    const fixedTime = NativeDate.parse(isoValue);
+    class FixedDate extends NativeDate {
+      constructor(...args) {
+        super(...(args.length ? args : [fixedTime]));
+      }
+      static now() {
+        return fixedTime;
+      }
+    }
+    Object.setPrototypeOf(FixedDate, NativeDate);
+    window.Date = FixedDate;
+  }, fixedNow);
+
+  const demoBrowser = await chromium.launch({ headless: true });
+  const demoContext = await demoBrowser.newContext({
+    viewport: { width: 1360, height: 880 },
+    deviceScaleFactor: 1,
+    locale: "en-US",
+    timezoneId: "America/Los_Angeles",
+    reducedMotion: "reduce",
+  });
+  await installFixedClock(demoContext);
+  await installLocalMeridianDemoRuntime(demoContext);
+  const demoPage = await demoContext.newPage();
+  const failures = [];
+  const report = [];
+  try {
+    await demoPage.goto(pathToFileURL(MERIDIAN_DEMO_PATH).href, { waitUntil: "load" });
+    const demoRoot = demoPage.locator("[data-mer]:visible").last();
+    await expect(demoRoot).toBeVisible({ timeout: 30_000 });
+
+    await page.unrouteAll({ behavior: "wait" });
+    await installFixedClock(page);
+    await installFixture(page, [], meridianSafeFixtureState());
+    await page.setViewportSize({ width: 1360, height: 880 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto("settings/appearance");
+    await expect(page.locator(".meridian-control-center")).toBeVisible();
+
+    const clickDemoNav = async (label) => {
+      const clicked = await demoPage.getByText(label, { exact: true }).evaluateAll((nodes) => {
+        const target = nodes.find((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.left < 280 && rect.top >= 180 && rect.top < 540;
+        });
+        target?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        return Boolean(target);
+      });
+      expect(clicked, `Meridian demo navigation item ${label}`).toBe(true);
+      await demoPage.waitForTimeout(80);
+    };
+
+    const ensureDemoAdminArea = async () => {
+      const usersNavVisible = await demoPage.getByText("Users & Invites", { exact: true }).evaluateAll((nodes) => nodes.some((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && rect.left < 280;
+      }));
+      if (!usersNavVisible) {
+        await demoPage.getByText("Admin Panel", { exact: true }).first().click();
+        await demoPage.waitForTimeout(80);
+      }
+    };
+
+    const openDemoAccountMenu = async () => {
+      const clicked = await demoPage.evaluate(() => {
+        const role = Array.from(document.querySelectorAll("div")).find((element) => (
+          element.children.length === 0 && element.textContent.trim() === "Administrator"
+        ));
+        let target = role;
+        while (target && target !== document.body && getComputedStyle(target).cursor !== "pointer") {
+          target = target.parentElement;
+        }
+        target?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        return Boolean(target);
+      });
+      expect(clicked).toBe(true);
+      await demoPage.waitForTimeout(40);
+    };
+
+    const openDemoUserActions = async () => {
+      await demoRoot.click({ position: { x: 449, y: 312 } });
+      await demoPage.waitForTimeout(60);
+    };
+
+    const clickDemoModalTab = async (label) => {
+      await tagDirectParityRegion(demoPage, "user-actions", "demo");
+      await demoPage.locator('[data-elvern-direct-parity="root"]').getByText(label, { exact: true }).click();
+      await demoPage.waitForTimeout(40);
+    };
+
+    const closeDemoUserActions = async () => {
+      await tagDirectParityRegion(demoPage, "user-actions", "demo");
+      const clicked = await demoPage.evaluate(() => {
+        const root = document.querySelector('[data-elvern-direct-parity="root"]');
+        const target = Array.from(root?.querySelectorAll("div") || []).find((element) => (
+          element.children.length === 0
+          && element.textContent.trim() === "Close"
+          && getComputedStyle(element).cursor === "pointer"
+        ));
+        target?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        return Boolean(target);
+      });
+      expect(clicked).toBe(true);
+      await demoPage.waitForTimeout(40);
+    };
+
+    const compareDirectState = async ({ kind, name, pixelLimit, meanLimit }) => {
+      await Promise.all([
+        demoPage.evaluate(() => document.fonts?.ready),
+        page.evaluate(() => document.fonts?.ready),
+      ]);
+      await normalizeMeridianDemoFixture(demoPage);
+      await normalizeMeridianProductionFixture(page);
+      // Theme and tab surfaces transition for 250-450ms in both sources.
+      // Sample only after both have reached their settled visual state.
+      await Promise.all([demoPage.waitForTimeout(550), page.waitForTimeout(550)]);
+      await tagDirectParityRegion(demoPage, kind, "demo");
+      await tagDirectParityRegion(page, kind, "production");
+      const demoRegion = demoPage.locator('[data-elvern-direct-parity="root"]');
+      const productionRegion = page.locator('[data-elvern-direct-parity="root"]');
+      const [referenceBounds, actualBounds] = await Promise.all([
+        demoRegion.boundingBox(),
+        productionRegion.boundingBox(),
+      ]);
+      expect(referenceBounds).not.toBeNull();
+      expect(actualBounds).not.toBeNull();
+      const sharedWidth = Math.max(1, Math.floor(Math.min(referenceBounds.width, actualBounds.width)));
+      const sharedHeight = Math.max(1, Math.floor(Math.min(referenceBounds.height, actualBounds.height)));
+      const [reference, actual, referenceEvidence, productionEvidence] = await Promise.all([
+        demoPage.screenshot({
+          animations: "disabled",
+          caret: "hide",
+          clip: { x: referenceBounds.x, y: referenceBounds.y, width: sharedWidth, height: sharedHeight },
+        }),
+        page.screenshot({
+          animations: "disabled",
+          caret: "hide",
+          clip: { x: actualBounds.x, y: actualBounds.y, width: sharedWidth, height: sharedHeight },
+        }),
+        collectDirectParityEvidence(demoPage),
+        collectDirectParityEvidence(page),
+      ]);
+      const referenceByName = Object.fromEntries(referenceEvidence.map((entry) => [entry.name, entry]));
+      const productionByName = Object.fromEntries(productionEvidence.map((entry) => [entry.name, entry]));
+      const parityHeight = kind === "recovery"
+        ? Math.max(1, Math.floor(Math.min(
+          referenceByName.stage?.geometry?.y || sharedHeight,
+          productionByName.stage?.geometry?.y || sharedHeight,
+        )))
+        : sharedHeight;
+      const [parityReference, parityActual] = parityHeight === sharedHeight
+        ? [reference, actual]
+        : await Promise.all([
+          demoPage.screenshot({
+            animations: "disabled",
+            caret: "hide",
+            clip: { x: referenceBounds.x, y: referenceBounds.y, width: sharedWidth, height: parityHeight },
+          }),
+          page.screenshot({
+            animations: "disabled",
+            caret: "hide",
+            clip: { x: actualBounds.x, y: actualBounds.y, width: sharedWidth, height: parityHeight },
+          }),
+        ]);
+      const [comparison, fullComparison] = await Promise.all([
+        comparePngPixels(page, parityReference, parityActual),
+        comparePngPixels(page, reference, actual),
+      ]);
+      const artifactPath = await writeDirectParityArtifacts({
+        actual,
+        actualBounds,
+        comparison,
+        fullComparison,
+        name,
+        parityActual,
+        parityReference,
+        productionEvidence,
+        reference,
+        referenceBounds,
+        referenceEvidence,
+        testInfo,
+      });
+      report.push({
+        name,
+        kind,
+        artifact_path: artifactPath,
+        parity_gate: { ...comparison, diff_base64: undefined },
+        full_region: { ...fullComparison, diff_base64: undefined },
+      });
+      if (comparison.dimensions_match) {
+        if (comparison.changed_pixel_ratio > pixelLimit) {
+          failures.push(`${name}: changed pixel ratio ${comparison.changed_pixel_ratio} exceeds ${pixelLimit}`);
+        }
+        if (comparison.mean_channel_delta > meanLimit) {
+          failures.push(`${name}: mean channel delta ${comparison.mean_channel_delta} exceeds ${meanLimit}`);
+        }
+      }
+      const required = kind === "account-menu"
+        ? ["root", "primary-item", "primary-icon", "divider", "danger-item", "danger-icon"]
+        : kind === "user-actions"
+          ? ["root", "header", "avatar", "identity", "close", "tabs", "active-tab", "body", "panel"]
+          : ["root", "top-row", "scope", "stages", "stage-bar", "stage-label", "stage", "navigation"];
+      for (const landmark of required) {
+        if (!referenceByName[landmark] || !productionByName[landmark]) {
+          failures.push(`${name}: missing ${landmark} landmark`);
+        }
+      }
+      const exactGeometry = DIRECT_PARITY_GEOMETRY_KEYS[kind];
+      for (const [landmark, properties] of Object.entries(exactGeometry)) {
+        const referenceEntry = referenceByName[landmark];
+        const productionEntry = productionByName[landmark];
+        if (!referenceEntry || !productionEntry) continue;
+        const delta = geometryDelta(referenceEntry.geometry, productionEntry.geometry, properties);
+        if (Math.max(...Object.values(delta)) > CONTROL_CENTER_GEOMETRY_DELTA_LIMIT_PX) {
+          failures.push(`${name}: ${landmark} geometry delta ${JSON.stringify(delta)}`);
+        }
+      }
+      const exactStyles = DIRECT_PARITY_STYLE_KEYS[kind];
+      for (const [landmark, properties] of Object.entries(exactStyles)) {
+        const referenceEntry = referenceByName[landmark];
+        const productionEntry = productionByName[landmark];
+        if (!referenceEntry || !productionEntry) continue;
+        const differences = styleDifferences(referenceEntry.computed_style, productionEntry.computed_style, properties);
+        if (Object.keys(differences).length) {
+          failures.push(`${name}: ${landmark} computed styles differ ${JSON.stringify(differences)}`);
+        }
+      }
+    };
+
+    const themes = ["light", "mixed", "dark"];
+    for (const [themeIndex, theme] of themes.entries()) {
+      await expect(demoRoot).toHaveAttribute("data-mer", theme);
+      await expect(page.locator(".meridian-control-center")).toHaveAttribute("data-control-center-theme", theme);
+
+      await openDemoAccountMenu();
+      await page.locator(".meridian-user-card").click();
+      await compareDirectState({
+        kind: "account-menu",
+        name: `${theme}-account-menu`,
+        pixelLimit: 0.01,
+        meanLimit: 3,
+      });
+      await openDemoAccountMenu();
+      await page.locator(".meridian-user-card").click();
+
+      await ensureDemoAdminArea();
+      await clickDemoNav("Users & Invites");
+      await page.goto("admin/users-invites");
+      await expect(page.getByRole("heading", { name: "Users & Invites", exact: true })).toBeVisible();
+      await openDemoUserActions();
+      await page.getByRole("button", { name: "Open user actions for demo-caleb" }).click();
+      await expect(page.getByRole("dialog")).toBeVisible();
+      for (const [label, key] of [["Account", "account"], ["Assistant", "assistant"], ["Downloads", "downloads"]]) {
+        if (key !== "account") {
+          await clickDemoModalTab(label);
+          await page.getByRole("tab", { name: label }).click();
+        }
+        await compareDirectState({
+          kind: "user-actions",
+          name: `${theme}-user-actions-${key}`,
+          pixelLimit: 0.06,
+          meanLimit: 9,
+        });
+      }
+      await closeDemoUserActions();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+
+      await clickDemoNav("Recovery");
+      await page.goto("admin/recovery");
+      await expect(page.getByRole("heading", { name: "Recovery", exact: true })).toBeVisible();
+      for (const [label, key] of [["1 · Create", "create"], ["2 · Checkpoints", "checkpoints"], ["3 · Verify & protect", "verify"]]) {
+        await demoPage.getByText(label, { exact: true }).last().click();
+        await page.getByRole("button", { name: label }).click();
+        await compareDirectState({
+          kind: "recovery",
+          name: `${theme}-recovery-${key}`,
+          pixelLimit: 0.05,
+          meanLimit: 8,
+        });
+      }
+
+      if (themeIndex < themes.length - 1) {
+        await demoRoot.click({ position: { x: 1320, y: 840 } });
+        await page.getByRole("button", { name: /Theme:/ }).click();
+        await demoPage.waitForTimeout(80);
+      }
+    }
+
+    await testInfo.attach("meridian-direct-state-report", {
+      body: Buffer.from(JSON.stringify(report, null, 2)),
+      contentType: "application/json",
+    });
+    expect(failures, failures.join("\n")).toEqual([]);
   } finally {
     await demoContext.close();
     await demoBrowser.close();

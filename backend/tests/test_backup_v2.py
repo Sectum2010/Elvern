@@ -4,6 +4,7 @@ import io
 import json
 import os
 import struct
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -147,6 +148,90 @@ def test_keyring_permissions_and_rotation_keep_previous_key(initialized_settings
     if os.name != "nt":
         assert service.path.parent.stat().st_mode & 0o777 == 0o700
         assert service.path.stat().st_mode & 0o777 == 0o600
+
+
+def test_missing_keyring_read_does_not_create_file(initialized_settings) -> None:
+    service = BackupKeyringService(initialized_settings)
+    assert not service.path.exists()
+
+    with pytest.raises(ValueError, match="unavailable"):
+        service.read_key("bk-missing")
+
+    assert not service.path.exists()
+    assert not service.path.with_name(f".{service.path.name}.lock").exists()
+
+
+def test_corrupt_keyring_read_returns_stable_safe_error(initialized_settings) -> None:
+    service = BackupKeyringService(initialized_settings)
+    service.path.parent.mkdir(parents=True, exist_ok=True)
+    service.path.write_text('{"private_path": "/secret/location"', encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        service.read_key("bk-secret")
+
+    assert str(exc_info.value) == "Backup keyring is unreadable"
+    assert str(service.path) not in str(exc_info.value)
+    assert "secret" not in str(exc_info.value).casefold()
+
+
+def test_first_auto_write_creates_one_keyring_with_one_key(initialized_settings) -> None:
+    service = BackupKeyringService(initialized_settings)
+
+    active = service.active_write_key()
+    payload = json.loads(service.path.read_text(encoding="utf-8"))
+
+    assert payload["active_key_id"] == active.key_id
+    assert list(payload["keys"]) == [active.key_id]
+
+
+def test_manual_passphrase_encryption_does_not_create_auto_keyring(initialized_settings) -> None:
+    service = BackupKeyringService(initialized_settings)
+
+    _encrypt_v2(initialized_settings, b"manual", passphrase="manual-test-passphrase")
+
+    assert not service.path.exists()
+
+
+def test_concurrent_first_keyring_creators_converge(initialized_settings) -> None:
+    barrier = threading.Barrier(3)
+    created = []
+    errors: list[Exception] = []
+
+    def create() -> None:
+        try:
+            barrier.wait(timeout=2)
+            created.append(BackupKeyringService(initialized_settings).active_write_key())
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=create) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait(timeout=2)
+    for thread in threads:
+        thread.join(timeout=5)
+
+    payload = json.loads(BackupKeyringService(initialized_settings).path.read_text(encoding="utf-8"))
+    assert errors == []
+    assert len(created) == 2
+    assert created[0].key_id == created[1].key_id
+    assert len(payload["keys"]) == 1
+
+
+def test_keyring_directory_fsync_unsupported_is_safe(initialized_settings, monkeypatch) -> None:
+    service = BackupKeyringService(initialized_settings)
+    real_open = os.open
+
+    def compatible_open(path, flags, mode=0o777):
+        if Path(path) == service.path.parent:
+            raise OSError("directory handles unsupported")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", compatible_open)
+
+    active = service.active_write_key()
+
+    assert service.read_key(active.key_id).key == active.key
 
 
 def test_sqlite_snapshot_reports_real_page_progress(initialized_settings, tmp_path) -> None:

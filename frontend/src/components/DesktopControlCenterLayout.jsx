@@ -5,12 +5,10 @@ import {
   FileClock,
   Gauge,
   Library,
-  LogOut,
   MonitorPlay,
   Palette,
   RotateCcw,
   Shield,
-  Sparkles,
   Users,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -62,7 +60,7 @@ const TITLES = {
   "users-invites": ["Users & Invites", "Accounts, new-user creation, invite codes, and password help."],
   security: ["Security", "URL prefix, two-factor authentication, and exposure planning."],
   logs: ["Logs", "Active sessions and the recent audit trail."],
-  recovery: ["Recovery", ""],
+  recovery: ["Recovery", "Encrypted checkpoints, verification, and off-host protection."],
 };
 
 function roleLabel(role) {
@@ -315,7 +313,9 @@ export function DesktopControlCenterLayout() {
             <div className="meridian-account-menu" id="meridian-account-menu" role="menu">
               {canAccessAssistant(user) ? (
                 <button className="meridian-account-menu__item" onClick={openAssistant} role="menuitem" type="button">
-                  <Sparkles aria-hidden="true" size={15} />
+                  <svg aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M12 4l1.8 5.2L19 11l-5.2 1.8L12 18l-1.8-5.2L5 11l5.2-1.8z" />
+                  </svg>
                   <span>Assistant</span>
                 </button>
               ) : null}
@@ -329,7 +329,11 @@ export function DesktopControlCenterLayout() {
                 role="menuitem"
                 type="button"
               >
-                <LogOut aria-hidden="true" size={15} />
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M9.5 4.5H6A1.5 1.5 0 004.5 6v12A1.5 1.5 0 006 19.5h3.5" />
+                  <path d="M15.5 8l4 4-4 4" />
+                  <path d="M19.5 12h-10" />
+                </svg>
                 <span>Sign out</span>
               </button>
             </div>

@@ -161,7 +161,10 @@ contents in browser storage.
   The new own-2FA dialog traps focus, supports Escape, and restores focus.
 - Logs retains real sessions and the real 100-event audit response. The approved
   demo ticker line is presentation-only and does not replace audit data.
-- Recovery contains the complete existing encrypted-checkpoint workflow.
+- Recovery uses the Meridian single-card, three-stage encrypted-checkpoint
+  workflow with real catalog, verification, preview, deletion, recent-auth, and
+  asynchronous job state. It still provides no Restore, browser Export, or
+  backup-keyring export action.
 
 Revoking the current session triggers immediate auth reconciliation; revoking a
 different session leaves the current administrator in Admin.
@@ -173,15 +176,25 @@ rotation, and the four-step Exposure workflow. Logs keeps real sessions and
 audit rows; Recovery keeps the full existing backup workflow. No destructive
 mutation was replaced with demo state.
 
+The private local Meridian demo under `ui-redesign/tmp` is the visual source of
+truth for the desktop account menu, User Actions, and Recovery surfaces. Demo
+behavior and synthetic values are never backend authority; production access,
+security, and mutation contracts remain authoritative.
+
 Users & Invites uses one Meridian surface hierarchy rather than stacked legacy
 and Meridian card shadows. Avatars select one of eight restrained palettes from
 a stable hash of the internal user ID; color never communicates role, age,
 presence, or risk. Active/background/pending status indicators have distinct,
 subtle motion while offline/disabled indicators remain static; reduced-motion
-mode disables all status animation. The existing User Actions modal and secure
-handlers remain unchanged. Invite age selection is an inline Meridian panel on
-desktop, and Password Help has its own stable card with real loading, refresh,
-cached-error, empty, and request states.
+mode disables all status animation. User Actions uses dedicated Meridian
+Account, Assistant, and Downloads panels while retaining the secure production
+handlers. Enable and Disable both require the current administrator password;
+disable revokes active access while enable does not restore old sessions. Age
+credentials silently advance on the configured local-calendar anniversary until
+18, and only 18 is displayed as `18+`; under-18 values never receive a plus.
+Invite age selection is an inline Meridian panel on desktop, and Password Help
+has its own stable card with real loading, refresh, cached-error, empty, and
+request states.
 
 Overview keeps the presentation-only `92 / PRIVATE` gauge. Posture rows reserve
 an explicit label column and constrain long values to their value column. Long
@@ -265,6 +278,32 @@ before an owner accepts them. The private HTML/support script and its absolute
 path are never copied into production, served by Elvern, or shipped in reviewed
 artifacts.
 
+The source-generation suite also has a direct 21-state gate for the bottom-left
+account menu, all three User Actions tabs, and all three Recovery phases across
+light, mixed, and dark themes:
+
+```bash
+ELVERN_MERIDIAN_DEMO_PATH=/absolute/private/Settings-Meridian.dc.html \
+  node frontend/scripts/run-cross-browser-playwright.mjs \
+    --project chromium-control-center-source-generation \
+    --grep "account, User Actions, and Recovery states"
+```
+
+The standalone demo runtime is normalized to the production global `border-box`
+model and bundled fonts; the private demo source itself is never edited. Each
+state writes full demo/production crops plus the strict parity crop, pixel diff,
+full-region diagnostics, and named geometry/computed-style evidence under the
+ignored `tmp/meridian-parity/direct-states/` directory. Account-menu comparison
+covers the full region and is effectively pixel exact. User Actions compares the
+full modal region with a 6% changed-pixel and mean-delta 9 ceiling while retaining
+exact shell geometry and styles. Recovery retains full phase screenshots and
+diagnostics, while its strict pixel gate covers the shared top row, scope, and
+three-stage navigation so intentional security copy and real controls do not
+exempt the shell; card width, radius, padding, stage bars/labels, and phase-content
+geometry remain independently asserted within 1px. The verified worst direct
+results were 0 changed pixels for account-menu geometry, `5.8462% / 8.5847` for
+User Actions, and `3.9032% / 3.4167` for the Recovery shell.
+
 Normal CI does not read the private demo. It compares stubbed production against
 the sanitized reviewed files under
 `frontend/tests-phase7/baselines/control-center`:
@@ -313,15 +352,13 @@ Android device review is still required before release.
 
 ## Explicitly deferred
 
-- Enable/disable-user reauthentication.
 - Role-change and password-update session revocation.
-- Fine-grained in-flight Download Access revocation.
 - Invite idempotency/reveal recovery and Used/Expired hide behavior.
 - Recovery-code response-loss recovery.
 - Two-phase URL-prefix rotation.
 - Exposure runtime activation, env writing, or restart.
 - Real live-audit streaming, audit cursors, and audit detail expansion.
-- Actual backup restore/download/delete/upload.
+- Actual backup restore/download/upload.
 - A real computed Security score.
 - Phone/tablet Control Center redesign.
 

@@ -760,7 +760,7 @@ def test_disabled_user_session_loses_access_immediately(initialized_settings, cl
         user_id=int(created["id"]),
         enabled=False,
         role=None,
-        current_admin_password=None,
+        current_admin_password=initialized_settings.admin_bootstrap_password,
         actor=_admin_user(initialized_settings),
         ip_address="127.0.0.1",
         user_agent="pytest",
@@ -832,7 +832,7 @@ def test_native_playback_access_is_invalidated_after_parent_session_revoke_or_us
             user_id=int(created["id"]),
             enabled=False,
             role=None,
-            current_admin_password=None,
+            current_admin_password=initialized_settings.admin_bootstrap_password,
             actor=_admin_user(initialized_settings),
             ip_address="127.0.0.1",
             user_agent="pytest",
@@ -1649,7 +1649,7 @@ def test_external_player_native_playback_still_respects_user_disable_and_native_
             user_id=int(created["id"]),
             enabled=False,
             role=None,
-            current_admin_password=None,
+            current_admin_password=initialized_settings.admin_bootstrap_password,
             actor=_admin_user(initialized_settings),
             ip_address="127.0.0.1",
             user_agent="pytest",
@@ -1930,7 +1930,7 @@ def test_desktop_vlc_external_playback_still_respects_disable_revoke_and_close(
             user_id=int(created["id"]),
             enabled=False,
             role=None,
-            current_admin_password=None,
+            current_admin_password=initialized_settings.admin_bootstrap_password,
             actor=_admin_user(initialized_settings),
             ip_address="127.0.0.1",
             user_agent="pytest",
@@ -2322,7 +2322,7 @@ def test_disabled_user_login_returns_disabled_reason(initialized_settings, clien
         user_id=int(created["id"]),
         enabled=False,
         role=None,
-        current_admin_password=None,
+        current_admin_password=initialized_settings.admin_bootstrap_password,
         actor=_admin_user(initialized_settings),
         ip_address="127.0.0.1",
         user_agent="pytest",
@@ -2489,7 +2489,7 @@ def test_disabled_login_does_not_count_as_invalid_password_for_device_lockout(
         user_id=int(created["id"]),
         enabled=False,
         role=None,
-        current_admin_password=None,
+        current_admin_password=initialized_settings.admin_bootstrap_password,
         actor=_admin_user(initialized_settings),
         ip_address="127.0.0.1",
         user_agent="pytest",
@@ -4343,3 +4343,367 @@ def test_password_reset_revokes_every_target_access_surface(initialized_settings
         seeded,
         reason="user_password_changed",
     )
+
+
+@pytest.mark.parametrize("initial_enabled,next_enabled", [(True, False), (False, True)])
+def test_account_state_change_requires_correct_admin_password_without_partial_mutation(
+    initialized_settings,
+    initial_enabled: bool,
+    next_enabled: bool,
+) -> None:
+    created = create_user(
+        initialized_settings,
+        username=f"state-password-{int(initial_enabled)}",
+        password="family-password",
+        role="standard_user",
+        enabled=initial_enabled,
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    for password, expected_status in ((None, 400), ("wrong-password", 401)):
+        with pytest.raises(HTTPException) as exc_info:
+            update_user(
+                initialized_settings,
+                user_id=int(created["id"]),
+                enabled=next_enabled,
+                role=None,
+                current_admin_password=password,
+                actor=_admin_user(initialized_settings),
+                ip_address="127.0.0.1",
+                user_agent="pytest",
+            )
+        assert exc_info.value.status_code == expected_status
+        with get_connection(initialized_settings) as connection:
+            row = connection.execute("SELECT enabled FROM users WHERE id = ?", (created["id"],)).fetchone()
+        assert bool(row["enabled"]) is initial_enabled
+
+    updated = update_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        enabled=next_enabled,
+        role=None,
+        current_admin_password=initialized_settings.admin_bootstrap_password,
+        actor=_admin_user(initialized_settings),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    assert updated["enabled"] is next_enabled
+    with get_connection(initialized_settings) as connection:
+        details = json.loads(connection.execute(
+            "SELECT details_json FROM audit_logs WHERE action = 'admin.user.update' ORDER BY id DESC LIMIT 1"
+        ).fetchone()["details_json"])
+    assert "password" not in json.dumps(details).lower()
+
+
+def test_self_and_last_enabled_admin_disable_are_rejected(initialized_settings, monkeypatch) -> None:
+    actor = _admin_user(initialized_settings)
+    with pytest.raises(HTTPException, match="cannot disable your own"):
+        update_user(
+            initialized_settings,
+            user_id=actor.id,
+            enabled=False,
+            role=None,
+            current_admin_password=initialized_settings.admin_bootstrap_password,
+            actor=actor,
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+
+    second_admin = create_user(
+        initialized_settings,
+        username="last-admin-target",
+        password="family-password",
+        role="admin",
+        enabled=True,
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    with get_connection(initialized_settings) as connection:
+        connection.execute("UPDATE users SET enabled = 0 WHERE id = ?", (actor.id,))
+        connection.commit()
+    monkeypatch.setattr("backend.app.services.admin_service._require_current_admin_password", lambda *args, **kwargs: None)
+    with pytest.raises(HTTPException, match="at least one enabled admin"):
+        update_user(
+            initialized_settings,
+            user_id=int(second_admin["id"]),
+            enabled=False,
+            role=None,
+            current_admin_password=initialized_settings.admin_bootstrap_password,
+            actor=actor,
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+        )
+
+
+def test_disable_revokes_every_boundary_and_enable_does_not_restore_sessions(initialized_settings) -> None:
+    seeded = _seed_user_security_boundary_access(
+        initialized_settings,
+        username="boundary-disable",
+        role="standard_user",
+    )
+    actor = _admin_user(initialized_settings)
+    update_user(
+        initialized_settings,
+        user_id=seeded["user_id"],
+        enabled=False,
+        role=None,
+        current_admin_password=initialized_settings.admin_bootstrap_password,
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    _assert_user_security_boundary_revoked(initialized_settings, seeded, reason="user_disabled")
+
+    update_user(
+        initialized_settings,
+        user_id=seeded["user_id"],
+        enabled=True,
+        role=None,
+        current_admin_password=initialized_settings.admin_bootstrap_password,
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    with get_connection(initialized_settings) as connection:
+        auth_row = connection.execute(
+            "SELECT revoked_at, revoked_reason FROM sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (seeded["user_id"],),
+        ).fetchone()
+    assert auth_row["revoked_at"] is not None
+    assert auth_row["revoked_reason"] == "user_disabled"
+
+
+def test_disable_route_invalidates_in_memory_user_sessions(
+    initialized_settings,
+    client,
+    admin_credentials,
+) -> None:
+    target = _create_standard_user(initialized_settings, username="disable-route-invalidation")
+    calls: list[tuple[int, str]] = []
+    client.app.state.mobile_playback_manager.invalidate_user_sessions = (
+        lambda user_id, *, reason: calls.append((int(user_id), reason))
+    )
+    login = client.post(
+        "/api/auth/login",
+        json={"username": admin_credentials["username"], "password": admin_credentials["password"]},
+    )
+    assert login.status_code == 200
+
+    response = client.patch(
+        f"/api/admin/users/{target['id']}",
+        json={
+            "enabled": False,
+            "current_admin_password": admin_credentials["password"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == [(int(target["id"]), "user_disabled")]
+
+
+def _seed_download_reduction_sessions(settings, *, username: str):
+    created = _create_standard_user(settings, username=username)
+    first = _create_media_item(settings, relative_name=f"{username}-one.mp4")
+    second = _create_media_item(settings, relative_name=f"{username}-two.mp4")
+    with get_connection(settings) as connection:
+        source_id = ensure_current_shared_local_source_binding(settings, connection=connection)
+        connection.execute(
+            "UPDATE media_items SET library_source_id = ? WHERE id IN (?, ?)",
+            (source_id, first["id"], second["id"]),
+        )
+        connection.commit()
+    session_user, _token = _issue_user_session(settings, username=username, password="family-password")
+    return created, session_user, first, second
+
+
+def test_download_access_all_to_selected_revokes_only_removed_active_item(initialized_settings) -> None:
+    created, session_user, first, second = _seed_download_reduction_sessions(
+        initialized_settings,
+        username="download-reduction-all",
+    )
+    actor = _admin_user(initialized_settings)
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        access_mode="all",
+        media_item_ids=[],
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    first_session = create_download_session(
+        initialized_settings,
+        user=session_user,
+        item_id=int(first["id"]),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    second_session = create_download_session(
+        initialized_settings,
+        user=session_user,
+        item_id=int(second["id"]),
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    result = update_download_access_for_user(
+        initialized_settings,
+        user_id=int(created["id"]),
+        access_mode="selected",
+        media_item_ids=[int(first["id"])],
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    with get_connection(initialized_settings) as connection:
+        rows = {
+            int(row["id"]): row
+            for row in connection.execute(
+                "SELECT id, revoked_at, last_error FROM download_sessions WHERE id IN (?, ?)",
+                (first_session["session_id"], second_session["session_id"]),
+            ).fetchall()
+        }
+        audit = json.loads(connection.execute(
+            "SELECT details_json FROM audit_logs WHERE action = 'admin.download_access.update' ORDER BY id DESC LIMIT 1"
+        ).fetchone()["details_json"])
+
+    assert result["_revoked_download_session_count"] == 1
+    assert rows[int(first_session["session_id"])]["revoked_at"] is None
+    assert rows[int(second_session["session_id"])]["revoked_at"] is not None
+    assert rows[int(second_session["session_id"])]["last_error"] == "download_access_revoked"
+    assert audit["revoked_download_session_count"] == 1
+
+
+def test_download_access_selected_removal_none_and_expansion_are_precise(initialized_settings) -> None:
+    created, session_user, first, second = _seed_download_reduction_sessions(
+        initialized_settings,
+        username="download-reduction-selected",
+    )
+    actor = _admin_user(initialized_settings)
+    user_id = int(created["id"])
+    both_ids = [int(first["id"]), int(second["id"])]
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=user_id,
+        access_mode="selected",
+        media_item_ids=both_ids,
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    first_session = create_download_session(
+        initialized_settings, user=session_user, item_id=both_ids[0], ip_address="127.0.0.1", user_agent="pytest"
+    )
+    second_session = create_download_session(
+        initialized_settings, user=session_user, item_id=both_ids[1], ip_address="127.0.0.1", user_agent="pytest"
+    )
+
+    unchanged = update_download_access_for_user(
+        initialized_settings,
+        user_id=user_id,
+        access_mode="selected",
+        media_item_ids=both_ids,
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    expanded = update_download_access_for_user(
+        initialized_settings,
+        user_id=user_id,
+        access_mode="all",
+        media_item_ids=[],
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    assert unchanged["_revoked_download_session_count"] == 0
+    assert expanded["_revoked_download_session_count"] == 0
+
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=user_id,
+        access_mode="selected",
+        media_item_ids=both_ids,
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    removed = update_download_access_for_user(
+        initialized_settings,
+        user_id=user_id,
+        access_mode="selected",
+        media_item_ids=[both_ids[0]],
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    assert removed["_revoked_download_session_count"] == 1
+    none = update_download_access_for_user(
+        initialized_settings,
+        user_id=user_id,
+        access_mode="none",
+        media_item_ids=[],
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    assert none["_revoked_download_session_count"] == 1
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            "SELECT id, revoked_at FROM download_sessions WHERE id IN (?, ?) ORDER BY id",
+            (first_session["session_id"], second_session["session_id"]),
+        ).fetchall()
+    assert all(row["revoked_at"] is not None for row in rows)
+
+
+def test_download_reduction_applies_current_age_authorization(initialized_settings) -> None:
+    created, session_user, first, _second = _seed_download_reduction_sessions(
+        initialized_settings,
+        username="download-reduction-age",
+    )
+    actor = _admin_user(initialized_settings)
+    user_id = int(created["id"])
+    item_id = int(first["id"])
+    update_download_access_for_user(
+        initialized_settings,
+        user_id=user_id,
+        access_mode="all",
+        media_item_ids=[],
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    session = create_download_session(
+        initialized_settings,
+        user=session_user,
+        item_id=item_id,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    set_media_age_requirement(
+        initialized_settings,
+        item_id=item_id,
+        age_requirement=18,
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    with get_connection(initialized_settings) as connection:
+        connection.execute("UPDATE users SET age_credential = 13 WHERE id = ?", (user_id,))
+        connection.commit()
+
+    result = update_download_access_for_user(
+        initialized_settings,
+        user_id=user_id,
+        access_mode="selected",
+        media_item_ids=[item_id],
+        actor=actor,
+        ip_address="127.0.0.1",
+        user_agent="pytest",
+    )
+    with get_connection(initialized_settings) as connection:
+        row = connection.execute("SELECT revoked_at FROM download_sessions WHERE id = ?", (session["session_id"],)).fetchone()
+    assert result["_revoked_download_session_count"] == 1
+    assert row["revoked_at"] is not None

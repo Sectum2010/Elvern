@@ -259,10 +259,18 @@ security reports. Do not paste raw fallback download URLs into docs or issues.
 Manual backups may contain secrets such as env values, OAuth tokens,
 session-related secrets, and database contents. Do not commit or share them.
 
-Auto encrypted backups are protected by a key derived from
-`ELVERN_SESSION_SECRET`. If that secret is lost or rotated, old auto-key backups
-may not be recoverable. For long-term/off-machine recovery, use a manual
-passphrase backup.
+Auto encrypted backups use an independent server-local backup keyring. Reading
+or inspecting a backup never creates a replacement keyring. The encrypted
+checkpoint file is not independently portable without that server keyring; for
+long-term or off-host recovery, create a manual-passphrase backup and retain the
+passphrase separately. Elvern does not provide browser backup export, restore,
+or keyring export.
+
+Backup jobs use a short-lived SQLite writer lease so multiple backend processes
+cannot publish the same checkpoint concurrently. The worker heartbeats the
+lease about every 10 seconds and a genuinely stale lease may be reclaimed after
+about 45 seconds. Persisted job history is intentionally independent of the
+initiating auth session and survives logout or user deletion.
 
 Plaintext backup directories are unsafe. Default backup creation, Admin UI, and
 Admin API flows must stay encrypted-only. CLI plaintext creation requires both

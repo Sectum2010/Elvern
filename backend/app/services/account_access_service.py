@@ -10,9 +10,10 @@ from fastapi import HTTPException, status
 
 from ..config import Settings
 from ..db import get_connection, utcnow_iso
-from ..security import generate_session_token, hash_password, hash_token_hmac
-from .audit_service import log_audit_event
 from ..models import AuthenticatedUser
+from ..security import generate_session_token, hash_password, hash_token_hmac
+from .admin_events_service import emit_admin_event
+from .audit_service import log_audit_event
 from .library_service import get_media_item_detail, search_library
 from .media_age_access_service import load_accessible_media_item_ids_by_age
 from .media_age_access_service import (
@@ -20,6 +21,7 @@ from .media_age_access_service import (
     format_age_for_display,
     validate_age_credential,
 )
+from .user_age_credential_service import current_local_date, new_age_credential_schedule
 
 
 INVITE_CODE_LENGTH = 32
@@ -374,15 +376,26 @@ def create_user_with_invite(
         ).fetchone()
         if existing is not None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Unable to create account with these details")
+        assigned_age = validate_age_credential(invite_row["assigned_age"] or 18)
+        schedule = new_age_credential_schedule(age=assigned_age, today=current_local_date(settings))
         cursor = connection.execute(
             """
-            INSERT INTO users (username, password_hash, role, enabled, age_credential, created_at, updated_at)
-            VALUES (?, ?, 'standard_user', 1, ?, ?, ?)
+            INSERT INTO users (
+                username, password_hash, role, enabled, age_credential,
+                age_credential_anchor_age, age_credential_anchor_date,
+                age_credential_next_increment_on, age_credential_last_manual_set_at,
+                created_at, updated_at
+            )
+            VALUES (?, ?, 'standard_user', 1, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 normalized_username,
                 hash_password(password, settings),
-                validate_age_credential(invite_row["assigned_age"] or 18),
+                assigned_age,
+                schedule.anchor_age,
+                schedule.anchor_date.isoformat(),
+                schedule.next_increment_on.isoformat() if schedule.next_increment_on else None,
+                now,
                 now,
                 now,
             ),
@@ -403,7 +416,7 @@ def create_user_with_invite(
         role="standard_user",
         enabled=True,
         assistant_beta_enabled=False,
-        age_credential=validate_age_credential(invite_row["assigned_age"] or 18),
+        age_credential=assigned_age,
     )
     log_audit_event(
         settings,
@@ -657,9 +670,10 @@ def update_download_access_for_user(
     if normalized_mode != DOWNLOAD_ACCESS_SELECTED:
         selected_ids = []
     now = utcnow_iso()
+    revoked_session_count = 0
     with get_connection(settings) as connection:
         target_user = connection.execute(
-            "SELECT id, role FROM users WHERE id = ?",
+            "SELECT id, username, role, enabled, COALESCE(age_credential, 18) AS age_credential FROM users WHERE id = ?",
             (user_id,),
         ).fetchone()
         if target_user is None:
@@ -669,6 +683,22 @@ def update_download_access_for_user(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Admin accounts always have full download access",
             )
+        old_grant = connection.execute(
+            "SELECT access_mode FROM download_access_grants WHERE user_id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        old_mode = (
+            DOWNLOAD_ACCESS_ALL
+            if (target_user["role"] or "standard_user") == "admin"
+            else str(old_grant["access_mode"] if old_grant else DOWNLOAD_ACCESS_NONE)
+        )
+        old_selected_ids = {
+            int(row["media_item_id"])
+            for row in connection.execute(
+                "SELECT media_item_id FROM download_access_items WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        }
         if selected_ids:
             placeholders = ",".join("?" for _ in selected_ids)
             existing_ids = {
@@ -699,15 +729,58 @@ def update_download_access_for_user(
                 """,
                 (user_id, media_item_id, actor.id, now),
             )
-        if normalized_mode == DOWNLOAD_ACCESS_NONE:
-            connection.execute(
+        policy_reduced = (
+            (old_mode == DOWNLOAD_ACCESS_ALL and normalized_mode != DOWNLOAD_ACCESS_ALL)
+            or (old_mode == DOWNLOAD_ACCESS_SELECTED and normalized_mode == DOWNLOAD_ACCESS_NONE)
+            or (
+                old_mode == DOWNLOAD_ACCESS_SELECTED
+                and normalized_mode == DOWNLOAD_ACCESS_SELECTED
+                and not old_selected_ids.issubset(set(selected_ids))
+            )
+        )
+        if policy_reduced:
+            active_rows = connection.execute(
                 """
-                UPDATE download_sessions
-                SET revoked_at = COALESCE(revoked_at, ?), last_error = 'download_access_revoked'
+                SELECT id, media_item_id
+                FROM download_sessions
                 WHERE user_id = ? AND revoked_at IS NULL AND completed_at IS NULL
                 """,
-                (now, user_id),
+                (user_id,),
+            ).fetchall()
+            active_media_ids = {int(row["media_item_id"]) for row in active_rows}
+            if normalized_mode == DOWNLOAD_ACCESS_ALL:
+                policy_allowed_ids = active_media_ids
+            elif normalized_mode == DOWNLOAD_ACCESS_SELECTED:
+                policy_allowed_ids = active_media_ids.intersection(selected_ids)
+            else:
+                policy_allowed_ids = set()
+            age_allowed_ids = load_accessible_media_item_ids_by_age(
+                connection,
+                user=AuthenticatedUser(
+                    id=int(target_user["id"]),
+                    username=str(target_user["username"]),
+                    role=str(target_user["role"] or "standard_user"),
+                    enabled=bool(target_user["enabled"]),
+                    age_credential=int(target_user["age_credential"] or 18),
+                ),
+                item_ids=policy_allowed_ids,
             )
+            revoke_ids = [
+                int(row["id"])
+                for row in active_rows
+                if int(row["media_item_id"]) not in age_allowed_ids
+            ]
+            if revoke_ids:
+                placeholders = ",".join("?" for _ in revoke_ids)
+                connection.execute(
+                    f"""
+                    UPDATE download_sessions
+                    SET revoked_at = COALESCE(revoked_at, ?), last_error = 'download_access_revoked'
+                    WHERE id IN ({placeholders}) AND revoked_at IS NULL AND completed_at IS NULL
+                    """,  # nosec B608 - placeholders are generated from validated integer ids.
+                    (now, *revoke_ids),
+                )
+                revoked_session_count = len(revoke_ids)
         connection.commit()
     log_audit_event(
         settings,
@@ -720,9 +793,21 @@ def update_download_access_for_user(
         target_id=user_id,
         ip_address=ip_address,
         user_agent=user_agent,
-        details={"access_mode": normalized_mode, "media_item_ids": selected_ids},
+        details={
+            "access_mode": normalized_mode,
+            "media_item_ids": selected_ids,
+            "revoked_download_session_count": revoked_session_count,
+        },
     )
-    return get_download_access_for_user(settings, user_id=user_id)
+    if revoked_session_count:
+        emit_admin_event(
+            "download_access_sessions_revoked",
+            user_id=user_id,
+            dirty_sections=("users", "audit"),
+        )
+    result = get_download_access_for_user(settings, user_id=user_id)
+    result["_revoked_download_session_count"] = revoked_session_count
+    return result
 
 
 def search_downloadable_media_for_user(

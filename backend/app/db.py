@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterator
+from zoneinfo import ZoneInfo
 
 from .config import Settings
 from .db_hidden_movie_keys import (
@@ -24,6 +25,8 @@ FLOATING_POSITION_RETIREMENT_MIGRATION = "floating_controls_position_retired_v1"
 POSTER_WIDTH_CONTROL_CENTER_MIGRATION = "poster_width_control_center_1400_v1"
 GOOGLE_OAUTH_SECRET_ENCRYPTION_MIGRATION = "google_oauth_secret_fernet1_v1"
 GOOGLE_PROVIDER_IDENTITY_MIGRATION = "google_provider_identity_v1"
+BACKUP_JOB_PERSISTENCE_MIGRATION = "backup_job_persistence_and_lease_v1"
+AGE_CREDENTIAL_SCHEDULE_MIGRATION = "age_credential_schedule_v1"
 GOOGLE_ACCOUNT_SUBJECT_HASH_PURPOSE = "google.account_subject"
 TOKEN_HASH_MIGRATION_REVOKE_REASON = "token_hash_migration"
 TOKEN_HASH_PREFIX = "hmac1$"
@@ -39,6 +42,10 @@ TABLE_STATEMENTS = (
         role TEXT NOT NULL DEFAULT 'standard_user',
         enabled INTEGER NOT NULL DEFAULT 1,
         age_credential INTEGER NOT NULL DEFAULT 18 CHECK (age_credential BETWEEN 1 AND 18),
+        age_credential_anchor_age INTEGER,
+        age_credential_anchor_date TEXT,
+        age_credential_next_increment_on TEXT,
+        age_credential_last_manual_set_at TEXT,
         last_login_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -422,22 +429,36 @@ TABLE_STATEMENTS = (
         checkpoint_id TEXT,
         error_code TEXT,
         error_message TEXT,
-        initiated_by_user_id INTEGER NOT NULL,
+        initiated_by_user_id INTEGER,
         initiated_by_username TEXT NOT NULL DEFAULT '',
-        auth_session_id INTEGER NOT NULL,
+        auth_session_id INTEGER,
+        idempotency_scope TEXT NOT NULL DEFAULT '',
         idempotency_key TEXT,
+        staging_path TEXT,
+        backup_path TEXT,
         created_at TEXT NOT NULL,
         started_at TEXT,
         updated_at TEXT NOT NULL,
         completed_at TEXT,
-        FOREIGN KEY (initiated_by_user_id) REFERENCES users (id) ON DELETE CASCADE,
-        FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE CASCADE,
+        FOREIGN KEY (initiated_by_user_id) REFERENCES users (id) ON DELETE SET NULL,
+        FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE SET NULL,
         CHECK (state IN (
             'queued', 'snapshotting_database', 'collecting_components',
             'sealing_manifest', 'archiving', 'encrypting', 'writing_checkpoint',
             'verifying_checkpoint', 'completed', 'failed', 'interrupted'
         )),
-        UNIQUE (auth_session_id, idempotency_key)
+        UNIQUE (idempotency_scope, idempotency_key)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS backup_job_leases (
+        lease_name TEXT PRIMARY KEY,
+        owner_instance_id TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        acquired_at TEXT NOT NULL,
+        heartbeat_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES backup_jobs (id) ON DELETE CASCADE
     )
     """,
     """
@@ -1176,7 +1197,9 @@ INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_recovery_recent_auth_expires_at ON recovery_recent_auth (expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_backup_jobs_state_updated ON backup_jobs (state, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_backup_jobs_actor_created ON backup_jobs (initiated_by_user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_backup_jobs_scope_created ON backup_jobs (idempotency_scope, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_backup_catalog_created ON backup_catalog (created_at_utc DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_users_age_credential_due ON users (age_credential_next_increment_on, id)",
     "CREATE INDEX IF NOT EXISTS idx_backup_passphrase_attempts_updated ON backup_passphrase_attempts (updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_google_drive_accounts_user_id ON google_drive_accounts (user_id)",
     "CREATE INDEX IF NOT EXISTS idx_google_drive_accounts_identity ON google_drive_accounts (provider_identity_id)",
@@ -1341,6 +1364,11 @@ def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings
     _ensure_column(connection, "users", "enabled", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(connection, "users", "last_login_at", "TEXT")
     _ensure_column(connection, "users", "age_credential", "INTEGER NOT NULL DEFAULT 18")
+    _ensure_column(connection, "users", "age_credential_anchor_age", "INTEGER")
+    _ensure_column(connection, "users", "age_credential_anchor_date", "TEXT")
+    _ensure_column(connection, "users", "age_credential_next_increment_on", "TEXT")
+    _ensure_column(connection, "users", "age_credential_last_manual_set_at", "TEXT")
+    _run_age_credential_schedule_migration(connection, settings=settings)
     _ensure_column(connection, "users", "totp_secret", "TEXT")
     _ensure_column(connection, "users", "totp_enabled_at", "TEXT")
     _ensure_column(connection, "users", "totp_last_used_window", "INTEGER")
@@ -1392,7 +1420,11 @@ def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings
     _ensure_column(connection, "password_help_requests", "requester_ip_address", "TEXT")
     _ensure_column(connection, "password_help_requests", "requester_user_agent", "TEXT")
     _ensure_column(connection, "invite_codes", "assigned_age", "INTEGER NOT NULL DEFAULT 18")
+    _run_backup_job_persistence_migration(connection)
     _ensure_column(connection, "backup_jobs", "initiated_by_username", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "backup_jobs", "idempotency_scope", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "backup_jobs", "staging_path", "TEXT")
+    _ensure_column(connection, "backup_jobs", "backup_path", "TEXT")
     _ensure_column(connection, "backup_jobs", "stage_progress_current", "INTEGER")
     _ensure_column(connection, "backup_jobs", "stage_progress_total", "INTEGER")
     _ensure_column(connection, "backup_jobs", "stage_progress_unit", "TEXT")
@@ -1424,6 +1456,156 @@ def _run_schema_migrations(connection: sqlite3.Connection, *, settings: Settings
     _backfill_playback_watch_history(connection)
     _backfill_session_activity_columns(connection)
     _backfill_hidden_movie_keys(connection)
+
+
+def _next_age_anniversary(anchor: date, year: int) -> date:
+    try:
+        return anchor.replace(year=year)
+    except ValueError:
+        return date(year, 2, 28)
+
+
+def _run_age_credential_schedule_migration(connection: sqlite3.Connection, *, settings: Settings) -> None:
+    if connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE name = ? LIMIT 1",
+        (AGE_CREDENTIAL_SCHEDULE_MIGRATION,),
+    ).fetchone() is not None:
+        return
+    migration_date = datetime.now(ZoneInfo(settings.timezone_name)).date()
+    next_increment = _next_age_anniversary(migration_date, migration_date.year + 1).isoformat()
+    connection.execute(
+        """
+        UPDATE users
+        SET age_credential_anchor_age = COALESCE(age_credential_anchor_age, age_credential),
+            age_credential_anchor_date = COALESCE(age_credential_anchor_date, ?),
+            age_credential_next_increment_on = CASE
+                WHEN COALESCE(age_credential, 18) < 18
+                THEN COALESCE(age_credential_next_increment_on, ?)
+                ELSE NULL
+            END
+        """,
+        (migration_date.isoformat(), next_increment),
+    )
+    connection.execute(
+        "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+        (AGE_CREDENTIAL_SCHEDULE_MIGRATION, utcnow_iso()),
+    )
+
+
+def _run_backup_job_persistence_migration(connection: sqlite3.Connection) -> None:
+    if connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE name = ? LIMIT 1",
+        (BACKUP_JOB_PERSISTENCE_MIGRATION,),
+    ).fetchone() is not None:
+        return
+
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(backup_jobs)").fetchall()
+    }
+    foreign_keys = connection.execute("PRAGMA foreign_key_list(backup_jobs)").fetchall()
+    has_set_null_foreign_keys = sum(
+        1
+        for row in foreign_keys
+        if str(row["from"]) in {"initiated_by_user_id", "auth_session_id"}
+        and str(row["on_delete"]).upper() == "SET NULL"
+    ) == 2
+    required_columns = {"idempotency_scope", "staging_path", "backup_path"}
+    if not required_columns.issubset(columns) or not has_set_null_foreign_keys:
+        # TABLE_STATEMENTS creates this table before migrations. Drop the empty
+        # compatibility copy so SQLite cannot retarget its FK to the renamed
+        # legacy jobs table during the table rebuild.
+        connection.execute("DROP TABLE IF EXISTS backup_job_leases")
+        connection.execute("ALTER TABLE backup_jobs RENAME TO backup_jobs_legacy_persistence_v1")
+        connection.execute(
+            """
+            CREATE TABLE backup_jobs (
+                id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                progress_current INTEGER NOT NULL DEFAULT 0,
+                progress_total INTEGER NOT NULL DEFAULT 100,
+                progress_percent INTEGER NOT NULL DEFAULT 0,
+                stage_progress_current INTEGER,
+                stage_progress_total INTEGER,
+                stage_progress_unit TEXT,
+                message TEXT NOT NULL DEFAULT '',
+                key_source TEXT NOT NULL,
+                checkpoint_id TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                initiated_by_user_id INTEGER,
+                initiated_by_username TEXT NOT NULL DEFAULT '',
+                auth_session_id INTEGER,
+                idempotency_scope TEXT NOT NULL DEFAULT '',
+                idempotency_key TEXT,
+                staging_path TEXT,
+                backup_path TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (initiated_by_user_id) REFERENCES users (id) ON DELETE SET NULL,
+                FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE SET NULL,
+                CHECK (state IN (
+                    'queued', 'snapshotting_database', 'collecting_components',
+                    'sealing_manifest', 'archiving', 'encrypting', 'writing_checkpoint',
+                    'verifying_checkpoint', 'completed', 'failed', 'interrupted'
+                )),
+                UNIQUE (idempotency_scope, idempotency_key)
+            )
+            """
+        )
+        legacy_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(backup_jobs_legacy_persistence_v1)").fetchall()
+        }
+        username_expression = "COALESCE(initiated_by_username, '')" if "initiated_by_username" in legacy_columns else "''"
+        stage_current_expression = "stage_progress_current" if "stage_progress_current" in legacy_columns else "NULL"
+        stage_total_expression = "stage_progress_total" if "stage_progress_total" in legacy_columns else "NULL"
+        stage_unit_expression = "stage_progress_unit" if "stage_progress_unit" in legacy_columns else "NULL"
+        connection.execute(
+            f"""
+            INSERT INTO backup_jobs (
+                id, state, progress_current, progress_total, progress_percent,
+                stage_progress_current, stage_progress_total, stage_progress_unit,
+                message, key_source, checkpoint_id, error_code, error_message,
+                initiated_by_user_id, initiated_by_username, auth_session_id,
+                idempotency_scope, idempotency_key, staging_path, backup_path,
+                created_at, started_at, updated_at, completed_at
+            )
+            SELECT
+                id, state, progress_current, progress_total, progress_percent,
+                {stage_current_expression}, {stage_total_expression}, {stage_unit_expression},
+                message, key_source, checkpoint_id, error_code, error_message,
+                initiated_by_user_id, {username_expression}, auth_session_id,
+                CASE
+                    WHEN auth_session_id IS NOT NULL THEN 'legacy-session:' || CAST(auth_session_id AS TEXT)
+                    ELSE 'legacy-job:' || id
+                END,
+                idempotency_key, NULL, NULL,
+                created_at, started_at, updated_at, completed_at
+            FROM backup_jobs_legacy_persistence_v1
+            """  # nosec B608 - expressions are selected only from trusted schema constants above.
+        )
+        connection.execute("DROP TABLE backup_jobs_legacy_persistence_v1")
+        connection.execute(
+            """
+            CREATE TABLE backup_job_leases (
+                lease_name TEXT PRIMARY KEY,
+                owner_instance_id TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY (job_id) REFERENCES backup_jobs (id) ON DELETE CASCADE
+            )
+            """
+        )
+
+    connection.execute(
+        "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+        (BACKUP_JOB_PERSISTENCE_MIGRATION, utcnow_iso()),
+    )
 
 
 def _run_floating_position_retirement_migration(connection: sqlite3.Connection) -> None:

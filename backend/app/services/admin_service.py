@@ -24,9 +24,15 @@ from .media_age_access_service import (
     revoke_persistent_sessions_for_user_age_change,
     validate_age_credential,
 )
+from .user_age_credential_service import (
+    current_local_date,
+    new_age_credential_schedule,
+    reconcile_due_age_credentials,
+)
 
 
 def list_users(settings: Settings) -> list[dict[str, object]]:
+    reconcile_due_age_credentials(settings)
     now = datetime.now(timezone.utc)
     live_cutoff = session_live_cutoff_iso(now=now)
     activity_cutoff = session_activity_cutoff_iso(now=now)
@@ -41,6 +47,10 @@ def list_users(settings: Settings) -> list[dict[str, object]]:
                 role,
                 enabled,
                 COALESCE(age_credential, 18) AS age_credential,
+                age_credential_anchor_age,
+                age_credential_anchor_date,
+                age_credential_next_increment_on,
+                age_credential_last_manual_set_at,
                 created_at,
                 updated_at,
                 last_login_at,
@@ -86,6 +96,10 @@ def list_users(settings: Settings) -> list[dict[str, object]]:
             "assistant_beta_enabled": bool(assistant_access_by_user[int(row["id"])]["assistant_beta_enabled"]),
             "age_credential": int(row["age_credential"] or 18),
             "age_credential_display": format_age_for_display(int(row["age_credential"] or 18)),
+            "age_credential_anchor_age": row["age_credential_anchor_age"],
+            "age_credential_anchor_date": row["age_credential_anchor_date"],
+            "age_credential_next_increment_on": row["age_credential_next_increment_on"],
+            "age_credential_last_manual_set_at": row["age_credential_last_manual_set_at"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "last_login_at": row["last_login_at"],
@@ -133,14 +147,21 @@ def create_user(
     normalized_age_credential = validate_age_credential(age_credential)
 
     now = utcnow_iso()
+    schedule = new_age_credential_schedule(
+        age=normalized_age_credential,
+        today=current_local_date(settings),
+    )
     with get_connection(settings) as connection:
         try:
             cursor = connection.execute(
                 """
                 INSERT INTO users (
-                    username, password_hash, role, enabled, age_credential, totp_setup_prompt_enabled, created_at, updated_at
+                    username, password_hash, role, enabled, age_credential,
+                    age_credential_anchor_age, age_credential_anchor_date,
+                    age_credential_next_increment_on, age_credential_last_manual_set_at,
+                    totp_setup_prompt_enabled, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_username,
@@ -148,6 +169,10 @@ def create_user(
                     role,
                     int(enabled),
                     normalized_age_credential,
+                    schedule.anchor_age,
+                    schedule.anchor_date.isoformat(),
+                    schedule.next_increment_on.isoformat() if schedule.next_increment_on else None,
+                    now,
                     1 if role == "admin" else 0,
                     now,
                     now,
@@ -236,7 +261,7 @@ def update_user(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Use self-delete instead of removing your own admin role",
             )
-        if role_changed:
+        if role_changed or enabled_changed:
             _require_current_admin_password(
                 connection,
                 settings=settings,
@@ -259,21 +284,46 @@ def update_user(
                 )
 
         now = utcnow_iso()
-        if not role_changed and not enabled_changed and not age_changed:
+        age_was_explicitly_set = age_credential is not None
+        if not role_changed and not enabled_changed and not age_was_explicitly_set:
             return _get_user_from_row(row)
         revoked_session_count = 0
         enable_totp_prompt = bool(role_changed and next_role == "admin" and not row["totp_secret"])
+        manual_schedule = (
+            new_age_credential_schedule(age=next_age_credential, today=current_local_date(settings))
+            if age_was_explicitly_set
+            else None
+        )
         connection.execute(
             """
             UPDATE users
             SET role = ?,
                 enabled = ?,
                 age_credential = ?,
+                age_credential_anchor_age = CASE WHEN ? THEN ? ELSE age_credential_anchor_age END,
+                age_credential_anchor_date = CASE WHEN ? THEN ? ELSE age_credential_anchor_date END,
+                age_credential_next_increment_on = CASE WHEN ? THEN ? ELSE age_credential_next_increment_on END,
+                age_credential_last_manual_set_at = CASE WHEN ? THEN ? ELSE age_credential_last_manual_set_at END,
                 totp_setup_prompt_enabled = CASE WHEN ? THEN 1 ELSE totp_setup_prompt_enabled END,
                 updated_at = ?
             WHERE id = ?
             """,
-            (next_role, int(next_enabled), next_age_credential, int(enable_totp_prompt), now, user_id),
+            (
+                next_role,
+                int(next_enabled),
+                next_age_credential,
+                int(age_was_explicitly_set),
+                manual_schedule.anchor_age if manual_schedule else None,
+                int(age_was_explicitly_set),
+                manual_schedule.anchor_date.isoformat() if manual_schedule else None,
+                int(age_was_explicitly_set),
+                manual_schedule.next_increment_on.isoformat() if manual_schedule and manual_schedule.next_increment_on else None,
+                int(age_was_explicitly_set),
+                now,
+                int(enable_totp_prompt),
+                now,
+                user_id,
+            ),
         )
         if role_changed:
             revoked_session_count = _revoke_user_security_boundary_in_connection(
@@ -302,7 +352,7 @@ def update_user(
             )
         connection.commit()
     age_revoke_summary = None
-    if age_changed:
+    if age_changed and next_age_credential < int(row["age_credential"] or 18):
         age_revoke_summary = revoke_persistent_sessions_for_user_age_change(
             settings,
             user_id=user_id,
@@ -314,7 +364,9 @@ def update_user(
 
     payload = _get_user(settings, user_id=user_id)
     payload["_role_changed"] = role_changed
-    payload["_security_boundary_revoked"] = bool(role_changed or not next_enabled)
+    payload["_security_boundary_revoked"] = bool(
+        role_changed or (enabled_changed and not next_enabled)
+    )
     if age_revoke_summary is not None:
         payload["_age_revoke_summary"] = age_revoke_summary
     if enabled_changed:
@@ -702,7 +754,10 @@ def _get_user(settings: Settings, *, user_id: int) -> dict[str, object]:
     with get_connection(settings) as connection:
         row = connection.execute(
             """
-            SELECT id, username, role, enabled, COALESCE(age_credential, 18) AS age_credential, created_at, updated_at, last_login_at
+            SELECT id, username, role, enabled, COALESCE(age_credential, 18) AS age_credential,
+                   age_credential_anchor_age, age_credential_anchor_date,
+                   age_credential_next_increment_on, age_credential_last_manual_set_at,
+                   created_at, updated_at, last_login_at
             FROM users
             WHERE id = ?
             LIMIT 1
@@ -722,6 +777,10 @@ def _get_user_from_row(row) -> dict[str, object]:
         "enabled": bool(row["enabled"]),
         "age_credential": int(row["age_credential"] or 18),
         "age_credential_display": format_age_for_display(int(row["age_credential"] or 18)),
+        "age_credential_anchor_age": row["age_credential_anchor_age"] if "age_credential_anchor_age" in row.keys() else None,
+        "age_credential_anchor_date": row["age_credential_anchor_date"] if "age_credential_anchor_date" in row.keys() else None,
+        "age_credential_next_increment_on": row["age_credential_next_increment_on"] if "age_credential_next_increment_on" in row.keys() else None,
+        "age_credential_last_manual_set_at": row["age_credential_last_manual_set_at"] if "age_credential_last_manual_set_at" in row.keys() else None,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "last_login_at": row["last_login_at"],

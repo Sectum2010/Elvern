@@ -4,7 +4,12 @@ import { LoadingView } from "../components/LoadingView";
 import { NonLoginSecretInput } from "../components/NonLoginSecretInput";
 import { RefreshSweepButton } from "../components/RefreshSweepButton";
 import { DesktopBackToLibraryButton } from "../components/DesktopBackToLibraryButton";
-import { UserActionsDialog } from "../components/UserActionsDialog.jsx";
+import {
+  MeridianUserActionsAccountTab,
+  MeridianUserActionsAssistantTab,
+  MeridianUserActionsDownloadsTab,
+  UserActionsDialog,
+} from "../components/UserActionsDialog.jsx";
 import { RecoveryPanel } from "../components/RecoveryPanel.jsx";
 import { MeridianScanIcon } from "../components/meridian/MeridianScanIcon.jsx";
 import { useAuth } from "../auth/AuthContext";
@@ -59,6 +64,7 @@ import {
 import {
   ADMIN_BACKUP_EVENT_TYPES,
   dispatchAdminBackupEvent,
+  dispatchAdminBackupStreamStatus,
 } from "../lib/adminEvents.js";
 import { CONTROL_CENTER_BEFORE_NAVIGATION_EVENT } from "../lib/controlCenterNavigation.js";
 
@@ -148,7 +154,7 @@ function formatAgeCredential(value) {
   if (!Number.isFinite(age)) {
     return "18+";
   }
-  return age >= 18 ? "18+" : String(age);
+  return age === 18 ? "18+" : String(age);
 }
 
 function unknownIfEmpty(value) {
@@ -721,6 +727,90 @@ function UserStatusIndicator({ color, label }) {
   );
 }
 
+function AccountStateConfirmationDialog({ confirmation, onCancel, onConfirm, onPasswordChange, returnFocusElement }) {
+  const dialogRef = useRef(null);
+  const onCancelRef = useRef(onCancel);
+  const pendingRef = useRef(confirmation.pending);
+  onCancelRef.current = onCancel;
+  pendingRef.current = confirmation.pending;
+
+  useEffect(() => {
+    if (!confirmation.open) {
+      return undefined;
+    }
+    const dialog = dialogRef.current;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    dialog?.querySelector("input")?.focus();
+
+    function handleKeyDown(event) {
+      if (event.key === "Escape" && !pendingRef.current) {
+        event.preventDefault();
+        onCancelRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialog) {
+        return;
+      }
+      const focusable = [...dialog.querySelectorAll("button:not([disabled]), input:not([disabled])")];
+      if (!focusable.length) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleKeyDown);
+      returnFocusElement?.focus?.();
+    };
+  }, [confirmation.open, returnFocusElement]);
+
+  if (!confirmation.open) {
+    return null;
+  }
+  const action = confirmation.nextEnabled ? "Enable" : "Disable";
+  return (
+    <div aria-labelledby="account-state-confirm-title" aria-modal="true" className="meridian-account-state-dialog" role="dialog">
+      <button aria-label={`Cancel ${action.toLowerCase()} account`} className="meridian-account-state-dialog__backdrop" disabled={confirmation.pending} onClick={onCancel} type="button" />
+      <form className="meridian-account-state-dialog__card" onSubmit={onConfirm} ref={dialogRef}>
+        <p className="meridian-account-state-dialog__eyebrow">ACCOUNT SECURITY</p>
+        <h2 id="account-state-confirm-title">{action} {confirmation.username}?</h2>
+        <p>
+          {confirmation.nextEnabled
+            ? "Previously revoked sessions will not be restored. This user must sign in again."
+            : "This immediately revokes active sign-ins, playback handoffs, downloads, and temporary OAuth access for this account."}
+        </p>
+        <NonLoginSecretInput
+          autoComplete="new-password"
+          disabled={confirmation.pending}
+          onChange={(event) => onPasswordChange(event.target.value)}
+          placeholder="Current admin password"
+          purpose={`account-${confirmation.nextEnabled ? "enable" : "disable"}-reauth`}
+          value={confirmation.currentAdminPassword}
+        />
+        {confirmation.error ? <p className="form-error" role="alert">{confirmation.error}</p> : null}
+        <div className="meridian-account-state-dialog__actions">
+          <button className="ghost-button" disabled={confirmation.pending} onClick={onCancel} type="button">Cancel</button>
+          <button className={confirmation.nextEnabled ? "meridian-account-enable-button" : "ghost-button ghost-button--danger"} disabled={confirmation.pending || !confirmation.currentAdminPassword} type="submit">
+            {confirmation.pending ? `${action}ing…` : action}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function MeridianPostureValue({ label, value }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef(0);
@@ -1110,6 +1200,17 @@ export function AdminPage() {
     newPassword: "",
     currentAdminPassword: "",
   });
+  const [accountStateConfirmation, setAccountStateConfirmation] = useState({
+    open: false,
+    userId: null,
+    username: "",
+    expectedEnabled: false,
+    nextEnabled: false,
+    currentAdminPassword: "",
+    pending: false,
+    error: "",
+  });
+  const accountStateReturnFocusRef = useRef(null);
   const [createUserForm, setCreateUserForm] = useState({
     username: "",
     password: "",
@@ -2519,11 +2620,13 @@ export function AdminPage() {
       });
       stream.onopen = () => {
         adminStreamReconnectDelayRef.current = 3000;
+        dispatchAdminBackupStreamStatus(true);
       };
       stream.onerror = () => {
         if (disposed) {
           return;
         }
+        dispatchAdminBackupStreamStatus(false);
         closeStream();
         scheduleReconnect();
       };
@@ -2533,6 +2636,7 @@ export function AdminPage() {
 
     return () => {
       disposed = true;
+      dispatchAdminBackupStreamStatus(false);
       clearReconnectTimer();
       closeStream();
     };
@@ -3055,6 +3159,93 @@ export function AdminPage() {
         "error",
         requestError.message || `Failed to update ${targetUser.username}`,
       );
+    } finally {
+      setUserActionPending(null);
+    }
+  }
+
+  function openAccountStateConfirmation(entry) {
+    accountStateReturnFocusRef.current = document.activeElement;
+    setAccountStateConfirmation({
+      open: true,
+      userId: entry.id,
+      username: entry.username,
+      expectedEnabled: Boolean(entry.enabled),
+      nextEnabled: !entry.enabled,
+      currentAdminPassword: "",
+      pending: false,
+      error: "",
+    });
+  }
+
+  function closeAccountStateConfirmation() {
+    if (accountStateConfirmation.pending) {
+      return;
+    }
+    setAccountStateConfirmation({
+      open: false,
+      userId: null,
+      username: "",
+      expectedEnabled: false,
+      nextEnabled: false,
+      currentAdminPassword: "",
+      pending: false,
+      error: "",
+    });
+  }
+
+  async function submitAccountStateConfirmation(event) {
+    event.preventDefault();
+    if (accountStateConfirmation.pending || !accountStateConfirmation.currentAdminPassword) {
+      return;
+    }
+    const target = usersPayload.find((entry) => entry.id === accountStateConfirmation.userId);
+    if (
+      !target
+      || target.username !== accountStateConfirmation.username
+      || Boolean(target.enabled) !== accountStateConfirmation.expectedEnabled
+    ) {
+      setAccountStateConfirmation((current) => ({
+        ...current,
+        currentAdminPassword: "",
+        error: "This user changed while the confirmation was open. Close and try again.",
+      }));
+      return;
+    }
+
+    setAccountStateConfirmation((current) => ({ ...current, pending: true, error: "" }));
+    setUserActionPending(target.id);
+    try {
+      const payload = await apiRequest(`/api/admin/users/${target.id}`, {
+        method: "PATCH",
+        data: {
+          enabled: accountStateConfirmation.nextEnabled,
+          current_admin_password: accountStateConfirmation.currentAdminPassword,
+        },
+      });
+      setAccountStateConfirmation({
+        open: false,
+        userId: null,
+        username: "",
+        expectedEnabled: false,
+        nextEnabled: false,
+        currentAdminPassword: "",
+        pending: false,
+        error: "",
+      });
+      setFeedbackForUser(
+        target.id,
+        "success",
+        `${payload.username} ${payload.enabled ? "enabled" : "disabled"}.`,
+      );
+      await refreshAdminUsersResource();
+    } catch (requestError) {
+      setAccountStateConfirmation((current) => ({
+        ...current,
+        currentAdminPassword: "",
+        pending: false,
+        error: requestError.message || `Failed to ${current.nextEnabled ? "enable" : "disable"} ${current.username}`,
+      }));
     } finally {
       setUserActionPending(null);
     }
@@ -3758,8 +3949,6 @@ export function AdminPage() {
                 <p className="page-subnote">
                   {entry.active_sessions} live session{entry.active_sessions === 1 ? "" : "s"} · last login {formatDate(entry.last_login_at)}
                 </p>
-                <p className="page-subnote">Age credential {entry.age_credential_display || formatAgeCredential(entry.age_credential)}</p>
-                {entry.last_seen_at ? <p className="page-subnote">Last heartbeat {formatDate(entry.last_seen_at)}{entry.last_activity_at ? ` · last activity ${formatDate(entry.last_activity_at)}` : ""}</p> : null}
                 {isSelf ? (
                   <p className="page-subnote">Your own admin account cannot be disabled. Use Delete account inside Account actions if needed.</p>
                 ) : null}
@@ -3769,15 +3958,9 @@ export function AdminPage() {
               <div className="admin-user-row__priority">
                 {!isSelf ? (
                   <button
-                    className="ghost-button"
+                    className={entry.enabled ? "ghost-button ghost-button--danger" : "meridian-account-enable-button"}
                     disabled={userActionPending === entry.id}
-                    onClick={() =>
-                      handleUpdateUser(
-                        entry,
-                        { enabled: !entry.enabled },
-                        `${entry.username} ${entry.enabled ? "disabled" : "enabled"}.`,
-                      )
-                    }
+                    onClick={() => openAccountStateConfirmation(entry)}
                     type="button"
                   >
                     {entry.enabled ? "Disable" : "Enable"}
@@ -4247,21 +4430,18 @@ export function AdminPage() {
       user={{
         ...selectedUserActionsEntry,
         last_login_label: formatDate(selectedUserActionsEntry.last_login_at),
+        last_activity_label: formatDate(selectedUserActionsEntry.last_activity_at),
+        last_heartbeat_label: formatDate(selectedUserActionsEntry.last_seen_at),
       }}
     >
-          {(!desktopControlCenter || userActionsTab === "account") ? <section className="admin-user-actions-modal__section">
-            <div className="admin-user-actions-modal__section-header">
-              <h3>Account actions</h3>
-              <p className="page-subnote">
-                Role changes and password updates still require your current admin password.
-              </p>
-            </div>
-            <div className="admin-list__actions">
-              {selectedUserActionsEntry.id !== user?.id ? (
-                <button
-                  className="ghost-button"
-                  disabled={userActionPending === selectedUserActionsEntry.id}
-                  onClick={() => {
+          {(!desktopControlCenter || userActionsTab === "account") ? (
+            <MeridianUserActionsAccountTab
+              actionItems={[
+                ...(selectedUserActionsEntry.id !== user?.id ? [{
+                  key: "role",
+                  label: `Make ${selectedUserActionsEntry.role === "admin" ? "standard" : "admin"}`,
+                  disabled: userActionPending === selectedUserActionsEntry.id,
+                  onClick: () => {
                     setPasswordEditor({
                       userId: null,
                       username: "",
@@ -4274,64 +4454,48 @@ export function AdminPage() {
                       nextRole: selectedUserActionsEntry.role === "admin" ? "standard_user" : "admin",
                       currentAdminPassword: "",
                     });
-                  }}
-                  type="button"
-                >
-                  Make {selectedUserActionsEntry.role === "admin" ? "standard" : "admin"}
-                </button>
-              ) : null}
-
-              <button
-                className="ghost-button"
-                disabled={userActionPending === selectedUserActionsEntry.id}
-                onClick={() => {
-                  setRoleConfirm({
-                    userId: null,
-                    username: "",
-                    nextRole: "standard_user",
-                    currentAdminPassword: "",
-                  });
-                  setPasswordEditor({
-                    userId: selectedUserActionsEntry.id,
-                    username: selectedUserActionsEntry.username,
-                    newPassword: "",
-                    currentAdminPassword: "",
-                  });
-                }}
-                type="button"
-	              >
-	                Update password
-	              </button>
-              {selectedUserActionsEntry.id !== user?.id ? (
-                <button
-                  className="ghost-button ghost-button--danger"
-                  disabled={userActionPending === selectedUserActionsEntry.id || deleteUserState.pending}
-                  onClick={() => armDeleteUser(selectedUserActionsEntry)}
-                  type="button"
-                >
-                  Delete user
-                </button>
-              ) : null}
-              {selectedUserActionsEntry.id === user?.id ? (
-                <button
-                  className="ghost-button ghost-button--danger"
-                  disabled={!hasAnotherEnabledAdmin || userActionPending === selectedUserActionsEntry.id}
-                  onClick={() =>
-                    setSelfDeleteState({
-                      open: true,
-                      password: "",
-                      armed: false,
-                      pending: false,
-                      error: "",
-                    })
-                  }
-                  type="button"
-                >
-                  Delete account
-                </button>
-              ) : null}
-	            </div>
-
+                  },
+                }] : []),
+                {
+                  key: "password",
+                  label: "Update password",
+                  disabled: userActionPending === selectedUserActionsEntry.id,
+                  onClick: () => {
+                    setRoleConfirm({
+                      userId: null,
+                      username: "",
+                      nextRole: "standard_user",
+                      currentAdminPassword: "",
+                    });
+                    setPasswordEditor({
+                      userId: selectedUserActionsEntry.id,
+                      username: selectedUserActionsEntry.username,
+                      newPassword: "",
+                      currentAdminPassword: "",
+                    });
+                  },
+                },
+                selectedUserActionsEntry.id !== user?.id ? {
+                  key: "delete-user",
+                  label: "Delete user",
+                  danger: true,
+                  disabled: userActionPending === selectedUserActionsEntry.id || deleteUserState.pending,
+                  onClick: () => armDeleteUser(selectedUserActionsEntry),
+                } : {
+                  key: "delete-account",
+                  label: "Delete account",
+                  danger: true,
+                  disabled: !hasAnotherEnabledAdmin || userActionPending === selectedUserActionsEntry.id,
+                  onClick: () => setSelfDeleteState({
+                    open: true,
+                    password: "",
+                    armed: false,
+                    pending: false,
+                    error: "",
+                  }),
+                },
+              ]}
+              beforeAgeContent={<>
             {deleteUserState.userId === selectedUserActionsEntry.id ? (
               <div className="admin-danger-block">
                 <p className="form-error">
@@ -4381,63 +4545,20 @@ export function AdminPage() {
                 </div>
               </div>
             ) : null}
-
-            <div className="admin-inline-form admin-age-credential-editor">
-              <span className="admin-age-credential-editor__label">AGE CREDENTIAL</span>
-              <div className="admin-age-credential-editor__controls">
-                <div className="admin-age-credential-editor__quick" role="group" aria-label="Quick age credential choices">
-                  {[18, 16, 13].map((age) => (
-                    <button
-                      className={Number(ageCredentialEditor.ageCredential) === age ? "is-active" : ""}
-                      disabled={userActionPending === selectedUserActionsEntry.id}
-                      key={age}
-                      onClick={() => setAgeCredentialEditor({ userId: selectedUserActionsEntry.id, ageCredential: age })}
-                      type="button"
-                    >
-                      {age}+
-                    </button>
-                  ))}
-                  <button
-                    aria-expanded={showAllUserActionAges}
-                    className={showAllUserActionAges ? "is-active" : ""}
-                    onClick={() => setShowAllUserActionAges((current) => !current)}
-                    type="button"
-                  >
-                    More ages
-                  </button>
-                </div>
-                {showAllUserActionAges ? (
-                  <select
-                    aria-label="All age credentials"
-                    className="admin-select admin-age-credential-editor__select"
-                    disabled={userActionPending === selectedUserActionsEntry.id}
-                    onChange={(event) => setAgeCredentialEditor({
-                      userId: selectedUserActionsEntry.id,
-                      ageCredential: Number(event.target.value),
-                    })}
-                    value={ageCredentialEditor.ageCredential}
-                  >
-                    {AGE_CREDENTIAL_OPTIONS.map((age) => (
-                      <option key={age} value={age}>{formatAgeCredential(age)}</option>
-                    ))}
-                  </select>
-                ) : null}
-              </div>
-              <div className="admin-list__actions">
-                <button
-                  className="primary-button"
-                  disabled={
-                    userActionPending === selectedUserActionsEntry.id
-                    || Number(ageCredentialEditor.ageCredential || 18) === Number(selectedUserActionsEntry.age_credential || 18)
-                  }
-                  onClick={() => handleSaveUserAgeCredential(selectedUserActionsEntry)}
-                  type="button"
-                >
-                  Save age credential
-                </button>
-              </div>
-            </div>
-
+              </>}
+              ageCredential={ageCredentialEditor.ageCredential}
+              ageOptions={AGE_CREDENTIAL_OPTIONS}
+              disabled={userActionPending === selectedUserActionsEntry.id}
+              formatAgeCredential={formatAgeCredential}
+              legacy={!desktopControlCenter}
+              onAgeChange={(ageCredential) => setAgeCredentialEditor({
+                userId: selectedUserActionsEntry.id,
+                ageCredential,
+              })}
+              onSaveAge={() => handleSaveUserAgeCredential(selectedUserActionsEntry)}
+              onToggleAllAges={() => setShowAllUserActionAges((current) => !current)}
+              showAllAges={showAllUserActionAges}
+              afterAgeContent={<>
             {selectedUserActionsEntry.id === user?.id ? (
               <p className="page-subnote">
                 Your own admin account cannot be disabled from the main row.
@@ -4618,157 +4739,38 @@ export function AdminPage() {
                 </div>
               </form>
             ) : null}
-          </section> : null}
+              </>}
+            />
+          ) : null}
 
-	          {(!desktopControlCenter || userActionsTab === "assistant") ? <section className="admin-user-actions-modal__section">
-	            <div className="admin-user-actions-modal__section-header">
-	              <h3>Assistant</h3>
-	              <p className="page-subnote">Secondary access only for the safe structured request form.</p>
-	            </div>
-            {selectedUserActionsEntry.role === "standard_user" ? (
-              <div className="assistant-access-toggle assistant-access-toggle--modal">
-                <div>
-                  <strong>{selectedUserActionsEntry.assistant_beta_enabled ? "Enabled" : "Disabled"}</strong>
-	                  <p className="page-subnote">
-	                    {selectedUserActionsEntry.assistant_beta_enabled
-	                      ? "This user can access the Assistant request flow."
-	                      : "This user cannot access the Assistant request flow."}
-	                  </p>
-                </div>
-                <button
-                  className={selectedUserActionsEntry.assistant_beta_enabled ? "ghost-button" : "primary-button"}
-                  disabled={userActionPending === selectedUserActionsEntry.id}
-                  onClick={() => handleAssistantAccessToggle(selectedUserActionsEntry)}
-                  type="button"
-                >
-                  {selectedUserActionsEntry.assistant_beta_enabled ? "Disable Assistant" : "Enable Assistant"}
-                </button>
-              </div>
-            ) : (
-	              <p className="page-subnote">
-	                Admins always have Assistant access. The account switch is only configurable for standard users.
-	              </p>
-	            )}
-          </section> : null}
+          {(!desktopControlCenter || userActionsTab === "assistant") ? (
+            <MeridianUserActionsAssistantTab
+              disabled={userActionPending === selectedUserActionsEntry.id}
+              enabled={Boolean(selectedUserActionsEntry.assistant_beta_enabled)}
+              isStandardUser={selectedUserActionsEntry.role === "standard_user"}
+              legacy={!desktopControlCenter}
+              onToggle={() => handleAssistantAccessToggle(selectedUserActionsEntry)}
+            />
+          ) : null}
 
-          {(!desktopControlCenter || userActionsTab === "downloads") ? <section className="admin-user-actions-modal__section">
-            <div className="admin-user-actions-modal__section-header">
-              <h3>Download Access (Beta)</h3>
-              <p className="page-subnote">Download grants are separate from playback access.</p>
-            </div>
-            {selectedUserActionsEntry.role === "admin" ? (
-              <div className="download-access-card download-access-card--readonly">
-                <strong>Full download access</strong>
-                <p className="page-subnote">Admins inherently have access to every movie they can view.</p>
-              </div>
-            ) : downloadAccessState.loading && downloadAccessState.userId === selectedUserActionsEntry.id ? (
-              <p className="page-subnote">Loading download access...</p>
-            ) : (
-              <div className="download-access-card">
-                <label className="settings-toggle settings-toggle--compact">
-                  <span>
-                    <strong>No download access</strong>
-                    <small>Hide download actions for this user.</small>
-                  </span>
-                  <input
-                    checked={downloadAccessState.accessMode === "none"}
-                    name="download-access-mode"
-                    onChange={() => updateDownloadAccessMode("none")}
-                    type="radio"
-                  />
-                </label>
-                <label className="settings-toggle settings-toggle--compact">
-                  <span>
-                    <strong>Enable access to all movies</strong>
-                    <small>Allow downloading every visible movie.</small>
-                  </span>
-                  <input
-                    checked={downloadAccessState.accessMode === "all"}
-                    name="download-access-mode"
-                    onChange={() => updateDownloadAccessMode("all")}
-                    type="radio"
-                  />
-                </label>
-                <label className="settings-toggle settings-toggle--compact">
-                  <span>
-                    <strong>Select available movies</strong>
-                    <small>Grant individual movies one at a time.</small>
-                  </span>
-                  <input
-                    checked={downloadAccessState.accessMode === "selected"}
-                    name="download-access-mode"
-                    onChange={() => updateDownloadAccessMode("selected")}
-                    type="radio"
-                  />
-                </label>
-
-                {downloadAccessState.accessMode === "selected" ? (
-                  <div className="download-access-picker">
-                    <label className="search-field">
-                      <span className="sr-only">Search movies for download access</span>
-                      <input
-                        autoComplete="off"
-                        onChange={(event) =>
-                          setDownloadAccessState((current) => ({ ...current, searchQuery: event.target.value }))
-                        }
-                        placeholder="Search movies to add"
-                        type="search"
-                        value={downloadAccessState.searchQuery}
-                      />
-                    </label>
-                    {downloadAccessState.searchQuery.trim() ? (
-                      <div className="download-access-results">
-                        {downloadAccessState.searchPending ? <p className="page-subnote">Searching...</p> : null}
-                        {!downloadAccessState.searchPending && downloadAccessState.searchResults.length === 0 ? (
-                          <p className="page-subnote">No matching movies.</p>
-                        ) : null}
-                        {downloadAccessState.searchResults.slice(0, 8).map((item) => (
-                          <button
-                            className="download-access-result"
-                            key={item.id}
-                            onClick={() => addDownloadAccessMovie(item)}
-                            type="button"
-                          >
-                            <strong>{item.title}</strong>
-                            <span>{formatBytes(item.file_size)}</span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                    {downloadAccessState.selectedItems.length > 0 ? (
-                      <div className="download-access-selected">
-                        {downloadAccessState.selectedItems.map((item) => (
-                          <span className="download-access-chip" key={item.id}>
-                            {item.title}
-                            <button
-                              aria-label={`Remove ${item.title}`}
-                              onClick={() => removeDownloadAccessMovie(item.id)}
-                              type="button"
-                            >
-                              X
-                            </button>
-                          </span>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="page-subnote">No selected movies yet.</p>
-                    )}
-                  </div>
-                ) : null}
-                {downloadAccessState.error ? <p className="form-error">{downloadAccessState.error}</p> : null}
-                {downloadAccessState.feedback ? <p className="action-feedback">{downloadAccessState.feedback}</p> : null}
-                {downloadAccessDirty ? <p className="download-access-card__dirty">Unsaved changes</p> : null}
-                <button
-                  className="primary-button"
-                  disabled={downloadAccessState.saving || !downloadAccessDirty}
-                  onClick={() => saveDownloadAccess(selectedUserActionsEntry)}
-                  type="button"
-                >
-                  {downloadAccessState.saving ? "Saving..." : "Save download access"}
-                </button>
-              </div>
-            )}
-          </section> : null}
+          {(!desktopControlCenter || userActionsTab === "downloads") ? (
+            <MeridianUserActionsDownloadsTab
+              accessState={{
+                ...downloadAccessState,
+                loading: downloadAccessState.loading && downloadAccessState.userId === selectedUserActionsEntry.id,
+              }}
+              disabled={downloadAccessState.saving}
+              dirty={downloadAccessDirty}
+              formatBytes={formatBytes}
+              isAdmin={selectedUserActionsEntry.role === "admin"}
+              legacy={!desktopControlCenter}
+              onAddMovie={addDownloadAccessMovie}
+              onModeChange={updateDownloadAccessMode}
+              onRemoveMovie={removeDownloadAccessMovie}
+              onSave={() => saveDownloadAccess(selectedUserActionsEntry)}
+              onSearchChange={(searchQuery) => setDownloadAccessState((current) => ({ ...current, searchQuery }))}
+            />
+          ) : null}
     </UserActionsDialog>
   ) : null;
 
@@ -5636,7 +5638,7 @@ export function AdminPage() {
           Manual backups may contain secrets such as env values, OAuth tokens, session-related secrets, and database contents. Do not commit or share them.
         </p>
         <p className="page-subnote">
-          Auto encrypted backups are protected by a key derived from ELVERN_SESSION_SECRET. If that secret is lost or rotated, old auto-key backups may not be recoverable. For long-term/off-machine recovery, use a manual passphrase backup.
+          Auto encrypted backups use Elvern's independent server-local backup keyring. The checkpoint file is not independently portable without that keyring. For long-term or off-host recovery, use a manual passphrase backup and retain the passphrase separately.
         </p>
         <div className="admin-list__actions">
           <button
@@ -6851,7 +6853,7 @@ export function AdminPage() {
 
 	          {activeSection === "recovery"
             ? (desktopControlCenter
-              ? <RecoveryPanel onToast={setBanner} />
+	              ? <RecoveryPanel identityKey={`${user?.id || "anonymous"}:${user?.role || "none"}`} onToast={setBanner} />
               : <div>{recoverySection}</div>)
             : null}
 
@@ -7061,6 +7063,17 @@ export function AdminPage() {
         </div>
       ) : null}
       {userActionsModal}
+      <AccountStateConfirmationDialog
+        confirmation={accountStateConfirmation}
+        onCancel={closeAccountStateConfirmation}
+        onConfirm={submitAccountStateConfirmation}
+        onPasswordChange={(value) => setAccountStateConfirmation((current) => ({
+          ...current,
+          currentAdminPassword: value,
+          error: "",
+        }))}
+        returnFocusElement={accountStateReturnFocusRef.current}
+      />
       {downloadDiscardModal}
       {exposurePlannerModal}
       {terminateWorkerConfirmationModal}

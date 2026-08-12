@@ -41,8 +41,8 @@
 }
 
 @keyframes merUserActive {
-  0%, 100% { opacity: 0.78; transform: scale(0.92); box-shadow: 0 0 0 0 rgba(53, 166, 105, 0.2); }
-  50% { opacity: 1; transform: scale(1.08); box-shadow: 0 0 0 4px rgba(53, 166, 105, 0); }
+  0%, 100% { opacity: 0.82; transform: scale(0.88); box-shadow: 0 0 0 0 rgba(20, 114, 76, 0.28); }
+  50% { opacity: 1; transform: scale(1.21); box-shadow: 0 0 0 5px rgba(20, 114, 76, 0); }
 }
 
 @keyframes merUserBackground {
@@ -83,6 +83,14 @@
   --mer-workspace-muted: #676d74;
   --mer-card: #fff4e6;
   --mer-card-border: rgba(20, 22, 26, 0.08);
+  --mer-account-menu-border: rgba(20, 22, 26, 0.12);
+  --mer-account-menu-icon: #2e4fe0;
+  --mer-recovery-stage-idle: rgba(20, 22, 26, 0.12);
+  --mer-recovery-stage-label: #2e4fe0;
+  --mer-user-actions-card: #fff4e6;
+  --mer-user-actions-active-tab: #fff4e6;
+  --mer-user-actions-active-shadow: 0 1px 4px rgba(20, 22, 26, 0.12);
+  --mer-user-actions-selected: #eff3ff;
   --mer-surface: #f1e8d7;
   --mer-hover: #f6ecdc;
   --mer-input: #fcf1e2;
@@ -93,6 +101,10 @@
   --mer-success: #177a52;
   --mer-success-soft: #e7f4ec;
   --mer-danger: #b14952;
+  --mer-status-active: #14724c;
+  --mer-status-offline: #747b83;
+  --mer-status-background: #9a751f;
+  --mer-status-pending: #c97e2e;
   --mer-shadow: 0 8px 18px rgba(20, 22, 26, 0.12);
   position: relative;
   display: flex;
@@ -135,18 +147,21 @@
   flex-direction: column;
   overflow: hidden;
   color: var(--mer-workspace-ink);
-  background: var(--mer-card);
+  background: var(--mer-user-actions-card);
   border: 1px solid var(--mer-card-border);
   border-radius: 16px;
   box-shadow: 0 40px 90px rgba(0, 0, 0, 0.4);
   animation: merIn 300ms cubic-bezier(0.25, 0.9, 0.3, 1) both;
 }
 
+.meridian-control-center .meridian-user-actions__top {
+  padding: 18px 24px 0;
+}
+
 .meridian-control-center .meridian-user-actions__header {
   display: flex;
   align-items: flex-start;
   gap: 14px;
-  padding: 18px 24px 0;
 }
 
 .meridian-control-center .meridian-user-actions__avatar {
@@ -193,14 +208,14 @@
 }
 
 .meridian-control-center .meridian-user-actions__status-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 7px;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
   border-radius: 50%;
 }
 
 .meridian-control-center .meridian-user-actions__status-dot--active {
-  animation: merPulse 1.8s ease-in-out infinite;
+  animation: merUserActive 2.4s ease-in-out infinite;
 }
 
 .meridian-control-center .meridian-user-actions__status,
@@ -214,13 +229,16 @@
 
 .meridian-control-center .meridian-user-actions__last-login {
   margin: 2px 0 0;
+  overflow: hidden;
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .meridian-control-center .meridian-user-actions__close {
   padding: 8px 16px;
   border: 1px solid var(--mer-input-border);
-  border-radius: 999px;
+  border-radius: 100px;
   color: inherit;
   background: transparent;
   font: inherit;
@@ -233,7 +251,7 @@
 
 .meridian-control-center .meridian-user-actions__tabs {
   display: flex;
-  margin: 16px 24px 0;
+  margin-top: 16px;
   padding: 3px;
   border-radius: 10px;
   background: var(--mer-surface);
@@ -255,8 +273,8 @@
 
 .meridian-control-center .meridian-user-actions__tabs button.is-active {
   color: var(--mer-workspace-ink);
-  background: var(--mer-card);
-  box-shadow: 0 1px 4px rgba(20, 22, 26, 0.12);
+  background: var(--mer-user-actions-active-tab);
+  box-shadow: var(--mer-user-actions-active-shadow);
 }
 
 .meridian-control-center .meridian-user-actions__body {
@@ -267,13 +285,127 @@
   scrollbar-width: none;
 }
 
-.meridian-control-center .meridian-user-actions__body .admin-user-actions-modal__section {
+.meridian-control-center .meridian-user-actions__panel {
   padding: 0;
   border: 0;
   border-radius: 0;
   color: var(--mer-workspace-ink);
   background: transparent;
   animation: merIn 250ms ease both;
+}
+
+.meridian-control-center .meridian-user-actions__panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.meridian-control-center .meridian-user-actions__panel-header p {
+  margin: 0;
+  color: var(--mer-workspace-muted);
+  font-size: 12.5px;
+}
+
+.meridian-control-center .meridian-user-actions__panel-header > span {
+  padding: 3px 10px;
+  border-radius: 999px;
+  color: var(--mer-accent);
+  background: var(--mer-accent-soft);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .1em;
+}
+
+.meridian-control-center .meridian-user-actions__panel > .admin-list__actions {
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.meridian-control-center .meridian-user-actions__panel > .admin-list__actions .ghost-button {
+  min-height: 0;
+  padding: 9px 17px;
+  border-radius: 999px;
+  font-size: 12.5px;
+}
+
+.meridian-control-center .meridian-user-actions .primary-button,
+.meridian-control-center .meridian-recovery .primary-button {
+  min-height: 0;
+  padding: 9px 18px;
+  border: 0;
+  border-radius: 100px;
+  color: #fff;
+  background: linear-gradient(135deg, #3d5ef5, #2440c9);
+  box-shadow: 0 5px 14px rgba(46, 79, 224, 0.32);
+  font-family: Archivo, sans-serif;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.meridian-control-center .meridian-user-actions .primary-button:hover:not(:disabled),
+.meridian-control-center .meridian-recovery .primary-button:hover:not(:disabled) {
+  color: #fff;
+  background: linear-gradient(135deg, #3d5ef5, #2440c9);
+  box-shadow: 0 10px 24px rgba(46, 79, 224, 0.45);
+  filter: brightness(1.08);
+}
+
+.meridian-control-center .meridian-user-actions__panel--account > .admin-inline-form.admin-age-credential-editor {
+  margin-top: 18px;
+  padding: 16px 0 0;
+  border: 0;
+  border-top: 1px solid var(--mer-divider);
+  border-radius: 0;
+  background: transparent;
+}
+
+.meridian-control-center .meridian-user-actions__panel--assistant .assistant-access-toggle--modal {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--mer-card-border);
+  border-radius: 12px;
+  background: var(--mer-card);
+}
+
+.meridian-control-center .meridian-user-actions__assistant-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: var(--mer-status-offline);
+}
+
+.meridian-control-center .meridian-user-actions__assistant-dot.is-enabled {
+  background: var(--mer-status-active);
+  animation: merUserActive 2.4s ease-in-out infinite;
+}
+
+.meridian-control-center .meridian-user-actions__panel--assistant .assistant-access-toggle--modal > div {
+  flex: 1;
+}
+
+.meridian-control-center .meridian-user-actions__panel--downloads .download-access-card {
+  margin-top: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.meridian-control-center .meridian-user-actions__panel--downloads .settings-toggle {
+  padding: 12px 16px;
+  border: 1.5px solid var(--mer-divider);
+  border-radius: 12px;
+  background: transparent;
+}
+
+.meridian-control-center .meridian-user-actions__panel--downloads .settings-toggle:has(input:checked) {
+  border-color: var(--mer-accent);
+  background: var(--mer-user-actions-selected);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mer-accent) 13%, transparent);
 }
 
 .meridian-control-center .admin-user-actions-modal__consequence {
@@ -331,20 +463,27 @@
 @media (prefers-reduced-motion: reduce) {
   .meridian-control-center .meridian-user-actions,
   .meridian-control-center .meridian-user-actions__card,
-  .meridian-control-center .meridian-user-actions__body .admin-user-actions-modal__section,
-  .meridian-control-center .meridian-user-actions__status-dot--active {
+  .meridian-control-center .meridian-user-actions__panel,
+  .meridian-control-center .meridian-user-actions__status-dot--active,
+  .meridian-control-center .meridian-user-actions__assistant-dot.is-enabled {
     animation: none;
   }
 }
 
 .meridian-recovery {
-  display: grid;
-  gap: 14px;
+  display: block;
 }
 
-.meridian-recovery__summary,
-.meridian-recovery__stage {
+.meridian-recovery__card {
   padding: 20px 22px;
+}
+
+.meridian-recovery__top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
 }
 
 .meridian-recovery__chips,
@@ -354,16 +493,29 @@
   gap: 6px;
 }
 
+.meridian-recovery__top-row > .meridian-recovery__chips {
+  height: 22px;
+  flex-basis: 100%;
+  align-items: center;
+}
+
 .meridian-recovery__chips span,
 .meridian-recovery__meta span {
-  padding: 4px 9px;
+  padding: 4px 11px;
   border: 1px solid var(--mer-input-border);
-  border-radius: 999px;
+  border-radius: 100px;
   color: var(--mer-workspace-muted);
-  font-family: "Space Grotesk", monospace;
-  font-size: 9.5px;
+  font-family: Archivo, sans-serif;
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.1em;
+  line-height: normal;
+}
+
+.meridian-recovery__chips span:first-child {
+  color: var(--mer-recovery-stage-label);
+  border-color: transparent;
+  background: var(--mer-accent-soft);
 }
 
 .meridian-recovery__chips .is-danger {
@@ -372,7 +524,6 @@
   background: color-mix(in srgb, var(--mer-danger) 7%, transparent);
 }
 
-.meridian-recovery__summary-row,
 .meridian-recovery__verify-head,
 .meridian-recovery__list-head {
   display: flex;
@@ -381,7 +532,6 @@
   gap: 18px;
 }
 
-.meridian-recovery__summary-row { margin-top: 14px; }
 .meridian-recovery h2,
 .meridian-recovery h3 { margin: 0; font-family: Sora, sans-serif; }
 .meridian-recovery h2 { font-size: 21px; }
@@ -389,41 +539,54 @@
 .meridian-recovery p { margin: 3px 0 0; color: var(--mer-workspace-muted); font-size: 12px; line-height: 1.45; }
 
 .meridian-recovery__metrics {
-  min-width: 170px;
-  display: grid;
-  justify-items: end;
-  gap: 1px;
+  display: flex;
+  height: 24px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  color: var(--mer-success);
+  background: var(--mer-success-soft);
 }
 
-.meridian-recovery__metrics strong { color: var(--mer-workspace-ink); font-family: Sora, sans-serif; font-size: 21px; }
-.meridian-recovery__metrics span { color: var(--mer-workspace-muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
-.meridian-recovery__metrics small { color: var(--mer-workspace-muted); font-size: 10.5px; }
+.meridian-recovery__metrics > i { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: currentColor; animation: merPulse 1.8s ease-in-out infinite; }
+.meridian-recovery__metrics strong,
+.meridian-recovery__metrics span { color: currentColor; font-family: "Space Grotesk", monospace; font-size: 11px; font-weight: 700; line-height: normal; text-transform: uppercase; letter-spacing: 0.04em; }
+.meridian-recovery__metrics small { color: var(--mer-workspace-muted); font-size: 10.5px; line-height: normal; }
+.meridian-recovery__metrics.is-unavailable { color: var(--mer-danger); background: color-mix(in srgb, var(--mer-danger) 8%, transparent); }
+.meridian-recovery__scope { margin-top: 12px !important; font-size: 12.5px !important; line-height: normal !important; }
+.meridian-recovery__refreshing { color: var(--mer-accent) !important; font-size: 11px !important; }
 
 .meridian-recovery__stages {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  margin-top: 18px;
+  display: flex;
+  gap: 6px;
+  margin-top: 16px;
 }
 
 .meridian-recovery__stages button {
-  display: grid;
-  gap: 7px;
+  display: block;
+  flex: 1;
   padding: 0;
   border: 0;
   color: var(--mer-workspace-muted);
   background: transparent;
   font: inherit;
-  font-size: 11.5px;
-  font-weight: 700;
   text-align: left;
   cursor: pointer;
 }
 
-.meridian-recovery__stages button.is-active { color: var(--mer-accent); }
-.meridian-recovery__stages i { width: 100%; height: 3px; border-radius: 99px; background: var(--mer-divider); }
+.meridian-recovery__stages button > span {
+  display: block;
+  margin-top: 7px;
+  color: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+}
 
-.meridian-recovery__stage { min-height: 390px; }
+.meridian-recovery__stages button.is-active { color: var(--mer-recovery-stage-label); }
+.meridian-recovery__stages i { display: block; width: 100%; height: 4px; border-radius: 100px; background: var(--mer-recovery-stage-idle); }
+
+.meridian-recovery__stage { min-height: 230px; margin-top: 16px; }
 .meridian-recovery__phase { animation: merIn 300ms ease both; }
 .meridian-recovery__label { color: var(--mer-workspace-muted) !important; font-size: 11px !important; font-weight: 700; letter-spacing: 0.07em; }
 
@@ -554,6 +717,9 @@
 .meridian-recovery__warning { display: flex; align-items: center; gap: 9px; margin-top: 14px; padding: 10px 14px; border: 1px dashed var(--mer-input-border); border-radius: 10px; color: var(--mer-workspace-muted); font-size: 12px; }
 .meridian-recovery__warning i { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--mer-success); }
 .meridian-recovery__warning.is-unavailable i { background: var(--mer-danger); }
+.meridian-recovery__off-host-warning { margin-top: 9px !important; padding: 9px 12px; border-left: 3px solid var(--mer-status-background); color: var(--mer-workspace-ink) !important; background: color-mix(in srgb, var(--mer-status-background) 8%, transparent); }
+.meridian-recovery__recent-auth-unknown { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding: 9px 12px; border: 1px solid color-mix(in srgb, var(--mer-status-background) 45%, transparent); border-radius: 10px; color: var(--mer-workspace-ink); background: color-mix(in srgb, var(--mer-status-background) 8%, transparent); font-size: 12px; }
+.meridian-recovery__recent-auth-unknown button { padding: 6px 12px; border: 1px solid var(--mer-input-border); border-radius: 999px; color: var(--mer-workspace-ink); background: transparent; font: inherit; font-weight: 700; cursor: pointer; }
 
 .meridian-recovery__nav { display: flex; justify-content: space-between; margin-top: 14px; }
 .meridian-recovery__nav button { padding: 8px 17px; border: 1px solid var(--mer-input-border); border-radius: 999px; color: var(--mer-workspace-ink); background: transparent; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; }
@@ -568,10 +734,10 @@
 .meridian-recovery-dialog__card > div:last-child { display: flex; justify-content: flex-end; gap: 8px; }
 
 @media (max-width: 900px) {
-  .meridian-recovery__summary-row,
+  .meridian-recovery__top-row,
   .meridian-recovery__verify-head,
   .meridian-recovery__list-head { align-items: stretch; flex-direction: column; }
-  .meridian-recovery__metrics { justify-items: start; }
+  .meridian-recovery__metrics { align-self: flex-start; }
   .meridian-recovery__rows > button { align-items: flex-start; flex-wrap: wrap; }
   .meridian-recovery__row-copy { min-width: 60%; }
 }
@@ -582,7 +748,8 @@
   .meridian-recovery__result p,
   .meridian-recovery-dialog__card,
   .meridian-recovery__progress b,
-  .meridian-recovery__status.is-valid i { animation: none; }
+  .meridian-recovery__status.is-valid i,
+  .meridian-recovery__metrics > i { animation: none; }
 }
 
 html.elvern-control-center-paint,
@@ -610,6 +777,9 @@ body.elvern-control-center-paint,
   --mer-workspace-muted: #676d74;
   --mer-card: #ffffff;
   --mer-card-border: rgba(20, 22, 26, 0.08);
+  --mer-account-menu-border: rgba(20, 22, 26, 0.12);
+  --mer-user-actions-card: #181513;
+  --mer-user-actions-active-tab: #fff;
   --mer-surface: #f1f2ee;
   --mer-hover: #f6f7f4;
   --mer-input: #fcfcfa;
@@ -624,6 +794,14 @@ body.elvern-control-center-paint,
   --mer-workspace-muted: rgba(238, 231, 222, 0.55);
   --mer-card: #1d1a17;
   --mer-card-border: rgba(255, 255, 255, 0.07);
+  --mer-account-menu-border: rgba(255, 255, 255, 0.14);
+  --mer-account-menu-icon: #9db2ff;
+  --mer-recovery-stage-idle: rgba(255, 255, 255, 0.12);
+  --mer-recovery-stage-label: #9db2ff;
+  --mer-user-actions-card: #181513;
+  --mer-user-actions-active-tab: #3a3835;
+  --mer-user-actions-active-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  --mer-user-actions-selected: rgba(46, 79, 224, 0.15);
   --mer-surface: rgba(255, 255, 255, 0.08);
   --mer-hover: #141210;
   --mer-input: #141210;
@@ -637,8 +815,8 @@ body.elvern-control-center-paint,
 
 .meridian-sidebar {
   display: flex;
-  width: 277px;
-  flex: 0 0 277px;
+  width: 252px;
+  flex: 0 0 252px;
   min-width: 0;
   flex-direction: column;
   padding: 18px 12px 16px;
@@ -841,14 +1019,14 @@ body.elvern-control-center-paint,
   left: 0;
   z-index: 35;
   padding: 5px;
-  border: 1px solid var(--mer-card-border);
+  border: 1px solid var(--mer-account-menu-border);
   border-radius: 12px;
   background: var(--mer-card);
   box-shadow: 0 18px 44px rgba(0, 0, 0, .25);
   animation: merIn 220ms cubic-bezier(.25, .9, .3, 1);
 }
 
-.meridian-account-menu__item {
+.meridian-control-center .meridian-account-menu__item {
   width: 100%;
   display: flex;
   align-items: center;
@@ -866,17 +1044,32 @@ body.elvern-control-center-paint,
   transition: background 200ms;
 }
 
+.meridian-control-center .meridian-account-menu__item > svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.meridian-control-center .meridian-account-menu__item:not(.meridian-account-menu__item--danger) > svg {
+  color: var(--mer-account-menu-icon);
+}
+
 .meridian-account-menu__item:hover,
 .meridian-account-menu__item:focus-visible {
   background: var(--mer-hover);
 }
 
-.meridian-account-menu__item--danger {
+.meridian-control-center .meridian-account-menu__item--danger {
   color: #d64545;
 }
 
-.meridian-account-menu__item--danger:hover,
-.meridian-account-menu__item--danger:focus-visible {
+.meridian-control-center .meridian-account-menu__item--danger:hover,
+.meridian-control-center .meridian-account-menu__item--danger:focus-visible {
   color: #d64545;
   background: rgba(214, 69, 69, .08);
 }
@@ -2004,11 +2197,19 @@ textarea.meridian-path-input { height: 64px; padding-block: 10px; }
 }
 
 .meridian-users-card .user-status-indicator {
-  inline-size: 6px;
-  block-size: 6px;
+  inline-size: 8px;
+  block-size: 8px;
+  flex: 0 0 8px;
+  background: currentColor;
   box-shadow: none;
   animation: none;
 }
+
+.meridian-users-card .user-status-pill--green { color: var(--mer-status-active); }
+.meridian-users-card .user-status-pill--yellow { color: var(--mer-status-background); }
+.meridian-users-card .user-status-pill--orange { color: var(--mer-status-pending); }
+.meridian-users-card .user-status-pill--red { color: var(--mer-danger); }
+.meridian-users-card .user-status-pill--grey { color: var(--mer-status-offline); }
 
 .meridian-users-card .user-status-indicator--green { animation: merUserActive 2.4s ease-in-out infinite; }
 .meridian-users-card .user-status-indicator--yellow { animation: merUserBackground 3.4s ease-in-out infinite; }
@@ -2028,6 +2229,63 @@ textarea.meridian-path-input { height: 64px; padding-block: 10px; }
   font-size: 12px;
   line-height: 1;
 }
+
+.meridian-account-enable-button {
+  min-height: 30px;
+  padding: 7px 13px;
+  border: 1.5px solid var(--mer-workspace-ink);
+  border-radius: 100px;
+  color: var(--mer-workspace-ink);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.meridian-account-enable-button:hover,
+.meridian-account-enable-button:focus-visible {
+  background: var(--mer-hover);
+}
+
+.meridian-account-state-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 92;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.meridian-account-state-dialog__backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(10, 11, 14, 0.5);
+  backdrop-filter: blur(5px);
+}
+
+.meridian-account-state-dialog__card {
+  position: relative;
+  width: min(420px, calc(100vw - 48px));
+  display: grid;
+  gap: 12px;
+  padding: 22px;
+  border: 1px solid var(--mer-card-border);
+  border-radius: 16px;
+  color: var(--mer-workspace-ink);
+  background: var(--mer-card);
+  box-shadow: 0 40px 90px rgba(0, 0, 0, 0.4);
+}
+
+.meridian-account-state-dialog__card h2,
+.meridian-account-state-dialog__card p { margin: 0; }
+.meridian-account-state-dialog__card h2 { font-family: Sora, sans-serif; font-size: 18px; }
+.meridian-account-state-dialog__card > p:not(.meridian-account-state-dialog__eyebrow) { color: var(--mer-workspace-muted); font-size: 12.5px; line-height: 1.5; }
+.meridian-account-state-dialog__eyebrow { color: var(--mer-workspace-muted); font-size: 10px; font-weight: 700; letter-spacing: .14em; }
+.meridian-account-state-dialog__actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 .meridian-users-card .control-center-user-expander {
   width: 100%;

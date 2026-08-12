@@ -1,18 +1,25 @@
 from __future__ import annotations
 
-import os
 import ipaddress
+import logging
+import os
 import re
 import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .services.external_redirect_security_service import (
     ExternalRedirectSafetyError,
     validate_safe_custom_app_scheme,
 )
+
+
+logger = logging.getLogger(__name__)
+_timezone_fallback_logged = False
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -168,6 +175,60 @@ def _resolve_binary(*env_names: str, default: str | None = None) -> str | None:
     return shutil.which(default)
 
 
+def _valid_timezone_name(value: object) -> str | None:
+    candidate = str(value or "").strip()
+    if not candidate or candidate.startswith(":") or candidate.startswith("/"):
+        return None
+    try:
+        ZoneInfo(candidate)
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+    return candidate
+
+
+def _resolve_timezone_name() -> str:
+    global _timezone_fallback_logged
+    configured = os.getenv("ELVERN_TIMEZONE", "").strip()
+    if configured:
+        resolved = _valid_timezone_name(configured)
+        if resolved is None:
+            raise ConfigError("ELVERN_TIMEZONE must be a valid IANA timezone name")
+        return resolved
+
+    candidates: list[str] = []
+    environment_timezone = _valid_timezone_name(os.getenv("TZ", ""))
+    if environment_timezone:
+        candidates.append(environment_timezone)
+    try:
+        timezone_file = Path("/etc/timezone").read_text(encoding="utf-8").strip()
+    except OSError:
+        timezone_file = ""
+    file_timezone = _valid_timezone_name(timezone_file)
+    if file_timezone:
+        candidates.append(file_timezone)
+    try:
+        localtime_target = Path("/etc/localtime").resolve(strict=True)
+    except OSError:
+        localtime_target = None
+    if localtime_target is not None:
+        localtime_parts = localtime_target.parts
+        if "zoneinfo" in localtime_parts:
+            zoneinfo_index = localtime_parts.index("zoneinfo")
+            symlink_timezone = _valid_timezone_name("/".join(localtime_parts[zoneinfo_index + 1:]))
+            if symlink_timezone:
+                candidates.append(symlink_timezone)
+    local_zone = datetime.now().astimezone().tzinfo
+    local_key = _valid_timezone_name(getattr(local_zone, "key", None))
+    if local_key:
+        candidates.append(local_key)
+    if candidates:
+        return candidates[0]
+    if not _timezone_fallback_logged:
+        logger.warning("Host IANA timezone could not be resolved; using UTC for calendar-based age credentials")
+        _timezone_fallback_logged = True
+    return "UTC"
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str
@@ -267,6 +328,7 @@ class Settings:
     argon2_parallelism: int | None
     url_prefix: str | None
     url_prefix_rotation_reminder_days: int
+    timezone_name: str
 
     @property
     def argon2_params_manually_set(self) -> bool:
@@ -483,6 +545,7 @@ def load_settings() -> Settings:
             "ELVERN_URL_PREFIX_ROTATION_REMINDER_DAYS",
             180,
         ),
+        timezone_name=_resolve_timezone_name(),
     )
     validate_settings(settings)
     return settings

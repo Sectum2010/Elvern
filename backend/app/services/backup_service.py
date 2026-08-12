@@ -685,12 +685,15 @@ def create_backup_checkpoint(
     operation_context: dict[str, object] | None = None,
     progress_callback: Callable[[str, int, int, str], None] | None = None,
     progress_metrics_callback: Callable[[str, int, int, str, int, int, str], None] | None = None,
+    staging_path_callback: Callable[[Path], None] | None = None,
 ) -> dict[str, object]:
     staging_path: Path | None = None
 
     def remember_staging_path(path: Path) -> None:
         nonlocal staging_path
         staging_path = path
+        if staging_path_callback is not None:
+            staging_path_callback(path)
 
     try:
         return _create_backup_checkpoint_impl(

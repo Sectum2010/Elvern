@@ -4,16 +4,19 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import inspect
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from backend.app import cli as app_cli
-from backend.app.db import get_connection
+from backend.app.db import BACKUP_JOB_PERSISTENCE_MIGRATION, get_connection, init_db, utcnow_iso
 from backend.app.services import backup_service
 
 
@@ -158,6 +161,26 @@ def _prepare_fake_project_root(tmp_path, monkeypatch) -> Path:
     )
     monkeypatch.setattr(backup_service, "PROJECT_ROOT", fake_root)
     return fake_root
+
+
+def _current_backup_actor(settings) -> SimpleNamespace:
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT u.id AS user_id, u.username, s.id AS session_id
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.revoked_at IS NULL
+            ORDER BY s.id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert row is not None
+    return SimpleNamespace(
+        id=int(row["user_id"]),
+        username=str(row["username"]),
+        session_id=int(row["session_id"]),
+    )
 
 
 def _insert_runtime_fixture_data(initialized_settings) -> None:
@@ -1013,6 +1036,259 @@ def test_backup_job_rejects_a_competing_writer(
         release.set()
 
 
+def test_separate_backup_managers_preserve_a_live_lease_and_its_staging_artifact(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from backend.app.services.backup_job_service import BackupJobManager
+
+    _prepare_fake_project_root(tmp_path, monkeypatch)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    actor = _current_backup_actor(initialized_settings)
+    monkeypatch.setattr(BackupJobManager, "_run_job", lambda *args, **kwargs: None)
+
+    first_manager = BackupJobManager(initialized_settings)
+    second_manager = BackupJobManager(initialized_settings)
+    first = first_manager.start_job(
+        actor=actor,
+        key_source="auto",
+        passphrase=None,
+        idempotency_key="cross-process-live",
+    )
+    backups_dir = Path(backup_service.get_backups_dir_path(initialized_settings))
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    staging_path = backups_dir / f".staging-{first['id']}"
+    staging_path.mkdir()
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE backup_jobs SET staging_path = ? WHERE id = ?",
+            (str(staging_path.resolve()), first["id"]),
+        )
+        connection.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        second_manager.start_job(
+            actor=actor,
+            key_source="auto",
+            passphrase=None,
+            idempotency_key="cross-process-competitor",
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["job_id"] == first["id"]
+    assert first_manager.get_job(str(first["id"]))["state"] == "queued"
+    assert staging_path.is_dir()
+
+
+def test_backup_lease_heartbeat_extends_expiry(
+    client,
+    admin_credentials,
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    from backend.app.services import backup_job_service
+    from backend.app.services.backup_job_service import BackupJobManager
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    actor = _current_backup_actor(initialized_settings)
+    monkeypatch.setattr(BackupJobManager, "_run_job", lambda *args, **kwargs: None)
+    manager = BackupJobManager(initialized_settings)
+    job = manager.start_job(
+        actor=actor,
+        key_source="auto",
+        passphrase=None,
+        idempotency_key="heartbeat-contract",
+    )
+    with get_connection(initialized_settings) as connection:
+        before = connection.execute(
+            "SELECT heartbeat_at, expires_at FROM backup_job_leases WHERE job_id = ?",
+            (job["id"],),
+        ).fetchone()
+    assert before is not None
+
+    monkeypatch.setattr(backup_job_service, "BACKUP_LEASE_HEARTBEAT_SECONDS", 0.01)
+    stop = threading.Event()
+    lost = threading.Event()
+    heartbeat = threading.Thread(target=manager._heartbeat_loop, args=(str(job["id"]), stop, lost))
+    heartbeat.start()
+    time.sleep(0.04)
+    stop.set()
+    heartbeat.join(timeout=1)
+
+    with get_connection(initialized_settings) as connection:
+        after = connection.execute(
+            "SELECT heartbeat_at, expires_at FROM backup_job_leases WHERE job_id = ?",
+            (job["id"],),
+        ).fetchone()
+    assert after is not None
+    assert after["heartbeat_at"] > before["heartbeat_at"]
+    assert after["expires_at"] > before["expires_at"]
+    assert lost.is_set() is False
+
+
+def test_expired_backup_lease_reclaims_only_the_stale_job_and_artifact(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from backend.app.services.backup_job_service import BackupJobManager
+
+    _prepare_fake_project_root(tmp_path, monkeypatch)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    actor = _current_backup_actor(initialized_settings)
+    monkeypatch.setattr(BackupJobManager, "_run_job", lambda *args, **kwargs: None)
+    stale_manager = BackupJobManager(initialized_settings)
+    replacement_manager = BackupJobManager(initialized_settings)
+    stale = stale_manager.start_job(
+        actor=actor,
+        key_source="auto",
+        passphrase=None,
+        idempotency_key="stale-owner",
+    )
+    backups_dir = Path(backup_service.get_backups_dir_path(initialized_settings))
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    stale_artifact = backups_dir / f".staging-{stale['id']}"
+    stale_artifact.mkdir()
+    unrelated_artifact = backups_dir / ".staging-unrelated"
+    unrelated_artifact.mkdir()
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE backup_jobs SET staging_path = ? WHERE id = ?",
+            (str(stale_artifact.resolve()), stale["id"]),
+        )
+        connection.execute(
+            "UPDATE backup_job_leases SET expires_at = '2000-01-01T00:00:00+00:00' WHERE job_id = ?",
+            (stale["id"],),
+        )
+        connection.commit()
+
+    replacement = replacement_manager.start_job(
+        actor=actor,
+        key_source="auto",
+        passphrase=None,
+        idempotency_key="replacement-owner",
+    )
+
+    assert replacement["id"] != stale["id"]
+    assert stale_manager.get_job(str(stale["id"]))["state"] == "interrupted"
+    assert replacement_manager.get_job(str(replacement["id"]))["state"] == "queued"
+    assert not stale_artifact.exists()
+    assert unrelated_artifact.is_dir()
+    with get_connection(initialized_settings) as connection:
+        lease = connection.execute("SELECT * FROM backup_job_leases").fetchone()
+    assert lease is not None
+    assert lease["job_id"] == replacement["id"]
+    assert lease["owner_instance_id"] == replacement_manager.instance_id
+
+
+def test_lost_backup_lease_cannot_commit_catalog_or_success(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from backend.app.services.backup_job_service import BackupJobManager, BackupLeaseLostError
+
+    _prepare_fake_project_root(tmp_path, monkeypatch)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    actor = _current_backup_actor(initialized_settings)
+    monkeypatch.setattr(BackupJobManager, "_run_job", lambda *args, **kwargs: None)
+    manager = BackupJobManager(initialized_settings)
+    job = manager.start_job(
+        actor=actor,
+        key_source="auto",
+        passphrase=None,
+        idempotency_key="lease-lost-before-catalog",
+    )
+    backups_dir = Path(backup_service.get_backups_dir_path(initialized_settings))
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backups_dir / "elvern-backup-20260811-010203Z.tar.gz"
+    backup_path.write_bytes(b"checkpoint")
+    created = {
+        "checkpoint_id": backup_path.name,
+        "backup_path": str(backup_path),
+        "created_at_utc": "2026-08-11T01:02:03Z",
+        "backup_trigger": "manual_admin_ui",
+        "auto_checkpoint": False,
+        "backup_storage": "archive",
+        "backup_encrypted": False,
+        "backup_key_source": "auto",
+        "contains_secrets": True,
+        "total_size_bytes": backup_path.stat().st_size,
+        "file_count": 1,
+    }
+    with get_connection(initialized_settings) as connection:
+        connection.execute("DELETE FROM backup_job_leases WHERE job_id = ?", (job["id"],))
+        connection.commit()
+
+    with pytest.raises(BackupLeaseLostError):
+        manager._upsert_catalog(created, job_id=str(job["id"]))
+
+    with get_connection(initialized_settings) as connection:
+        catalog_count = connection.execute(
+            "SELECT COUNT(*) FROM backup_catalog WHERE job_id = ?",
+            (job["id"],),
+        ).fetchone()[0]
+        state = connection.execute("SELECT state FROM backup_jobs WHERE id = ?", (job["id"],)).fetchone()[0]
+    assert catalog_count == 0
+    assert state != "completed"
+
+
+def test_backup_catalog_upsert_commits_only_one_entry_for_owned_job(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from backend.app.services.backup_job_service import BackupJobManager
+
+    _prepare_fake_project_root(tmp_path, monkeypatch)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    actor = _current_backup_actor(initialized_settings)
+    monkeypatch.setattr(BackupJobManager, "_run_job", lambda *args, **kwargs: None)
+    manager = BackupJobManager(initialized_settings)
+    job = manager.start_job(
+        actor=actor,
+        key_source="auto",
+        passphrase=None,
+        idempotency_key="single-catalog-entry",
+    )
+    backups_dir = Path(backup_service.get_backups_dir_path(initialized_settings))
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backups_dir / "elvern-backup-20260811-020304Z.tar.gz"
+    backup_path.write_bytes(b"checkpoint")
+    created = {
+        "checkpoint_id": backup_path.name,
+        "backup_path": str(backup_path),
+        "created_at_utc": "2026-08-11T02:03:04Z",
+        "backup_trigger": "manual_admin_ui",
+        "auto_checkpoint": False,
+        "backup_storage": "archive",
+        "backup_encrypted": False,
+        "backup_key_source": "auto",
+        "contains_secrets": True,
+        "total_size_bytes": backup_path.stat().st_size,
+        "file_count": 1,
+    }
+
+    manager._upsert_catalog(created, job_id=str(job["id"]))
+    manager._upsert_catalog(created, job_id=str(job["id"]))
+
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            "SELECT checkpoint_id, job_id FROM backup_catalog WHERE job_id = ?",
+            (job["id"],),
+        ).fetchall()
+    assert [dict(row) for row in rows] == [{"checkpoint_id": backup_path.name, "job_id": job["id"]}]
+
+
 def test_remote_backup_routes_redact_host_paths(
     client,
     admin_credentials,
@@ -1099,6 +1375,112 @@ def test_backup_passphrase_failures_are_rate_limited_per_session_and_checkpoint(
     assert blocked.json()["detail"]["code"] == "backup_passphrase_rate_limited"
 
 
+def test_backup_passphrase_rate_limit_is_shared_by_inspect_preview_and_restore_plan(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _prepare_fake_project_root(tmp_path, monkeypatch)
+    _insert_runtime_fixture_data(initialized_settings)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    assert client.post(
+        "/api/admin/backups/recent-auth",
+        json={"current_admin_password": admin_credentials["password"]},
+    ).status_code == 200
+    created = client.post(
+        "/api/admin/backups",
+        json={"passphrase": "correct-shared-passphrase"},
+    )
+    assert created.status_code == 200
+    checkpoint_id = created.json()["checkpoint"]["checkpoint_id"]
+    monkeypatch.setattr(
+        "backend.app.services.recovery_security_service.BACKUP_PASSPHRASE_ATTEMPT_LIMIT",
+        2,
+    )
+
+    inspect_response = client.post(
+        f"/api/admin/backups/{checkpoint_id}/inspect",
+        json={"passphrase": "wrong-shared-passphrase"},
+    )
+    preview_response = client.post(
+        f"/api/admin/backups/{checkpoint_id}/preview",
+        json={"passphrase": "wrong-shared-passphrase"},
+    )
+    restore_response = client.post(
+        f"/api/admin/backups/{checkpoint_id}/restore-plan",
+        json={"passphrase": "wrong-shared-passphrase"},
+    )
+
+    assert inspect_response.status_code == 422
+    assert preview_response.status_code == 422
+    assert restore_response.status_code == 429
+    assert restore_response.json()["detail"]["code"] == "backup_passphrase_rate_limited"
+
+
+def test_wrong_backup_passphrase_is_not_written_to_logs_or_security_events(
+    client,
+    admin_credentials,
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    _prepare_fake_project_root(tmp_path, monkeypatch)
+    _insert_runtime_fixture_data(initialized_settings)
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    assert client.post(
+        "/api/admin/backups/recent-auth",
+        json={"current_admin_password": admin_credentials["password"]},
+    ).status_code == 200
+    created = client.post(
+        "/api/admin/backups",
+        json={"passphrase": "correct-log-test-passphrase"},
+    )
+    checkpoint_id = created.json()["checkpoint"]["checkpoint_id"]
+    wrong_passphrase = "wrong-secret-must-never-be-logged"
+
+    response = client.post(
+        f"/api/admin/backups/{checkpoint_id}/inspect",
+        json={"passphrase": wrong_passphrase},
+    )
+
+    assert response.status_code == 422
+    assert wrong_passphrase not in response.text
+    assert wrong_passphrase not in caplog.text
+    with get_connection(initialized_settings) as connection:
+        serialized_events = "\n".join(
+            str(row["details_json"] or "")
+            for row in connection.execute(
+                "SELECT details_json FROM security_events ORDER BY id"
+            ).fetchall()
+        )
+    assert wrong_passphrase not in serialized_events
+
+
+def test_unexpected_checkpoint_value_error_is_redacted_from_api(
+    client,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    secret_error = "internal /private/backup/path and raw configuration"
+    monkeypatch.setattr(
+        "backend.app.routes.admin.resolve_backup_checkpoint_path",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError(secret_error)),
+    )
+
+    response = client.get("/api/admin/backups/checkpoint/inspect")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == {
+        "code": "backup_operation_failed",
+        "message": "The backup operation could not be completed.",
+    }
+    assert secret_error not in response.text
+
+
 def test_backup_catalog_keeps_missing_checkpoint_as_honest_status(
     initialized_settings,
     tmp_path,
@@ -1116,6 +1498,239 @@ def test_backup_catalog_keeps_missing_checkpoint_as_honest_status(
     missing = list_backup_catalog(initialized_settings)
     assert missing[0]["checkpoint_id"] == created["checkpoint_id"]
     assert missing[0]["catalog_status"] == "missing"
+
+
+def test_backup_job_survives_session_and_user_deletion_with_stable_idempotency_scope(
+    client,
+    admin_credentials,
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    from backend.app.services.backup_job_service import BackupJobManager
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    _create_standard_user_via_admin(client, username="backup-owner", password="backup-owner-password")
+    _logout(client)
+    _login(client, username="backup-owner", password="backup-owner-password")
+    actor = _current_backup_actor(initialized_settings)
+    monkeypatch.setattr(BackupJobManager, "_run_job", lambda *args, **kwargs: None)
+    manager = BackupJobManager(initialized_settings)
+    job = manager.start_job(
+        actor=actor,
+        key_source="auto",
+        passphrase=None,
+        idempotency_key="survives-owner-deletion",
+    )
+    expected_scope = f"user:{actor.id}:{actor.username.casefold()}"
+
+    with get_connection(initialized_settings) as connection:
+        connection.execute("DELETE FROM sessions WHERE id = ?", (actor.session_id,))
+        connection.execute("DELETE FROM users WHERE id = ?", (actor.id,))
+        connection.commit()
+        persisted = connection.execute("SELECT * FROM backup_jobs WHERE id = ?", (job["id"],)).fetchone()
+    assert persisted is not None
+    assert persisted["initiated_by_user_id"] is None
+    assert persisted["auth_session_id"] is None
+    assert persisted["initiated_by_username"] == actor.username
+    assert persisted["idempotency_scope"] == expected_scope
+
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            "UPDATE backup_jobs SET state = 'archiving', progress_percent = 55, updated_at = ? WHERE id = ?",
+            (utcnow_iso(), job["id"]),
+        )
+        connection.commit()
+    assert manager.get_job(str(job["id"]))["progress_percent"] == 55
+
+    duplicate = manager.start_job(
+        actor=actor,
+        key_source="auto",
+        passphrase=None,
+        idempotency_key="survives-owner-deletion",
+    )
+    assert duplicate["id"] == job["id"]
+
+
+def test_backup_job_schema_upgrade_preserves_active_and_completed_rows(
+    initialized_settings,
+) -> None:
+    with get_connection(initialized_settings) as connection:
+        user = connection.execute("SELECT id, username FROM users ORDER BY id LIMIT 1").fetchone()
+        assert user is not None
+        now = utcnow_iso()
+        session_ids = [
+            int(row["id"])
+            for row in connection.execute(
+                "SELECT id FROM sessions WHERE user_id = ? ORDER BY id LIMIT 2",
+                (user["id"],),
+            ).fetchall()
+        ]
+        while len(session_ids) < 2:
+            cursor = connection.execute(
+                """
+                INSERT INTO sessions (
+                    user_id, session_token_hash, created_at, expires_at,
+                    last_seen_at, last_activity_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user["id"],
+                    f"migration-session-{len(session_ids)}",
+                    now,
+                    "2099-01-01T00:00:00+00:00",
+                    now,
+                    now,
+                ),
+            )
+            session_ids.append(int(cursor.lastrowid))
+        connection.execute("DROP TABLE backup_job_leases")
+        connection.execute("DELETE FROM backup_catalog")
+        connection.execute("DROP TABLE backup_jobs")
+        connection.execute(
+            """
+            CREATE TABLE backup_jobs (
+                id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                progress_current INTEGER NOT NULL DEFAULT 0,
+                progress_total INTEGER NOT NULL DEFAULT 100,
+                progress_percent INTEGER NOT NULL DEFAULT 0,
+                stage_progress_current INTEGER,
+                stage_progress_total INTEGER,
+                stage_progress_unit TEXT,
+                message TEXT NOT NULL DEFAULT '',
+                key_source TEXT NOT NULL,
+                checkpoint_id TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                initiated_by_user_id INTEGER NOT NULL,
+                initiated_by_username TEXT NOT NULL DEFAULT '',
+                auth_session_id INTEGER NOT NULL,
+                idempotency_key TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (initiated_by_user_id) REFERENCES users (id) ON DELETE CASCADE,
+                FOREIGN KEY (auth_session_id) REFERENCES sessions (id) ON DELETE CASCADE,
+                UNIQUE (auth_session_id, idempotency_key)
+            )
+            """
+        )
+        for job_id, state, session_id in (
+            ("legacy-active", "archiving", session_ids[0]),
+            ("legacy-completed", "completed", session_ids[1]),
+        ):
+            connection.execute(
+                """
+                INSERT INTO backup_jobs (
+                    id, state, progress_current, progress_total, progress_percent,
+                    message, key_source, checkpoint_id, initiated_by_user_id,
+                    initiated_by_username, auth_session_id, idempotency_key,
+                    created_at, started_at, updated_at, completed_at
+                ) VALUES (?, ?, 50, 100, 50, 'legacy', 'auto', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    state,
+                    "legacy-checkpoint" if state == "completed" else None,
+                    user["id"],
+                    user["username"],
+                    session_id,
+                    "same-key",
+                    now,
+                    now,
+                    now,
+                    now if state == "completed" else None,
+                ),
+            )
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            (BACKUP_JOB_PERSISTENCE_MIGRATION,),
+        )
+        connection.commit()
+
+    init_db(initialized_settings)
+    init_db(initialized_settings)
+
+    with get_connection(initialized_settings) as connection:
+        rows = connection.execute(
+            "SELECT id, state, checkpoint_id, idempotency_scope FROM backup_jobs ORDER BY id"
+        ).fetchall()
+        lease_fks = connection.execute("PRAGMA foreign_key_list(backup_job_leases)").fetchall()
+        indexes = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA index_list(backup_jobs)").fetchall()
+        }
+        migration_count = connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE name = ?",
+            (BACKUP_JOB_PERSISTENCE_MIGRATION,),
+        ).fetchone()[0]
+    assert [row["id"] for row in rows] == ["legacy-active", "legacy-completed"]
+    assert [row["state"] for row in rows] == ["archiving", "completed"]
+    assert rows[1]["checkpoint_id"] == "legacy-checkpoint"
+    assert {row["idempotency_scope"] for row in rows} == {
+        f"legacy-session:{session_ids[0]}",
+        f"legacy-session:{session_ids[1]}",
+    }
+    assert {row["table"] for row in lease_fks} == {"backup_jobs"}
+    assert "idx_backup_jobs_scope_created" in indexes
+    assert migration_count == 1
+
+
+def test_backup_catalog_timestamp_order_staleness_and_private_directory(
+    initialized_settings,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from backend.app.services.backup_job_service import (
+        _checkpoint_created_at,
+        _checkpoint_fingerprint,
+        list_backup_catalog,
+    )
+
+    _prepare_fake_project_root(tmp_path, monkeypatch)
+    backups_dir = Path(backup_service.get_backups_dir_path(initialized_settings))
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    known_new = backups_dir / "elvern-backup-20260811-120000Z.tar.gz"
+    known_old = backups_dir / "elvern-backup-20260810-120000Z.tar.gz"
+    unknown = backups_dir / "manual-checkpoint.tar.gz"
+    malformed = backups_dir / "elvern-backup-20261399-990000Z.tar.gz"
+    for path in (known_new, known_old, unknown, malformed):
+        path.write_bytes(path.name.encode("utf-8"))
+
+    assert _checkpoint_created_at(known_new) == "2026-08-11T12:00:00Z"
+    assert _checkpoint_created_at(malformed) is None
+    first = list_backup_catalog(initialized_settings)
+    assert [row["checkpoint_id"] for row in first[:2]] == [known_new.name, known_old.name]
+    assert first[0]["created_at_utc"] == "2026-08-11T12:00:00Z"
+    assert {row["checkpoint_id"] for row in first[2:]} == {unknown.name, malformed.name}
+    if os.name != "nt":
+        assert (backups_dir.stat().st_mode & 0o777) == 0o700
+
+    verified_at = "2026-08-11T12:30:00Z"
+    with get_connection(initialized_settings) as connection:
+        connection.execute(
+            """
+            UPDATE backup_catalog
+            SET catalog_status = 'valid', last_verification_state = 'valid',
+                last_verified_at = ?, verification_fingerprint = ?
+            WHERE checkpoint_id = ?
+            """,
+            (verified_at, _checkpoint_fingerprint(known_new), known_new.name),
+        )
+        connection.commit()
+    unchanged = list_backup_catalog(initialized_settings)
+    unchanged_row = next(row for row in unchanged if row["checkpoint_id"] == known_new.name)
+    assert unchanged_row["catalog_status"] == "valid"
+    assert unchanged_row["last_verification_state"] == "valid"
+    assert unchanged_row["last_verified_at"] == verified_at
+
+    known_new.write_bytes(b"changed checkpoint contents")
+    changed = list_backup_catalog(initialized_settings)
+    changed_row = next(row for row in changed if row["checkpoint_id"] == known_new.name)
+    assert changed_row["catalog_status"] == "verification_stale"
+    assert changed_row["last_verification_state"] == "verification_stale"
+    assert changed_row["last_verified_at"] == verified_at
 
 
 def test_admin_backup_endpoint_rejects_invalid_checkpoint_ids(

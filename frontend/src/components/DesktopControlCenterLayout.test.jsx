@@ -68,6 +68,14 @@ describe("DesktopControlCenterLayout privilege boundaries", () => {
     expect(screen.getByRole("button", { name: "Switch to Admin Panel" })).toBeInTheDocument();
   });
 
+  test("shows the approved Recovery subtitle", () => {
+    authState.user = { id: 1, username: "admin", role: "admin", assistant_beta_enabled: true };
+    renderLayout("/admin/recovery");
+
+    expect(screen.getByRole("heading", { name: "Recovery" })).toBeInTheDocument();
+    expect(screen.getByText("Encrypted checkpoints, verification, and off-host protection.")).toBeInTheDocument();
+  });
+
   test("account popover contains only the permitted actions and Escape is a no-op", () => {
     authState.user = { id: 1, username: "admin", role: "admin", assistant_beta_enabled: true };
     renderLayout();
@@ -85,6 +93,22 @@ describe("DesktopControlCenterLayout privilege boundaries", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+
+  test("account popover keeps the approved Meridian SVG path contract", () => {
+    authState.user = { id: 1, username: "admin", role: "admin", assistant_beta_enabled: true };
+    renderLayout();
+    fireEvent.click(screen.getByRole("button", { name: /admin administrator/i }));
+
+    const items = within(screen.getByRole("menu")).getAllByRole("menuitem");
+    expect(Array.from(items[0].querySelectorAll("path"), (path) => path.getAttribute("d"))).toEqual([
+      "M12 4l1.8 5.2L19 11l-5.2 1.8L12 18l-1.8-5.2L5 11l5.2-1.8z",
+    ]);
+    expect(Array.from(items[1].querySelectorAll("path"), (path) => path.getAttribute("d"))).toEqual([
+      "M9.5 4.5H6A1.5 1.5 0 004.5 6v12A1.5 1.5 0 006 19.5h3.5",
+      "M15.5 8l4 4-4 4",
+      "M19.5 12h-10",
+    ]);
   });
 
   test("standard user without Assistant permission sees only Sign out", () => {

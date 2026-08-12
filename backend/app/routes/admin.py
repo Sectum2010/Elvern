@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from queue import Empty
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request, Response, status
@@ -186,6 +187,15 @@ from ..url_prefix_service import get_url_prefix_status, rotate_url_prefix
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+logger = logging.getLogger(__name__)
+
+_SAFE_CHECKPOINT_ID_ERRORS = {
+    "Checkpoint id is required.",
+    "Checkpoint id must be a checkpoint directory name.",
+    "Checkpoint id must not contain path separators.",
+    "Checkpoint id must be a directory basename only.",
+    "Checkpoint id must resolve under the backup directory.",
+}
 
 
 def _invalidate_user_sessions_if_available(request: Request, user_id: int, *, reason: str) -> None:
@@ -205,9 +215,30 @@ def _resolve_admin_checkpoint_path(settings, checkpoint_id: str):
     try:
         return resolve_backup_checkpoint_path(settings, checkpoint_id)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        message = str(exc)
+        if message in _SAFE_CHECKPOINT_ID_ERRORS:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message) from exc
+        logger.exception("Unexpected checkpoint path resolution failure")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "backup_operation_failed",
+                "message": "The backup operation could not be completed.",
+            },
+        ) from exc
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backup checkpoint not found.") from exc
+
+
+def _raise_safe_backup_operation_error(operation: str, exc: Exception) -> None:
+    logger.exception("Backup operation failed: %s", operation)
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "code": "backup_operation_failed",
+            "message": "The backup operation could not be completed.",
+        },
+    ) from exc
 
 
 def _admin_backup_same_host(request: Request) -> bool:
@@ -643,13 +674,13 @@ def admin_update_user(
             user_id,
             reason="user_role_changed",
         )
-    elif payload.enabled is False:
+    elif updated.get("_security_boundary_revoked"):
         _invalidate_user_sessions_if_available(
             request,
             user_id,
             reason="user_disabled",
         )
-    if payload.age_credential is not None:
+    if payload.age_credential is not None and updated.get("_age_revoke_summary"):
         revoke_summary = updated.get("_age_revoke_summary") if isinstance(updated, dict) else None
         manager = getattr(request.app.state, "mobile_playback_manager", None)
         invalidate = getattr(manager, "invalidate_sessions_for_media_items_and_users", None)
@@ -1313,16 +1344,19 @@ def _admin_inspect_backup_with_passphrase(
             actor=actor,
             checkpoint_id=checkpoint_id,
         )
-    inspection = inspect_backup_checkpoint(
-        checkpoint_path,
-        settings=request.app.state.settings,
-        passphrase=passphrase,
-    )
-    summary = summarize_backup_checkpoint(
-        checkpoint_path,
-        settings=request.app.state.settings,
-        passphrase=passphrase,
-    )
+    try:
+        inspection = inspect_backup_checkpoint(
+            checkpoint_path,
+            settings=request.app.state.settings,
+            passphrase=passphrase,
+        )
+        summary = summarize_backup_checkpoint(
+            checkpoint_path,
+            settings=request.app.state.settings,
+            passphrase=passphrase,
+        )
+    except (OSError, ValueError) as exc:
+        _raise_safe_backup_operation_error("inspect", exc)
     error_code = str(inspection.get("error_code") or "")
     if error_code == "backup_passphrase_invalid" and passphrase:
         record_backup_passphrase_failure(
@@ -1386,7 +1420,12 @@ def admin_backup_restore_plan(
     user=CurrentAdmin,
 ) -> BackupRestorePlanResponse:
     require_recovery_recent_auth(request.app.state.settings, actor=user)
-    return _admin_backup_restore_plan_with_passphrase(checkpoint_id, request, passphrase=None)
+    return _admin_backup_restore_plan_with_passphrase(
+        checkpoint_id,
+        request,
+        actor=user,
+        passphrase=None,
+    )
 
 
 @router.post("/backups/{checkpoint_id}/restore-plan", response_model=BackupRestorePlanResponse)
@@ -1400,6 +1439,7 @@ def admin_backup_restore_plan_with_passphrase(
     return _admin_backup_restore_plan_with_passphrase(
         checkpoint_id,
         request,
+        actor=user,
         passphrase=payload.passphrase,
     )
 
@@ -1408,9 +1448,16 @@ def _admin_backup_restore_plan_with_passphrase(
     checkpoint_id: str,
     request: Request,
     *,
+    actor,
     passphrase: str | None,
 ) -> BackupRestorePlanResponse:
     checkpoint_path = _resolve_admin_checkpoint_path(request.app.state.settings, checkpoint_id)
+    if passphrase:
+        enforce_backup_passphrase_rate_limit(
+            request.app.state.settings,
+            actor=actor,
+            checkpoint_id=checkpoint_id,
+        )
     try:
         plan = build_restore_dry_run_plan(
             request.app.state.settings,
@@ -1419,8 +1466,20 @@ def _admin_backup_restore_plan_with_passphrase(
         )
         if not _admin_backup_same_host(request):
             plan = _redact_remote_restore_plan_paths(plan, checkpoint_id=checkpoint_id)
+        if passphrase:
+            clear_backup_passphrase_failures(
+                request.app.state.settings,
+                actor=actor,
+                checkpoint_id=checkpoint_id,
+            )
         return BackupRestorePlanResponse(**plan)
     except BackupWrongPassphraseError as exc:
+        if passphrase:
+            record_backup_passphrase_failure(
+                request.app.state.settings,
+                actor=actor,
+                checkpoint_id=checkpoint_id,
+            )
         log_security_event(
             request.app.state.settings,
             event_kind="backup_inspect_failed_wrong_passphrase",
@@ -1442,6 +1501,8 @@ def _admin_backup_restore_plan_with_passphrase(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": exc.code, "message": "Checkpoint verification failed."},
         ) from exc
+    except (OSError, ValueError) as exc:
+        _raise_safe_backup_operation_error("restore_plan", exc)
 
 
 @router.post("/backups/{checkpoint_id}/preview", response_model=BackupPreviewResponse)
@@ -1481,6 +1542,8 @@ def admin_preview_backup(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": exc.code, "message": "Checkpoint verification failed."},
         ) from exc
+    except (OSError, ValueError) as exc:
+        _raise_safe_backup_operation_error("preview", exc)
     update_backup_catalog_verification(
         request.app.state.settings,
         checkpoint_id=checkpoint_id,
