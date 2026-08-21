@@ -102,6 +102,8 @@ export function useBrowserPlaybackController({
   item,
   progress,
   iosMobile,
+  diagnosticsInitiallyEnabled = false,
+  diagnosticsOwnerUserId = null,
   onProgressChange,
   onProgressDirty,
   onProviderAuthRequired,
@@ -332,6 +334,9 @@ export function useBrowserPlaybackController({
     hlsEngineDiagnostics,
     deviceClass: browserPlaybackDeviceClass,
     videoElementKey,
+    itemId,
+    initialDiagnosticsEnabled: diagnosticsInitiallyEnabled,
+    ownerUserId: diagnosticsOwnerUserId,
   });
 
   const resumePosition = useMemo(() => {

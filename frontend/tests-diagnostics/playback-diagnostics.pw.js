@@ -127,6 +127,126 @@ test("IndexedDB allocates sequence and event atomically, survives reload, and de
 });
 
 
+test("real module Worker persists, uploads, closes, and removes sealed recovery state", async ({ page }) => {
+  const requests = [];
+  await page.route("**/api/playback-diagnostics/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    const payload = request.postDataJSON();
+    requests.push({ path, payload });
+    if (path.endsWith("/bootstrap")) {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          diagnostics_session_id: payload.playback_session_id,
+          source_id: "source-worker-contract",
+          state: "active",
+          ack_watermark: 0,
+          batch_max_events: 256,
+          batch_max_bytes: 524288,
+          client_spool_max_bytes: 64000000,
+        }),
+      });
+      return;
+    }
+    if (path.endsWith("/clock")) {
+      const wall = String(BigInt(Date.now()) * 1_000_000n);
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          sample_id: payload.sample_id,
+          client_send_wall_time_ms: payload.client_send_wall_time_ms,
+          client_send_monotonic_time_us: payload.client_send_monotonic_time_us,
+          server_receive_wall_time_ns: wall,
+          server_receive_monotonic_time_ns: "1000000",
+          server_send_wall_time_ns: wall,
+          server_send_monotonic_time_ns: "1001000",
+          monotonic_raw_time_ns: null,
+        }),
+      });
+      return;
+    }
+    if (path.endsWith("/batch")) {
+      const watermark = Math.max(...payload.events.map((event) => event.source_sequence));
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          accepted: payload.events.length,
+          duplicate: 0,
+          out_of_order: 0,
+          ack_watermark: watermark,
+        }),
+      });
+      return;
+    }
+    if (path.endsWith("/close")) {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          ack_watermark: payload.final_source_sequence,
+          finalized: true,
+          state: "sealed",
+        }),
+      });
+      return;
+    }
+    await route.abort();
+  });
+  await openFixture(page);
+
+  const result = await page.evaluate(async () => {
+    const [{ PlaybackDiagnosticsWorkerClient }, { IndexedDbDiagnosticSpool }, constants] = await Promise.all([
+      import("/src/lib/playbackDiagnostics/workerClient.js"),
+      import("/src/lib/playbackDiagnostics/indexedDbSpool.js"),
+      import("/src/lib/playbackDiagnostics/constants.js"),
+    ]);
+    await new Promise((resolve, reject) => {
+      const deletion = indexedDB.deleteDatabase(constants.PLAYBACK_DIAGNOSTICS_DB_NAME);
+      deletion.onsuccess = () => resolve();
+      deletion.onerror = () => reject(deletion.error);
+    });
+    const health = [];
+    const client = new PlaybackDiagnosticsWorkerClient({
+      options: {
+        playbackSessionId: "worker-contract-session",
+        playbackAttemptId: "attempt-worker-contract",
+        context: { playback_mode: "lite", stream_mode: "route2" },
+        bootstrapContext: {
+          platform: "linux",
+          device_class: "desktop",
+          hls_engine: "hls.js",
+          client_timer_resolution_us: 100,
+        },
+      },
+      onHealth: (entry) => health.push(entry),
+    });
+    const ready = await client.start();
+    client.capture("playing", { payload: { state: "active" } });
+    client.capture("waiting", { payload: { state: "waiting" } });
+    client.capture("completed", {
+      priority: "critical",
+      terminalReason: "completed",
+      payload: { state: "completed" },
+    });
+    const deadline = performance.now() + 10_000;
+    while (!client.closed && performance.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const spool = new IndexedDbDiagnosticSpool({ maxBytes: 64_000_000 });
+    const recoveryRows = await spool.listRecoverySessions();
+    spool.close();
+    return { ready, closed: client.closed, recoveryRows, health };
+  });
+
+  expect(result.ready).toEqual({ worker: true, persistent: true });
+  expect(result.closed).toBe(true);
+  expect(result.recoveryRows).toEqual([]);
+  expect(requests.some(({ path }) => path.endsWith("/bootstrap"))).toBe(true);
+  expect(requests.some(({ path }) => path.endsWith("/batch"))).toBe(true);
+  expect(requests.some(({ path }) => path.endsWith("/close"))).toBe(true);
+});
+
+
 test("browser lifecycle and capability reporting preserve semantics and clean up listeners", async ({ page }) => {
   await openFixture(page);
 
@@ -541,12 +661,26 @@ test("pre-session play intent and early HLS observations survive recorder bootst
       }),
     });
     await recorder.start();
-    await recorder.writeChain;
     const inspector = new IndexedDbDiagnosticSpool();
-    const batch = await inspector.readBatch(sessionId, { maxEvents: 256, maxBytes: 8_000_000 });
-    const names = batch.entries.map((entry) => entry.event.event_name);
+    const expected = new Set([
+      "client_recorder_started",
+      "play_intent",
+      "hls_manifest_loading",
+    ]);
+    let names = [];
+    const deadline = performance.now() + 5_000;
+    while (performance.now() < deadline) {
+      const batch = await inspector.readBatch(sessionId, {
+        maxEvents: 256,
+        maxBytes: 8_000_000,
+      });
+      names = batch.entries.map((entry) => entry.event.event_name);
+      if ([...expected].every((name) => names.includes(name))) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     inspector.close();
-    await recorder.stop();
+    recorder.stop();
+    recorder.dataClient?.dispose();
     await deleteDatabase();
     return { names };
   });

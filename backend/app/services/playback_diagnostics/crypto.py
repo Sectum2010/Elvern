@@ -19,6 +19,11 @@ from .fileio import (
     atomic_write_json,
     encode_json_document,
     ensure_private_directory,
+    list_private_directory,
+    open_private_descriptor,
+    private_file_size,
+    private_file_stat,
+    read_private_bytes,
     resolve_beneath,
 )
 
@@ -44,19 +49,32 @@ class DiagnosticsKeyStore:
         *,
         read_only: bool = False,
         capacity: DiagnosticsCapacityGuard | None = None,
+        trusted_root: Path | None = None,
     ) -> None:
         self.read_only = bool(read_only)
         self.capacity = capacity
         self.root = Path(root)
+        self.trusted_root = Path(trusted_root) if trusted_root is not None else self.root.parent
         if self.read_only:
-            if self.root.is_symlink() or not self.root.is_dir():
-                raise UnsafeDiagnosticsPathError("Diagnostics key directory is unavailable")
+            try:
+                list_private_directory(self.root, trusted_root=self.trusted_root)
+            except FileNotFoundError as exc:
+                raise UnsafeDiagnosticsPathError(
+                    "Diagnostics key directory is unavailable"
+                ) from exc
         else:
-            self.root = ensure_private_directory(self.root)
+            self.root = ensure_private_directory(
+                self.root,
+                trusted_root=self.trusted_root,
+            )
         self.active_key_path = resolve_beneath(self.root, "active-key.json")
 
     def load_or_create_active_key(self) -> DiagnosticsKey:
-        if self.active_key_path.exists():
+        if private_file_stat(
+            self.active_key_path,
+            trusted_root=self.trusted_root,
+            missing_ok=True,
+        ) is not None:
             return self._load_active_key()
         if self.read_only:
             raise FileNotFoundError("Diagnostics active key metadata is missing")
@@ -64,7 +82,11 @@ class DiagnosticsKeyStore:
         key_id = secrets.token_hex(12)
         key_path = resolve_beneath(self.root, f"key-{key_id}.bin")
         material = secrets.token_bytes(KEY_BYTES)
-        if key_path.exists():
+        if private_file_stat(
+            key_path,
+            trusted_root=self.trusted_root,
+            missing_ok=True,
+        ) is not None:
             raise UnsafeDiagnosticsPathError("Refusing to replace an existing diagnostics key")
         metadata = {
             "schema_version": "playback-diagnostics-key-v1",
@@ -79,18 +101,25 @@ class DiagnosticsKeyStore:
             else None
         )
         try:
-            atomic_write_bytes(key_path, material)
-            atomic_write_json(self.active_key_path, metadata)
+            atomic_write_bytes(key_path, material, trusted_root=self.trusted_root)
+            atomic_write_json(
+                self.active_key_path,
+                metadata,
+                trusted_root=self.trusted_root,
+            )
             if reservation is not None:
-                reservation.commit(len(material) + len(encoded_metadata))
+                reservation.commit_append(len(material) + len(encoded_metadata))
         except Exception:
             if reservation is not None:
                 actual = sum(
-                    path.stat().st_size
+                    private_file_size(
+                        path,
+                        trusted_root=self.trusted_root,
+                        missing_ok=True,
+                    )
                     for path in (key_path, self.active_key_path)
-                    if path.is_file() and not path.is_symlink()
                 )
-                reservation.commit(actual)
+                reservation.commit_append(actual)
             raise
         return DiagnosticsKey(key_id=key_id, material=material)
 
@@ -99,17 +128,38 @@ class DiagnosticsKeyStore:
         if not normalized or not normalized.replace("-", "").isalnum():
             raise ValueError("Invalid diagnostics key id")
         key_path = resolve_beneath(self.root, f"key-{normalized}.bin")
-        assert_regular_nonsymlink(key_path)
-        material = key_path.read_bytes()
+        assert_regular_nonsymlink(key_path, trusted_root=self.trusted_root)
+        material = read_private_bytes(
+            key_path,
+            max_bytes=KEY_BYTES,
+            trusted_root=self.trusted_root,
+        )
         if len(material) != KEY_BYTES:
             raise ValueError("Invalid diagnostics key material")
         if not self.read_only:
-            os.chmod(key_path, FILE_MODE)
+            descriptor = open_private_descriptor(
+                key_path,
+                os.O_RDONLY,
+                trusted_root=self.trusted_root,
+            )
+            try:
+                os.fchmod(descriptor, FILE_MODE)
+            finally:
+                os.close(descriptor)
         return DiagnosticsKey(key_id=normalized, material=material)
 
     def _load_active_key(self) -> DiagnosticsKey:
-        assert_regular_nonsymlink(self.active_key_path)
-        payload = json.loads(self.active_key_path.read_text(encoding="utf-8"))
+        assert_regular_nonsymlink(
+            self.active_key_path,
+            trusted_root=self.trusted_root,
+        )
+        payload = json.loads(
+            read_private_bytes(
+                self.active_key_path,
+                max_bytes=8_192,
+                trusted_root=self.trusted_root,
+            ).decode("utf-8")
+        )
         if payload.get("schema_version") != "playback-diagnostics-key-v1":
             raise ValueError("Unsupported diagnostics key metadata")
         key_id = str(payload.get("key_id") or "")

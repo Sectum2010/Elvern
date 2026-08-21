@@ -64,7 +64,12 @@ def _run_bounded_command(
             stream.close()
 
     readers = [
-        threading.Thread(target=drain, args=(name, stream), daemon=True)
+        threading.Thread(
+            target=drain,
+            args=(name, stream),
+            daemon=False,
+            name=f"elvern-diagnostics-command-{name}",
+        )
         for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
         if stream is not None
     ]
@@ -78,7 +83,7 @@ def _run_bounded_command(
         raise
     finally:
         for reader in readers:
-            reader.join(timeout=1)
+            reader.join()
     if overflow.is_set():
         raise subprocess.SubprocessError("diagnostics command output exceeded its bound")
     stdout = bytes(captured["stdout"])
@@ -243,6 +248,9 @@ class HostDiagnosticsSampler:
         active_processes: Callable[[], Iterable[dict[str, object]]] = lambda: (),
         observe: Callable[..., None],
         record_host_observation: Callable[..., None] = lambda *_args, **_kwargs: None,
+        should_defer_optional: Callable[[], bool] = lambda: False,
+        health_callback: Callable[[str], None] = lambda _reason: None,
+        pressure_callback: Callable[..., None] = lambda **_values: None,
         identity_key: bytes = b"",
         diagnostics_root: Path,
         transcode_root: Path,
@@ -252,6 +260,9 @@ class HostDiagnosticsSampler:
         self.active_processes = active_processes
         self.observe = observe
         self.record_host_observation = record_host_observation
+        self.should_defer_optional = should_defer_optional
+        self.health_callback = health_callback
+        self.pressure_callback = pressure_callback
         self.identity_key = bytes(identity_key)
         self.diagnostics_root = diagnostics_root
         self.transcode_root = transcode_root
@@ -277,16 +288,20 @@ class HostDiagnosticsSampler:
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run,
-            daemon=True,
+            daemon=False,
             name="elvern-playback-diagnostics-host",
         )
         self._thread.start()
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, timeout: float = 5.0) -> bool:
         self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2)
-        self._thread = None
+        thread = self._thread
+        if thread and thread.is_alive():
+            thread.join(timeout=max(0.0, float(timeout)))
+        stopped = thread is None or not thread.is_alive()
+        if stopped:
+            self._thread = None
+        return stopped
 
     def freeze_incident_ring(self, playback_session_id: str, incident_id: str) -> None:
         incident_key = (playback_session_id, incident_id)
@@ -328,9 +343,19 @@ class HostDiagnosticsSampler:
             if not session_ids:
                 self._previous_cpu = None
                 continue
+            if self._optional_sampling_deferred():
+                self.health_callback("host_sampling_deferred_pressure")
+                continue
             try:
-                sample = self._new_sample_record(self._sample())
+                sample_started = time.monotonic()
+                sample_payload = self._sample()
+                self._report_pressure(
+                    sample_payload,
+                    latency_ms=(time.monotonic() - sample_started) * 1_000,
+                )
+                sample = self._new_sample_record(sample_payload)
             except Exception:  # noqa: BLE001 - sampling cannot affect playback.
+                self.health_callback("host_sample_failed")
                 continue
             self._ring.append(sample)
             now = time.monotonic()
@@ -349,6 +374,35 @@ class HostDiagnosticsSampler:
             if now - self._last_tailscale >= TAILSCALE_SAMPLE_INTERVAL_MS / 1_000:
                 self._last_tailscale = now
                 self._sample_tailscale(session_ids)
+
+    def _optional_sampling_deferred(self) -> bool:
+        try:
+            return bool(self.should_defer_optional())
+        except Exception:  # noqa: BLE001 - pressure detection is diagnostics-only.
+            self.health_callback("host_pressure_check_failed")
+            return True
+
+    def _report_pressure(self, sample: dict[str, Any], *, latency_ms: float) -> None:
+        cpu = sample.get("cpu") if isinstance(sample.get("cpu"), dict) else {}
+        memory = sample.get("memory") if isinstance(sample.get("memory"), dict) else {}
+        psi = sample.get("psi") if isinstance(sample.get("psi"), dict) else {}
+        io_some = psi.get("io", {}).get("some", {}) if isinstance(psi.get("io"), dict) else {}
+        total_memory = float(memory.get("total") or 0)
+        available_memory = float(memory.get("available") or 0)
+        memory_pressure = (
+            max(0.0, min(1.0, 1.0 - (available_memory / total_memory)))
+            if total_memory > 0
+            else 0.0
+        )
+        try:
+            self.pressure_callback(
+                host_sampler_latency_ms=max(0.0, float(latency_ms)),
+                cpu_pressure_ratio=max(0.0, min(1.0, float(cpu.get("cpu_percent") or 0) / 100)),
+                io_pressure_ratio=max(0.0, min(1.0, float(io_some.get("avg10") or 0) / 100)),
+                memory_pressure_ratio=memory_pressure,
+            )
+        except Exception:  # noqa: BLE001 - health reporting cannot affect sampling.
+            self.health_callback("host_pressure_report_failed")
 
     def _emit_incident_post_samples(self, sample: dict[str, Any], now: float) -> None:
         with self._incident_lock:
@@ -408,7 +462,7 @@ class HostDiagnosticsSampler:
         try:
             load_average = [round(value, 3) for value in os.getloadavg()]
         except OSError:
-            pass
+            self.health_callback("host_load_average_unavailable")
         psi = {
             kind: parse_pressure(_read_text(Path(f"/proc/pressure/{kind}")) or "")
             for kind in ("cpu", "memory", "io")
@@ -420,7 +474,7 @@ class HostDiagnosticsSampler:
                 try:
                     rss_bytes = int(line.split()[1]) * 1024
                 except (IndexError, ValueError):
-                    pass
+                    self.health_callback("host_rss_parse_failed")
                 break
         pss_bytes = None
         if now - self._last_pss >= PSS_SAMPLE_INTERVAL_MS / 1_000:
@@ -431,7 +485,7 @@ class HostDiagnosticsSampler:
                     try:
                         pss_bytes = int(line.split()[1]) * 1024
                     except (IndexError, ValueError):
-                        pass
+                        self.health_callback("host_pss_parse_failed")
                     break
         diagnostics_usage = shutil.disk_usage(_nearest_existing_path(self.diagnostics_root))
         transcode_usage = shutil.disk_usage(_nearest_existing_path(self.transcode_root))
@@ -504,7 +558,7 @@ class HostDiagnosticsSampler:
                     try:
                         rss_bytes = int(line.split()[1]) * 1024
                     except (IndexError, ValueError):
-                        pass
+                        self.health_callback("ffmpeg_rss_parse_failed")
                     break
             now = time.monotonic()
             cpu_seconds = float(stat.get("cpu_seconds") or 0.0)

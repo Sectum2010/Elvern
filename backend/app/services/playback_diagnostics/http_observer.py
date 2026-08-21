@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import re
-import secrets
 import time
 import json
 from typing import Any
 
+from .ingress import next_diagnostic_correlation_id
 from .privacy import normalized_route_identity
-from .runtime import observe_runtime_event
+from .runtime import observe_runtime_event, record_runtime_health
 
 
 SESSION_PATH = re.compile(r"^/api/browser-playback/sessions/([^/]+)(?:/|$)")
@@ -135,10 +135,11 @@ class PlaybackDiagnosticsHttpMiddleware:
                 manager = app.state.mobile_playback_manager
                 session_id = manager.resolve_diagnostic_session_for_epoch(epoch_id)
             except Exception:  # noqa: BLE001
+                record_runtime_health("http_observer", "epoch_resolution_failed")
                 session_id = None
         accepted_wall_ns = time.time_ns()
         accepted_monotonic_ns = time.monotonic_ns()
-        trace_id = secrets.token_hex(16)
+        trace_id = next_diagnostic_correlation_id("trace")
         status_code: int | None = None
         headers_ready_ns: int | None = None
         first_body_ns: int | None = None

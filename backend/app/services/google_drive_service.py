@@ -23,6 +23,7 @@ from .app_settings_service import (
 )
 from ._safe_http import HostNotAllowedError, safe_urlopen
 from .playback_diagnostics.provider_observer import ProviderRequestObserver
+from .playback_diagnostics.runtime import record_runtime_health
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ def _create_provider_observer(**kwargs) -> ProviderRequestObserver | None:
     try:
         return ProviderRequestObserver(**kwargs)
     except Exception:  # noqa: BLE001 - diagnostics cannot alter provider requests.
+        record_runtime_health("provider_integration", "observer_construction_failed")
         return None
 
 
@@ -46,6 +48,7 @@ def _notify_provider_observer(
     try:
         getattr(observer, method_name)(*args, **kwargs)
     except Exception:  # noqa: BLE001 - diagnostics cannot alter provider streaming.
+        record_runtime_health("provider_integration", "observer_callback_failed")
         return
 
 

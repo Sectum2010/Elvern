@@ -8,9 +8,7 @@ export function collectPlaybackDiagnosticCapabilities({
   const state = (available, collected = true) => (
     available ? (collected ? "api_detected" : "detected_not_collected") : "api_absent"
   );
-  const lifecycleFreezeSupported = Boolean(
-    documentRef && ("onfreeze" in documentRef || "wasDiscarded" in documentRef)
-  );
+  const lifecycleFreezeSupported = Boolean(documentRef && "onfreeze" in documentRef);
   return {
     indexeddb: state(Boolean(windowRef?.indexedDB || globalThis.indexedDB)),
     request_video_frame_callback: state(typeof video?.requestVideoFrameCallback === "function"),

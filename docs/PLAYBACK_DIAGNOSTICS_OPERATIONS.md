@@ -5,6 +5,23 @@
 This is a local operator interface for the observer-only Playback Diagnostic
 Research Plane. There is no Elvern UI and no external upload.
 
+Playback-facing code may only call the bounded
+`try_capture_diagnostic_observation(...)` memory-ingress boundary. That call
+does not perform filesystem, SQLite, encryption, subprocess, serialization, or
+worker-startup work; it offers a bounded immutable scalar snapshot without
+waiting and returns `None` when diagnostics is unavailable or contended. All
+normalization and persistence occur on diagnostics-owned workers. A dropped
+capture can reduce evidence completeness, but it cannot fail or delay playback.
+
+In the browser, a dedicated module Worker owns schema construction, IndexedDB,
+batching, retry, close recovery, and clock work. The main thread only posts a
+bounded scalar snapshot. If Worker or IndexedDB support fails, a bounded
+lower-rate fallback is used; neither fallback queue nor persistent recovery
+scan is unbounded. An IndexedDB open that is blocked or rejected for quota does
+not leave recorder startup pending: it immediately selects the 512 KB maximum
+memory fallback. A later persistent-store error is contained inside the
+diagnostics worker and contributes to diagnostics-only overload degradation.
+
 ## Configuration
 
 Defaults:
@@ -38,16 +55,18 @@ Default layout:
 backend/data/playback_diagnostics/
   .writer.lock
   catalog.sqlite3
+  capacity-ledger.json
   recorder-status.json
   keys/
   identities/
   sessions/YYYY/MM/DD/<playback_session_id>/
     session.json
-    summary.md
-    summary.json
-    timeline.csv
-    completeness.json
+    seal.json
     manifest.json
+    summary.md             # derived; may be deferred under capacity pressure
+    summary.json           # derived; may be deferred under capacity pressure
+    timeline.csv           # derived; may be deferred under capacity pressure
+    completeness.json      # derived; may be deferred under capacity pressure
     raw/*.elvd
   derived/
   exports/
@@ -126,12 +145,41 @@ Missing Parquet dependencies do not affect Elvern startup or recording.
 - `capacity_exhausted`: the 80 GB hard cap prevents new persistence.
 - `filesystem_low_space`: the filesystem safety floor prevents new persistence.
 
+The same status output exposes recorder lifecycle (`disabled`, `initializing`,
+`ready`, `degraded`, `circuit_open`, or `shutting_down`), bounded queue depths,
+writer latency, and structured health counters. These counters are maintained
+outside the ordinary event stream so diagnostics self-health cannot recurse.
+Repeated overhead, queue, persistence, host-sampler, CPU, I/O, or memory
+pressure moves capture through one ordered policy:
+
+1. `normal`
+2. `reduced_sampling` (drop high-frequency optional samples)
+3. `optional_disabled` (also stop optional resource/performance evidence)
+4. `reduced_aggregates` (reduce aggregate frequency)
+5. `critical_only` (retain critical, terminal, and gap evidence)
+6. `circuit_open` (retain only terminal and gap evidence)
+
+The frontend policy is monotonic for one recorder lifetime. Backend pressure
+and the bounded 30-second error window may recover when the measured pressure
+clears. Neither policy changes a playback decision.
+
 Startup and explicit reconciliation establish physical usage. Steady-state
 writes use one process-shared, lock-protected ledger with atomic reservations;
 the writer does not recursively walk the diagnostics tree for every batch. A
 reservation includes the final bytes, temporary peak, replacement behavior,
 and a conservative catalog/WAL allowance. Concurrent reservations cannot
 oversubscribe either the normal budget or the hard cap.
+
+`capacity-ledger.json` is written dirty while a mutating owner is active. After
+all mutation workers and the catalog have stopped, clean shutdown remeasures
+the root so SQLite WAL/SHM cleanup is reflected before writing the clean ledger. A
+clean marker is trusted on the next startup only after every diagnostics
+mutation worker has stopped, all reservations are closed, the file classes and
+configured limits match, and the ledger integrity hash verifies. A missing,
+dirty, malformed, or mismatched marker forces a physical reconciliation before
+new writes. Every diagnostics-owned class, including SQLite sidecars,
+temporary, quarantine, export, recovery scratch, journal, key, identity,
+status, lease, manifest, and derived files, participates in the same ledger.
 
 The runtime ledger can conservatively exceed current physical bytes while
 SQLite sidecars shrink or disappear; that causes earlier rejection, not a hard
@@ -182,6 +230,14 @@ failure, and suspected concurrent writing are never auto-truncated. Original
 bytes remain in place and the session is marked `corrupt` for local operator
 attention.
 
+For the sole repairable incomplete EOF tail, recovery first writes and fsyncs a
+private random quarantine temporary file, atomically renames it to its final
+quarantine name, fsyncs the quarantine directory, and only then truncates and
+fsyncs the source journal. A crash therefore leaves either the source tail or a
+durable quarantine copy. High-value moves and writes are descriptor-relative,
+reject traversal/symlinks/non-regular or multiply-linked files, and refuse
+destination replacement.
+
 Use `verify <session-id>` to validate journal authentication and chaining,
 catalog-to-journal identity, source watermarks, private permissions, and every
 file size/hash declared by the final manifest. Verification does not contact a
@@ -194,6 +250,17 @@ Durable states are `provisional`, `registering`, `active`,
 may place a bounded provisional observation before registration finishes; it is
 flushed only after session metadata exists.
 
+The browser separately uses the explicit states `open`, `closing`, `sealed`,
+`paused_authentication`, `paused_capacity`, `interrupted_recoverable`,
+`orphaned_local`, and `terminal_rejected`. Entering `closing` stops ordinary
+capture, persists one terminal event or an explicit local gap, freezes the final
+client sequence, and allows only transport/recovery work. A persistent,
+owner-isolated IndexedDB registry records the source, final sequence, durable
+ACK, close reason/state, attempts, response code, recovery generation, and a
+short active-worker lease. Startup/login recovery scans this registry in pages,
+skips a still-live lease, and retries expired or pending closes with bounded
+backoff. It does not require the original playback component to exist.
+
 The batch HTTP response advances `ack_watermark` only after the writer thread
 has appended the encrypted journal record, flushed and fsynced it, committed the
 catalog transaction, and recomputed the contiguous source watermark. Queue
@@ -202,10 +269,27 @@ failure and leave the browser spool intact.
 
 Closing records the client's declared final source sequence. A gap keeps the
 session in `closing`; a later replay may fill it. Finalization drains backend
-observations and writer work, seals internal source maxima, writes all derived
-files, writes `manifest.json` last, verifies the visible-file manifest, and then
-marks the catalog row `sealed`. Concurrent or duplicate close/finalize attempts
-share one finalization result. Sealing rejects every later append.
+observations and writer work, seals internal source maxima, writes derived files
+when normal capacity permits, freezes the host-evidence link cutoff, and writes
+the critical `session.json` + `seal.json` + `manifest.json` capsule from the
+emergency reserve. `manifest.json` is written and directory-fsynced last; only
+then is the catalog marked `sealed`. The seal records whether derived artifacts
+are complete, deferred for capacity, or failed. Concurrent or duplicate
+close/finalize attempts share one result, and sealing rejects every later
+append.
+
+Client event sequences are allocated atomically with their IndexedDB records.
+Server, provider, FFmpeg, ATC, host, and recorder-internal source sequences are
+allocated only by the durable writer while the catalog mutation is serialized.
+An accepted sequence is either durably written or represented by a durable,
+bounded gap declaration. Exact invalid-event responses identify one event so
+the client can isolate it without silently filtering a partial batch.
+
+Diagnostics HTTP failures use stable typed details. `413` requests are split or
+converted to an explicit single-event gap; `422` identifies the exact invalid
+event; `401`/`403` pause for authentication; `429` retries with bounded backoff;
+`507` pauses for operator capacity recovery; sealed/corrupt/closing states have
+distinct terminal semantics. Retries are jittered, single-flight, and bounded.
 
 ## Failure behavior
 
@@ -216,6 +300,12 @@ share one finalization result. Sealing rejects every later append.
 - Queue/capacity loss is counted and represented as `telemetry_gap` or recorder
   status when possible.
 - A missing measurement is not proof that no playback fault occurred.
+
+Shutdown first stops admission and sampling, then joins the non-daemon host,
+background, ingress, and writer workers. The writer lease is released and the
+capacity ledger is marked clean only after all mutation workers have stopped.
+If any worker remains alive, shutdown remains dirty and retains the lease rather
+than claiming a clean handoff.
 
 ## Backup, Git, and Docker
 
@@ -246,3 +336,26 @@ capacity reservations, unindexed-journal catalog rebuild, and 2,000 sealed
 synthetic sessions plus one open session. It is an accelerated Linux/headless
 Chromium measurement, not real playback and not certification for Safari,
 iPhone/iPad, macOS, Windows, a provider, or a tailnet.
+
+Playwright Chromium, Firefox, and WebKit results validate their respective test
+engines only. Playwright WebKit is not macOS Safari or iOS/iPadOS Safari.
+Release confidence for those platforms still requires physical Safari/PWA runs
+covering normal playback, background/foreground, pagehide/reload, offline close
+recovery, Worker/IndexedDB availability, and native-HLS capability reporting.
+
+## Synthetic soak evidence
+
+The 2026-08-21 ignored local soak used synthetic identifiers, events, settings,
+and storage rooted under `tmp/`; it did not read live media, the live database,
+or production environment values. Its accelerated phase modeled 12 sessions in
+3.65 seconds and is explicitly not real runtime. Its sustained phase ran 30
+sessions for 60.004 seconds of wall-clock time, but still used synthetic events
+rather than real playback.
+
+Across both phases, all 42 sessions were sealed and operator-verified after 294
+events, 42 simulated transport interruptions, and 9 simulated process
+recoveries. Before shutdown, the capacity ledger and physical root both measured
+2,809,470 bytes. After worker/catalog shutdown and clean-ledger reconciliation,
+both measured 1,779,237 bytes. Queue depths returned to zero. Two bounded
+`trusted_metadata_lookup_failed` health observations were expected from the
+synthetic manager timing; no session failed to seal or verify.

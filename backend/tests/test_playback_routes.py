@@ -24,6 +24,10 @@ from backend.app.services.mobile_playback_service import (
     PlaybackAdmissionError,
     PlaybackWorkerCooldownError,
 )
+from backend.app.routes import browser_playback as browser_playback_route_module
+from backend.app.services.playback_diagnostics.ingress import (
+    capture_diagnostic_observation_for_target,
+)
 
 
 IOS_SAFARI_USER_AGENT = (
@@ -44,11 +48,14 @@ class BrowserPlaybackRouteManagerStub:
         self.create_calls = 0
         self.create_kwargs: list[dict[str, object]] = []
         self.manifest_content = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n"
+        self.segment_path: Path | None = None
         self.subtitle_prepare_calls: list[dict[str, object]] = []
         self.subtitle_vtt_path: Path | None = None
         self.audio_track_calls: list[dict[str, object]] = []
         self.audio_commit_calls: list[dict[str, object]] = []
         self.audio_cancel_calls: list[dict[str, object]] = []
+        self.seek_calls: list[dict[str, object]] = []
+        self.stop_calls: list[dict[str, object]] = []
 
     def start(self) -> None:
         return None
@@ -89,6 +96,17 @@ class BrowserPlaybackRouteManagerStub:
         payload = dict(self.payload)
         payload["session_id"] = session_id
         return payload
+
+    def seek_session(self, session_id: str, *, user_id: int, **kwargs) -> dict[str, object]:
+        self.seek_calls.append({"session_id": session_id, "user_id": user_id, **kwargs})
+        payload = dict(self.payload)
+        payload["session_id"] = session_id
+        payload["target_position_seconds"] = kwargs["target_position_seconds"]
+        return payload
+
+    def stop_session(self, session_id: str, *, user_id: int) -> bool:
+        self.stop_calls.append({"session_id": session_id, "user_id": user_id})
+        return True
 
     def select_audio_track(
         self,
@@ -166,6 +184,18 @@ class BrowserPlaybackRouteManagerStub:
 
     def get_route2_epoch_manifest_content(self, epoch_id: str, *, user_id: int) -> str:
         return self.manifest_content
+
+    def get_segment_path(
+        self,
+        session_id: str,
+        segment_index: int,
+        *,
+        user_id: int,
+    ) -> Path:
+        del session_id, segment_index, user_id
+        if self.segment_path is None:
+            raise FileNotFoundError("Prepared segment not found")
+        return self.segment_path
 
     def prepare_subtitle_track(self, session_id: str, *, stream_index: int, user_id: int, **kwargs) -> dict[str, object]:
         self.subtitle_prepare_calls.append({
@@ -1370,6 +1400,164 @@ def test_browser_playback_routes_accept_full_fast_start_estimate_source(
     assert heartbeat_response.status_code == 200
     assert heartbeat_response.json()["mode_estimate_source"] == "fast_start_supply_surplus"
     assert heartbeat_response.json()["gate_reason"] == "full_fast_start_supply_surplus"
+
+
+def test_browser_playback_contract_is_identical_across_diagnostics_failure_modes(
+    initialized_settings,
+    client,
+    admin_credentials,
+    monkeypatch,
+) -> None:
+    class _IngressTarget:
+        def __init__(self, behavior: str) -> None:
+            self.behavior = behavior
+
+        def try_capture_observation(self, _observation) -> bool:
+            if self.behavior in {"writer_dead", "disk_full", "catalog_locked", "hook_throwing"}:
+                raise RuntimeError(self.behavior)
+            return self.behavior == "ready"
+
+    def hook_for(mode: str):
+        if mode == "disabled":
+            return lambda *_args, **_kwargs: None
+        target = _IngressTarget(mode)
+
+        def capture(event_name, **kwargs):
+            return capture_diagnostic_observation_for_target(
+                target,
+                event_name,
+                **kwargs,
+            )
+
+        return capture
+
+    def normalized(body: dict[str, object]) -> dict[str, object]:
+        return {
+            key: value
+            for key, value in body.items()
+            if key != "playback_diagnostics_enabled"
+        }
+
+    _login(client, username=admin_credentials["username"], password=admin_credentials["password"])
+    item = _create_media_item_record(
+        initialized_settings,
+        relative_name="browser/diagnostics-non-interference.mp4",
+    )
+    segment_path = initialized_settings.transcode_dir / "diagnostics-non-interference.m4s"
+    segment_path.parent.mkdir(parents=True, exist_ok=True)
+    segment_path.write_bytes(b"diagnostic-segment")
+    modes = (
+        "disabled",
+        "ready",
+        "queue_full",
+        "circuit_open",
+        "writer_dead",
+        "disk_full",
+        "catalog_locked",
+        "hook_throwing",
+    )
+    results: dict[str, dict[str, object]] = {}
+    for mode in modes:
+        payload = _make_browser_playback_route2_payload(item_id=int(item["id"]))
+        manager = BrowserPlaybackRouteManagerStub(payload)
+        manager.segment_path = segment_path
+        client.app.state.mobile_playback_manager = manager
+        client.app.state.playback_diagnostics_service.enabled = mode != "disabled"
+        monkeypatch.setattr(
+            browser_playback_route_module,
+            "try_capture_diagnostic_observation",
+            hook_for(mode),
+        )
+
+        create_response = client.post(
+            "/api/browser-playback/sessions",
+            json={
+                "item_id": int(item["id"]),
+                "profile": "mobile_2160p",
+                "client_device_class": "desktop",
+                "playback_mode": "full",
+                "start_position_seconds": 837.01,
+            },
+        )
+        status_response = client.get(f"/api/browser-playback/sessions/{payload['session_id']}")
+        heartbeat_response = client.post(
+            f"/api/browser-playback/sessions/{payload['session_id']}/heartbeat",
+            json={
+                "committed_playhead_seconds": 840.0,
+                "actual_media_element_time_seconds": 3.0,
+                "client_attach_revision": 1,
+                "lifecycle_state": "attached",
+                "playing": True,
+            },
+        )
+        seek_response = client.post(
+            f"/api/browser-playback/sessions/{payload['session_id']}/seek",
+            json={
+                "target_position_seconds": 900.0,
+                "last_stable_position_seconds": 840.0,
+                "playing_before_seek": True,
+            },
+        )
+        manifest_response = client.get(
+            f"/api/browser-playback/sessions/{payload['session_id']}/index.m3u8"
+        )
+        segment_response = client.get(
+            f"/api/browser-playback/sessions/{payload['session_id']}/segments/0.m4s"
+        )
+        range_response = client.get(
+            f"/api/browser-playback/sessions/{payload['session_id']}/segments/0.m4s",
+            headers={"Range": "bytes=1-3"},
+        )
+        stop_response = client.post(
+            f"/api/browser-playback/sessions/{payload['session_id']}/stop"
+        )
+
+        results[mode] = {
+            "statuses": (
+                create_response.status_code,
+                status_response.status_code,
+                heartbeat_response.status_code,
+                seek_response.status_code,
+                manifest_response.status_code,
+                segment_response.status_code,
+                range_response.status_code,
+                stop_response.status_code,
+            ),
+            "create": normalized(create_response.json()),
+            "status": normalized(status_response.json()),
+            "heartbeat": normalized(heartbeat_response.json()),
+            "seek": normalized(seek_response.json()),
+            "manifest": manifest_response.content,
+            "manifest_headers": {
+                name: manifest_response.headers[name]
+                for name in ("content-type", "cache-control", "pragma", "expires")
+            },
+            "segment": segment_response.content,
+            "segment_headers": {
+                name: segment_response.headers.get(name)
+                for name in (
+                    "accept-ranges",
+                    "cache-control",
+                    "content-length",
+                    "content-type",
+                )
+            },
+            "range": range_response.content,
+            "range_headers": {
+                name: range_response.headers.get(name)
+                for name in (
+                    "accept-ranges",
+                    "cache-control",
+                    "content-length",
+                    "content-range",
+                    "content-type",
+                )
+            },
+            "stop": stop_response.json(),
+        }
+
+    baseline = results["disabled"]
+    assert all(result == baseline for result in results.values())
 
 
 @pytest.mark.parametrize(

@@ -1,12 +1,14 @@
 export class PlaybackLifecycleDiagnosticObserver {
   constructor({
     record,
+    close = () => {},
     recalibrateClock = () => {},
     windowRef = globalThis.window,
     documentRef = globalThis.document,
     navigatorRef = globalThis.navigator,
   }) {
     this.record = record;
+    this.close = close;
     this.recalibrateClock = recalibrateClock;
     this.windowRef = windowRef;
     this.documentRef = documentRef;
@@ -59,10 +61,13 @@ export class PlaybackLifecycleDiagnosticObserver {
     this.listen(this.windowRef, "blur", () => this.recordPageState(
       this.documentRef.visibilityState === "hidden" ? "hidden" : "visible_unfocused",
     ));
-    this.listen(this.windowRef, "pagehide", () => this.record("pagehide", {
-      priority: "critical",
-      payload: { page_state: "pagehide" },
-    }));
+    this.listen(this.windowRef, "pagehide", () => {
+      this.record("pagehide", {
+        priority: "critical",
+        payload: { page_state: "pagehide" },
+      });
+      this.close("pagehide");
+    });
     this.listen(this.windowRef, "pageshow", () => {
       this.record("pageshow", { payload: { page_state: "pageshow" } });
       this.recalibrateClock();
@@ -79,9 +84,7 @@ export class PlaybackLifecycleDiagnosticObserver {
       this.documentRef.fullscreenElement ? "fullscreen_entered" : "fullscreen_exited",
       { payload: { active: Boolean(this.documentRef.fullscreenElement), action_origin: "browser" } },
     ));
-    const freezeResumeSupported = Boolean(
-      this.documentRef && ("onfreeze" in this.documentRef || "wasDiscarded" in this.documentRef)
-    );
+    const freezeResumeSupported = Boolean(this.documentRef && "onfreeze" in this.documentRef);
     if (freezeResumeSupported) {
       this.listen(this.documentRef, "freeze", () => {
         this.frozen = true;

@@ -11,7 +11,14 @@ from typing import Any, Iterable
 
 from .constants import SCHEMA_VERSION, SESSION_VISIBLE_FILES
 from .crypto import DiagnosticsKeyStore
-from .fileio import FILE_MODE, atomic_write_json, ensure_private_directory, resolve_beneath
+from .fileio import (
+    atomic_write_json,
+    ensure_private_directory,
+    list_private_directory,
+    open_private_descriptor,
+    private_file_size,
+    resolve_beneath,
+)
 from .journal import verify_journal
 from .privacy import basename_sha256, safe_source_basename, source_fingerprint
 from .schema import SessionMetadataV2
@@ -21,9 +28,14 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(path: Path, *, trusted_root: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    descriptor = open_private_descriptor(
+        path,
+        os.O_RDONLY,
+        trusted_root=trusted_root,
+    )
+    with os.fdopen(descriptor, "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -135,6 +147,17 @@ def create_session_metadata(
         "dolby_vision": context.get("dolby_vision"),
         "audio_channels": context.get("audio_channels"),
         "selected_audio_stream_index": context.get("selected_audio_stream_index"),
+        "nominal_bitrate": context.get("nominal_bitrate"),
+        "frame_rate": context.get("frame_rate"),
+        "video_profile": context.get("video_profile"),
+        "video_level": context.get("video_level"),
+        "color_primaries": context.get("color_primaries"),
+        "color_transfer": context.get("color_transfer"),
+        "color_space": context.get("color_space"),
+        "audio_sample_rate": context.get("audio_sample_rate"),
+        "audio_track_count": context.get("audio_track_count"),
+        "subtitle_count": context.get("subtitle_count"),
+        "container_profile": context.get("container_profile"),
         "profile": str(context.get("profile") or "unknown"),
         "playback_mode": str(context.get("playback_mode") or "unknown"),
         "stream_mode": str(context.get("stream_mode") or "unknown"),
@@ -165,9 +188,19 @@ def create_session_metadata(
     }
     validated = SessionMetadataV2.model_validate(metadata).model_dump(mode="json")
     if write:
-        session_path = ensure_private_directory(resolve_beneath(root, relative_path))
-        ensure_private_directory(resolve_beneath(session_path, "raw"))
-        atomic_write_json(resolve_beneath(session_path, "session.json"), validated)
+        session_path = ensure_private_directory(
+            resolve_beneath(root, relative_path),
+            trusted_root=root,
+        )
+        ensure_private_directory(
+            resolve_beneath(session_path, "raw"),
+            trusted_root=root,
+        )
+        atomic_write_json(
+            resolve_beneath(session_path, "session.json"),
+            validated,
+            trusted_root=root,
+        )
     return validated
 
 
@@ -180,13 +213,19 @@ def read_session_events(
     raw_path = resolve_beneath(session_path, "raw")
     events: list[dict[str, Any]] = []
     journal_reports: list[dict[str, Any]] = []
-    if not raw_path.is_dir():
+    try:
+        journal_names = list_private_directory(raw_path, trusted_root=root)
+    except FileNotFoundError:
         return events, journal_reports
-    for journal_path in sorted(raw_path.glob("*.elvd")):
+    for name in journal_names:
+        if not name.endswith(".elvd") or Path(name).name != name:
+            continue
+        journal_path = resolve_beneath(raw_path, name)
         verification, journal_events = verify_journal(
             journal_path,
             key_store,
             include_events=True,
+            trusted_root=root,
         )
         journal_reports.append(
             {
@@ -234,13 +273,15 @@ def build_manifest(
             )
             continue
         path = resolve_beneath(session_path, name)
-        if not path.is_file() or path.is_symlink():
+        try:
+            size_bytes = private_file_size(path, trusted_root=root)
+        except FileNotFoundError:
             continue
         files.append(
             {
                 "relative_path": name,
-                "size_bytes": path.stat().st_size,
-                "sha256": _sha256_file(path),
+                "size_bytes": size_bytes,
+                "sha256": _sha256_file(path, trusted_root=root),
             }
         )
     manifest = {
@@ -267,6 +308,5 @@ def write_manifest(
     )
     session_path = resolve_beneath(root, session_relative_path)
     manifest_path = resolve_beneath(session_path, "manifest.json")
-    atomic_write_json(manifest_path, manifest)
-    os.chmod(manifest_path, FILE_MODE)
+    atomic_write_json(manifest_path, manifest, trusted_root=root)
     return manifest

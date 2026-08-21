@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import queue
 import resource
 import statistics
 import sys
@@ -50,6 +51,11 @@ from backend.app.services.playback_diagnostics.fileio import (
 )
 from backend.app.services.playback_diagnostics.journal import verify_journal
 from backend.app.services.playback_diagnostics.journal import EncryptedJournal
+from backend.app.services.playback_diagnostics.health import DiagnosticsHealth
+from backend.app.services.playback_diagnostics.ingress import (
+    NonBlockingDiagnosticsIngressQueue,
+    capture_diagnostic_observation_for_target,
+)
 from backend.app.services.playback_diagnostics.privacy import sanitize_event
 from backend.app.services.playback_diagnostics.schema import PlaybackDiagnosticEvent
 from backend.app.services.playback_diagnostics.service import PlaybackDiagnosticsService
@@ -92,6 +98,7 @@ def _summary(values: list[float]) -> dict[str, float | int | None]:
         "mean_ms": statistics.fmean(values) if values else None,
         "p50_ms": _percentile(values, 0.5),
         "p95_ms": _percentile(values, 0.95),
+        "p99_ms": _percentile(values, 0.99),
         "max_ms": max(values) if values else None,
     }
 
@@ -349,16 +356,36 @@ def _run_writer_scenario(output_root: Path, *, incident: bool) -> dict[str, Any]
         )
 
     capacity = DiagnosticsCapacityGuard(root, minimum_free_bytes=1)
-    reservation_accounting: list[dict[str, int]] = []
-    original_finish_reservation = capacity._finish_reservation
+    reservation_accounting: list[dict[str, int | str]] = []
+    original_commit_reservation = capacity._commit_reservation
 
-    def capture_reservation(reserved_bytes: int, actual_bytes: int) -> None:
+    def capture_reservation(
+        reserved_bytes: int,
+        *,
+        operation: str,
+        old_size: int,
+        new_size: int,
+        actual_peak_bytes: int | None,
+    ) -> None:
+        measured_peak = new_size if actual_peak_bytes is None else actual_peak_bytes
         reservation_accounting.append(
-            {"reserved_bytes": int(reserved_bytes), "actual_bytes": int(actual_bytes)}
+            {
+                "reserved_bytes": int(reserved_bytes),
+                "actual_peak_bytes": int(measured_peak),
+                "operation": operation,
+                "old_size": int(old_size),
+                "new_size": int(new_size),
+            }
         )
-        original_finish_reservation(reserved_bytes, actual_bytes)
+        original_commit_reservation(
+            reserved_bytes,
+            operation=operation,
+            old_size=old_size,
+            new_size=new_size,
+            actual_peak_bytes=actual_peak_bytes,
+        )
 
-    capacity._finish_reservation = capture_reservation  # type: ignore[method-assign]
+    capacity._commit_reservation = capture_reservation  # type: ignore[method-assign]
     writer = DiagnosticsWriter(
         root,
         catalog=catalog,
@@ -453,7 +480,7 @@ def _run_writer_scenario(output_root: Path, *, incident: bool) -> dict[str, Any]
             "reservation_underestimates": [
                 item
                 for item in reservation_accounting
-                if item["actual_bytes"] > item["reserved_bytes"]
+                if item["actual_peak_bytes"] > item["reserved_bytes"]
             ],
             "wall_seconds": wall_seconds,
             "process_cpu_seconds": process_cpu_seconds,
@@ -536,6 +563,109 @@ def _component_microbench(output_root: Path) -> dict[str, Any]:
         "compressed_bytes": len(compressed),
         "ciphertext_bytes": len(ciphertext),
         **{name: _summary(values) for name, values in timings.items()},
+    }
+
+
+class _BenchmarkIngressTarget:
+    def __init__(self, *, state: str, maxsize: int = 512) -> None:
+        self.state = state
+        self.health = DiagnosticsHealth()
+        self.health.set_state(state)
+        self._observation_queue = NonBlockingDiagnosticsIngressQueue(maxsize=maxsize)
+
+    def try_capture_observation(self, observation: object) -> bool:
+        return PlaybackDiagnosticsService.try_capture_observation(self, observation)  # type: ignore[arg-type]
+
+    def drain(self) -> int:
+        drained = 0
+        while True:
+            try:
+                observation = self._observation_queue.get_nowait()
+            except queue.Empty:
+                return drained
+            self._observation_queue.mark_processed(observation)
+            drained += 1
+
+
+def _hot_path_ingress_benchmark() -> dict[str, Any]:
+    iterations = 40_000
+    chunk_size = 128
+    payload = {
+        "buffered_ahead_ms": 45_000,
+        "ready_state": 4,
+        "network_state": 1,
+        "state": "playing",
+    }
+
+    def capture(target: _BenchmarkIngressTarget, sequence: int) -> str | None:
+        return capture_diagnostic_observation_for_target(
+            target,
+            "media_aggregate",
+            playback_session_id="session-hot-path-benchmark",
+            event_source="server",
+            observation_kind="measured_server",
+            payload={**payload, "sample_index": sequence},
+            playhead_ms=sequence * 250,
+            duration_ms=7_200_000,
+        )
+
+    disabled_target = _BenchmarkIngressTarget(state="disabled")
+    disabled_latencies: list[float] = []
+    for sequence in range(iterations):
+        started = time.perf_counter_ns()
+        result = capture(disabled_target, sequence)
+        disabled_latencies.append((time.perf_counter_ns() - started) / 1_000_000)
+        if result is not None:
+            raise RuntimeError("Disabled diagnostics ingress accepted an observation")
+
+    ready_target = _BenchmarkIngressTarget(state="ready")
+    ready_latencies: list[float] = []
+    accepted = 0
+    for chunk_start in range(0, iterations, chunk_size):
+        chunk_end = min(iterations, chunk_start + chunk_size)
+        for sequence in range(chunk_start, chunk_end):
+            started = time.perf_counter_ns()
+            result = capture(ready_target, sequence)
+            ready_latencies.append((time.perf_counter_ns() - started) / 1_000_000)
+            accepted += int(result is not None)
+        ready_target.drain()
+
+    contention_target = _BenchmarkIngressTarget(state="ready", maxsize=1)
+    acquired = contention_target._observation_queue.mutex.acquire(blocking=False)
+    if not acquired:
+        raise RuntimeError("Unable to establish synthetic ingress contention")
+    try:
+        contention_started = time.perf_counter_ns()
+        contention_result = capture(contention_target, 1)
+        contention_ms = (time.perf_counter_ns() - contention_started) / 1_000_000
+    finally:
+        contention_target._observation_queue.mutex.release()
+
+    ready_summary = _summary(ready_latencies)
+    assertions = {
+        "all_ready_observations_accepted": accepted == iterations,
+        "disabled_observations_rejected": disabled_target._observation_queue.qsize() == 0,
+        "p95_within_0_25_ms": float(ready_summary["p95_ms"] or 0) <= 0.25,
+        "p99_within_0_75_ms": float(ready_summary["p99_ms"] or 0) <= 0.75,
+        "contention_dropped_without_wait": contention_result is None and contention_ms <= 2.0,
+    }
+    if not all(assertions.values()):
+        raise RuntimeError(f"Diagnostics ingress budget failed: {assertions}")
+    return {
+        "iterations": iterations,
+        "chunk_size": chunk_size,
+        "disabled": _summary(disabled_latencies),
+        "ready": ready_summary,
+        "accepted": accepted,
+        "contention_drop_ms": contention_ms,
+        "assertions": assertions,
+        "hot_path_contract": {
+            "filesystem": False,
+            "network": False,
+            "sqlite": False,
+            "crypto": False,
+            "blocking_queue_or_lock_wait": False,
+        },
     }
 
 
@@ -800,11 +930,31 @@ def _write_markdown(path: Path, report: dict[str, Any]) -> None:
                 f"- IndexedDB enqueue p95: `{client.get('indexeddb', {}).get('enqueue', {}).get('p95_ms')}` ms.",
                 f"- Loopback batch upload p95: `{client.get('loopback_batch_upload', {}).get('p95_ms')}` ms.",
                 f"- Ring buffer modeled bytes: `{client.get('ring_buffers', {}).get('total_bytes')}`.",
+                f"- Worker capture p95/p99/max: `"
+                f"{client.get('worker_capture_boundary', {}).get('synchronous_capture', {}).get('p95_ms')}` / `"
+                f"{client.get('worker_capture_boundary', {}).get('synchronous_capture', {}).get('p99_ms')}` / `"
+                f"{client.get('worker_capture_boundary', {}).get('synchronous_capture', {}).get('max_ms')}` ms.",
+                f"- Longest bounded capture task: `"
+                f"{client.get('worker_capture_boundary', {}).get('synchronous_chunk_tasks', {}).get('max_ms')}` ms.",
             ]
         )
     else:
         lines.append("- Client report was not available; run the frontend benchmark first.")
     lines.extend(["", "## Server", ""])
+    hot_path = report["server_hot_path_ingress"]
+    lines.extend(
+        [
+            "### Playback-facing ingress",
+            "",
+            f"- Ready p95/p99/max: `{hot_path['ready']['p95_ms']}` / `"
+            f"{hot_path['ready']['p99_ms']}` / `{hot_path['ready']['max_ms']}` ms.",
+            f"- Disabled p95/p99/max: `{hot_path['disabled']['p95_ms']}` / `"
+            f"{hot_path['disabled']['p99_ms']}` / `{hot_path['disabled']['max_ms']}` ms.",
+            f"- Contended ingress drop: `{hot_path['contention_drop_ms']}` ms.",
+            f"- Budget assertions: `{hot_path['assertions']}`.",
+            "",
+        ]
+    )
     for scenario in scenarios:
         storage = scenario["storage"]
         writer = scenario["writer"]
@@ -876,6 +1026,7 @@ def main() -> int:
         "synthetic": True,
         "client": client,
         "server_components": _component_microbench(output_root),
+        "server_hot_path_ingress": _hot_path_ingress_benchmark(),
         "concurrent_capacity": _concurrent_capacity_benchmark(output_root),
         "catalog_rebuild": _catalog_rebuild_benchmark(output_root),
         "startup_scale": _startup_scale_recovery_benchmark(output_root),

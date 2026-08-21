@@ -7,6 +7,7 @@ import queue
 import threading
 import time
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -18,8 +19,11 @@ from .constants import (
     DIAGNOSTICS_CATALOG_MUTATION_RESERVATION_BYTES,
 )
 from .crypto import DiagnosticsKey, DiagnosticsKeyStore
-from .fileio import ensure_private_directory, resolve_beneath
+from .fileio import ensure_private_directory, private_file_size, resolve_beneath
+from .ingress import next_diagnostic_correlation_id
 from .journal import EncryptedJournal
+from .privacy import sanitize_event, sanitize_payload
+from .schema import build_server_event
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +39,7 @@ class DiagnosticsWriteBatch:
     events: tuple[dict[str, Any], ...]
     enqueued_monotonic_ns: int
     completion: Future["DiagnosticsWriteReceipt"] | None = None
+    allocate_source_sequences: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +104,9 @@ class DiagnosticsWriter:
             "writer_latency_ms": 0.0,
             "queue_wait_ms": 0.0,
             "last_error_class": None,
+            "health_callback_errors": 0,
+            "status_write_errors": 0,
+            "shutdown_signal_dropped": 0,
         }
         self._last_status_write_monotonic = 0.0
         self._unindexed_sources: set[tuple[str, str]] = set()
@@ -109,23 +117,60 @@ class DiagnosticsWriter:
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run,
-            daemon=True,
+            daemon=False,
             name="elvern-playback-diagnostics-writer",
         )
         self._thread.start()
 
-    def shutdown(self, *, timeout: float = 5.0) -> None:
+    def shutdown(self, *, timeout: float = 5.0) -> bool:
         self._stop.set()
         try:
             self._queue.put_nowait(None)
         except queue.Full:
-            pass
+            self._increment("shutdown_signal_dropped", 1)
+            self._notify_failure(
+                "writer_shutdown_queue_full",
+                {"queue_depth": self._queue.qsize()},
+            )
         thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=timeout)
-        self._thread = None
+        stopped = thread is None or not thread.is_alive()
+        if stopped:
+            self._thread = None
+        return stopped
+
+    @property
+    def worker_alive(self) -> bool:
+        thread = self._thread
+        return bool(thread is not None and thread.is_alive())
 
     def enqueue(self, batch: DiagnosticsWriteBatch) -> DiagnosticsEnqueueResult:
+        if batch.allocate_source_sequences:
+            self._increment_session_pending(batch.playback_session_id)
+            try:
+                self._queue.put_nowait(batch)
+            except queue.Full:
+                self._decrement_session_pending(batch.playback_session_id)
+                self._increment("events_dropped", len(batch.events))
+                self._notify_failure(
+                    "writer_queue_full",
+                    {
+                        "playback_session_id": batch.playback_session_id,
+                        "events_dropped": len(batch.events),
+                    },
+                )
+                if batch.completion is not None and not batch.completion.done():
+                    batch.completion.set_exception(
+                        DiagnosticsWriterError("Diagnostics writer queue is full")
+                    )
+                return DiagnosticsEnqueueResult(accepted=0, duplicate=0, queued=False)
+            self._increment("batches_enqueued", 1)
+            return DiagnosticsEnqueueResult(
+                accepted=len(batch.events),
+                duplicate=0,
+                queued=True,
+            )
         accepted_events: list[dict[str, Any]] = []
         accepted_keys: list[tuple[str, str, int]] = []
         duplicate = 0
@@ -231,6 +276,7 @@ class DiagnosticsWriter:
             return {
                 **self._metrics,
                 "queue_depth": self._queue.qsize(),
+                "queue_capacity": self._queue.maxsize,
             }
 
     def _run(self) -> None:
@@ -270,130 +316,159 @@ class DiagnosticsWriter:
         source_key = (batch.playback_session_id, batch.source_id)
         if source_key in self._unindexed_sources:
             self._recover_unindexed_source(batch)
-        seen: set[tuple[str, str, int]] = set()
-        unique_events: list[dict[str, Any]] = []
-        for event in batch.events:
-            key = self._event_key(batch.source_id, event)
-            if key in seen:
-                continue
-            classification = self.catalog.classify_event(*key)
-            if classification == "duplicate":
-                continue
-            if classification == "conflict":
-                raise ValueError("Conflicting diagnostics event identity or source sequence")
-            seen.add(key)
-            unique_events.append(event)
-        unique_events_tuple = tuple(unique_events)
-        duplicate_before_write = len(batch.events) - len(unique_events_tuple)
-        if duplicate_before_write:
-            self._increment("events_duplicate", duplicate_before_write)
-        if not unique_events_tuple:
-            return DiagnosticsWriteReceipt(
-                accepted=0,
-                duplicate=duplicate_before_write,
-                out_of_order=0,
-                ack_watermark=self.catalog.ack_watermark(batch.source_id),
+        with self._catalog_mutation_guard():
+            prepared_events = (
+                self._prepare_internal_events(batch)
+                if batch.allocate_source_sequences
+                else batch.events
             )
-
-        events_to_write = unique_events_tuple
-        estimated_bytes = self._estimated_batch_bytes(events_to_write)
-        critical = all(self._is_critical_event(event) for event in events_to_write)
-        try:
-            reservation = self.capacity.reserve(estimated_bytes, critical=critical)
-        except DiagnosticsCapacityError as exc:
-            critical_events = tuple(
-                event for event in events_to_write if self._is_critical_event(event)
-            )
-            if critical_events and len(critical_events) < len(events_to_write):
-                dropped = len(events_to_write) - len(critical_events)
-                self._increment("events_dropped", dropped)
-                self._notify_failure(
-                    str(exc),
-                    {
-                        "playback_session_id": batch.playback_session_id,
-                        "events_dropped": dropped,
-                        "capacity_state": str(exc),
-                    },
-                )
-                return self._write_batch(replace(batch, events=critical_events))
-            self._increment("events_dropped", len(events_to_write))
-            self._notify_failure(
-                str(exc),
-                {
-                    "playback_session_id": batch.playback_session_id,
-                    "events_dropped": len(events_to_write),
-                    "capacity_state": str(exc),
-                },
-            )
-            raise DiagnosticsWriterError(str(exc)) from exc
-
-        catalog_size_before = self._catalog_storage_size()
-        journal = None
-        journal_size_before = 0
-        chunk = None
-        try:
-            journal = self._journal_for(batch)
-            journal_size_before = journal.path.stat().st_size if journal.path.exists() else 0
-            chunk = journal.append(events_to_write)
-            if chunk is None:
-                reservation.release()
+            seen: set[tuple[str, str, int]] = set()
+            unique_events: list[dict[str, Any]] = []
+            classifications = self.catalog.classify_event_batch(batch.source_id, prepared_events)
+            for event, classification in zip(prepared_events, classifications, strict=True):
+                key = self._event_key(batch.source_id, event)
+                if key in seen or classification == "duplicate":
+                    continue
+                if classification == "conflict":
+                    raise ValueError("Conflicting diagnostics event identity or source sequence")
+                seen.add(key)
+                unique_events.append(event)
+            events_to_write = tuple(unique_events)
+            duplicate_before_write = len(prepared_events) - len(events_to_write)
+            if duplicate_before_write:
+                self._increment("events_duplicate", duplicate_before_write)
+            if not events_to_write:
                 return DiagnosticsWriteReceipt(
                     accepted=0,
                     duplicate=duplicate_before_write,
                     out_of_order=0,
                     ack_watermark=self.catalog.ack_watermark(batch.source_id),
                 )
-            relative_journal_path = str(journal.path.relative_to(self.root))
-            inserted, catalog_duplicates, out_of_order = self.catalog.record_events(
-                playback_session_id=batch.playback_session_id,
-                source_id=batch.source_id,
-                source_type=batch.source_type,
-                journal_relative_path=relative_journal_path,
+
+            estimated_bytes = self._estimated_batch_bytes(events_to_write)
+            critical = all(self._is_critical_event(event) for event in events_to_write)
+            try:
+                reservation = self.capacity.reserve(estimated_bytes, critical=critical)
+            except DiagnosticsCapacityError as exc:
+                # A source batch is indivisible. Persisting only critical members
+                # would create an undeclared sequence hole in the same batch.
+                self._increment("events_dropped", len(events_to_write))
+                self._notify_failure(
+                    str(exc),
+                    {
+                        "playback_session_id": batch.playback_session_id,
+                        "events_dropped": len(events_to_write),
+                        "capacity_state": str(exc),
+                    },
+                )
+                raise DiagnosticsWriterError(str(exc)) from exc
+
+            catalog_size_before = self._catalog_storage_size()
+            journal = None
+            journal_size_before = 0
+            chunk = None
+            inserted = 0
+            catalog_duplicates = 0
+            out_of_order = 0
+            try:
+                journal = self._journal_for(batch)
+                journal_size_before = private_file_size(
+                    journal.path,
+                    trusted_root=self.root,
+                    missing_ok=True,
+                )
+                chunk = journal.append(events_to_write)
+                if chunk is None:
+                    reservation.release()
+                    return DiagnosticsWriteReceipt(
+                        accepted=0,
+                        duplicate=duplicate_before_write,
+                        out_of_order=0,
+                        ack_watermark=self.catalog.ack_watermark(batch.source_id),
+                    )
+                relative_journal_path = str(journal.path.relative_to(self.root))
+                inserted, catalog_duplicates, out_of_order = self.catalog.record_events(
+                    playback_session_id=batch.playback_session_id,
+                    source_id=batch.source_id,
+                    source_type=batch.source_type,
+                    journal_relative_path=relative_journal_path,
+                    journal_chunk_sequence=chunk.sequence,
+                    journal_chunk_hash=chunk.current_chunk_hash,
+                    events=events_to_write,
+                    preclassified=True,
+                )
+            except Exception:
+                journal_size_after = journal_size_before
+                if journal is not None:
+                    journal_size_after = private_file_size(
+                        journal.path,
+                        trusted_root=self.root,
+                        missing_ok=True,
+                    )
+                if chunk is not None or journal_size_after > journal_size_before:
+                    self._unindexed_sources.add(source_key)
+                    self._journals.pop(source_key, None)
+                catalog_size_after = self._catalog_storage_size()
+                if not reservation.closed:
+                    reservation.commit_replacement(
+                        old_size=catalog_size_before + journal_size_before,
+                        new_size=catalog_size_after + journal_size_after,
+                        actual_peak_bytes=max(
+                            0,
+                            catalog_size_after
+                            + journal_size_after
+                            - catalog_size_before
+                            - journal_size_before,
+                        ),
+                    )
+                raise
+
+            self._unindexed_sources.discard(source_key)
+            journal_size_after = private_file_size(
+                journal.path,
+                trusted_root=self.root,
+            )
+            catalog_size_after = self._catalog_storage_size()
+            reservation.commit_replacement(
+                old_size=catalog_size_before + journal_size_before,
+                new_size=catalog_size_after + journal_size_after,
+                actual_peak_bytes=max(
+                    0,
+                    catalog_size_after
+                    + journal_size_after
+                    - catalog_size_before
+                    - journal_size_before,
+                ),
+            )
+            elapsed_ms = (time.monotonic_ns() - started_ns) / 1_000_000
+            self._increment("batches_written", 1)
+            self._increment("events_written", inserted)
+            self._increment("events_duplicate", catalog_duplicates)
+            self._increment("events_out_of_order", out_of_order)
+            self._set_metric("writer_latency_ms", elapsed_ms)
+            self._set_metric("queue_wait_ms", queue_wait_ms)
+            self._maybe_write_status(elapsed_ms)
+            return DiagnosticsWriteReceipt(
+                accepted=inserted,
+                duplicate=duplicate_before_write + catalog_duplicates,
+                out_of_order=out_of_order,
+                ack_watermark=self.catalog.ack_watermark(batch.source_id),
                 journal_chunk_sequence=chunk.sequence,
-                journal_chunk_hash=chunk.current_chunk_hash,
-                events=events_to_write,
             )
-        except Exception:
-            journal_delta = (
-                max(0, journal.path.stat().st_size - journal_size_before)
-                if journal is not None and journal.path.exists()
-                else 0
-            )
-            if chunk is not None or journal_delta > 0:
-                # A failed fsync has indeterminate durability, but flushed bytes may
-                # already form a valid record. Re-verify and reindex before any retry.
-                self._unindexed_sources.add(source_key)
-                self._journals.pop(source_key, None)
-            catalog_delta = max(0, self._catalog_storage_size() - catalog_size_before)
-            reservation.commit(journal_delta + catalog_delta)
-            raise
-        self._unindexed_sources.discard(source_key)
-        journal_delta = max(0, journal.path.stat().st_size - journal_size_before)
-        catalog_delta = max(0, self._catalog_storage_size() - catalog_size_before)
-        reservation.commit(journal_delta + catalog_delta)
-        elapsed_ms = (time.monotonic_ns() - started_ns) / 1_000_000
-        self._increment("batches_written", 1)
-        self._increment("events_written", inserted)
-        self._increment("events_duplicate", catalog_duplicates)
-        self._increment("events_out_of_order", out_of_order)
-        self._set_metric("writer_latency_ms", elapsed_ms)
-        self._set_metric("queue_wait_ms", queue_wait_ms)
-        self._maybe_write_status(elapsed_ms)
-        return DiagnosticsWriteReceipt(
-            accepted=inserted,
-            duplicate=duplicate_before_write + catalog_duplicates,
-            out_of_order=out_of_order,
-            ack_watermark=self.catalog.ack_watermark(batch.source_id),
-            journal_chunk_sequence=chunk.sequence,
-        )
 
     def _journal_for(self, batch: DiagnosticsWriteBatch) -> EncryptedJournal:
         key = (batch.playback_session_id, batch.source_id)
         existing = self._journals.get(key)
-        if existing is not None and existing.path.stat().st_size < JOURNAL_ROTATE_BYTES:
+        if existing is not None and private_file_size(
+            existing.path,
+            trusted_root=self.root,
+        ) < JOURNAL_ROTATE_BYTES:
             return existing
         session_path = resolve_beneath(self.root, batch.session_relative_path)
-        raw_path = ensure_private_directory(resolve_beneath(session_path, "raw"))
+        raw_path = ensure_private_directory(
+            resolve_beneath(session_path, "raw"),
+            trusted_root=self.root,
+        )
         sequence = 1
         while True:
             source_token = hashlib.sha256(batch.source_id.encode("utf-8")).hexdigest()[:20]
@@ -401,7 +476,11 @@ class DiagnosticsWriter:
                 raw_path,
                 f"{batch.source_type}-{source_token}-{sequence:06d}.elvd",
             )
-            if not candidate.exists() or candidate.stat().st_size < JOURNAL_ROTATE_BYTES:
+            if private_file_size(
+                candidate,
+                trusted_root=self.root,
+                missing_ok=True,
+            ) < JOURNAL_ROTATE_BYTES:
                 break
             sequence += 1
         journal = EncryptedJournal(
@@ -413,9 +492,54 @@ class DiagnosticsWriter:
             active_key=self.active_key,
             quarantine_root=resolve_beneath(self.root, "quarantine"),
             capacity=self.capacity,
+            trusted_root=self.root,
         )
         self._journals[key] = journal
         return journal
+
+    def _prepare_internal_events(
+        self,
+        batch: DiagnosticsWriteBatch,
+    ) -> tuple[dict[str, Any], ...]:
+        source = self.catalog.get_source(batch.source_id)
+        if source is None:
+            raise KeyError("Diagnostics source is not registered")
+        next_sequence = int(source.get("max_seen_sequence") or 0) + 1
+        prepared: list[dict[str, Any]] = []
+        for observation in batch.events:
+            event = build_server_event(
+                event_name=str(observation.get("event_name") or ""),
+                playback_session_id=batch.playback_session_id,
+                source_sequence=next_sequence,
+                event_source=batch.source_type,
+                observation_kind=str(
+                    observation.get("observation_kind") or "measured_server"
+                ),
+                priority=str(observation.get("priority") or "normal"),
+                severity=str(observation.get("severity") or "info"),
+                payload=sanitize_payload(observation.get("payload") or {}),
+                event_id=next_diagnostic_correlation_id("event"),
+                captured_wall_time_ns=int(
+                    observation.get("captured_wall_time_ns") or time.time_ns()
+                ),
+                captured_monotonic_time_ns=int(
+                    observation.get("enqueued_monotonic_ns") or time.monotonic_ns()
+                ),
+                **dict(observation.get("identities") or {}),
+            )
+            sanitized = sanitize_event(event.model_dump(mode="json"))
+            encoded_size = len(
+                json.dumps(
+                    sanitized,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            if encoded_size > 64_000:
+                raise ValueError("Diagnostics event is too large")
+            prepared.append(sanitized)
+            next_sequence += 1
+        return tuple(prepared)
 
     def _recover_unindexed_source(self, batch: DiagnosticsWriteBatch) -> None:
         """Rebuild missing catalog rows after a durable journal/catalog split."""
@@ -459,25 +583,34 @@ class DiagnosticsWriter:
                     + len(recovered_events) * 16_384,
                     critical=True,
                 )
-                catalog_size_before = self._catalog_storage_size()
-                try:
-                    self.catalog.record_events(
-                        playback_session_id=batch.playback_session_id,
-                        source_id=batch.source_id,
-                        source_type=batch.source_type,
-                        journal_relative_path=relative_path,
-                        journal_chunk_sequence=chunk_sequence,
-                        journal_chunk_hash=hashes.get(chunk_sequence, ""),
-                        events=recovered_events,
+                with self._catalog_mutation_guard():
+                    catalog_size_before = self._catalog_storage_size()
+                    try:
+                        self.catalog.record_events(
+                            playback_session_id=batch.playback_session_id,
+                            source_id=batch.source_id,
+                            source_type=batch.source_type,
+                            journal_relative_path=relative_path,
+                            journal_chunk_sequence=chunk_sequence,
+                            journal_chunk_hash=hashes.get(chunk_sequence, ""),
+                            events=recovered_events,
+                        )
+                    except Exception:
+                        catalog_size_after = self._catalog_storage_size()
+                        reservation.commit_replacement(
+                            old_size=catalog_size_before,
+                            new_size=catalog_size_after,
+                            actual_peak_bytes=max(
+                                0, catalog_size_after - catalog_size_before
+                            ),
+                        )
+                        raise
+                    catalog_size_after = self._catalog_storage_size()
+                    reservation.commit_replacement(
+                        old_size=catalog_size_before,
+                        new_size=catalog_size_after,
+                        actual_peak_bytes=max(0, catalog_size_after - catalog_size_before),
                     )
-                except Exception:
-                    reservation.commit(
-                        max(0, self._catalog_storage_size() - catalog_size_before)
-                    )
-                    raise
-                reservation.commit(
-                    max(0, self._catalog_storage_size() - catalog_size_before)
-                )
         source_key = (batch.playback_session_id, batch.source_id)
         self._unindexed_sources.discard(source_key)
         # Recovery is authoritative for the on-disk chain. Reconstruct the cached
@@ -520,6 +653,8 @@ class DiagnosticsWriter:
         return journal_upper_bound + catalog_upper_bound
 
     def _release_pending_batch(self, batch: DiagnosticsWriteBatch) -> None:
+        if batch.allocate_source_sequences:
+            return
         self._release_pending_keys(
             [self._event_key(batch.source_id, event) for event in batch.events]
         )
@@ -560,18 +695,24 @@ class DiagnosticsWriter:
         try:
             self.failure_callback(reason, payload)
         except Exception:  # noqa: BLE001 - observer callbacks are never control inputs.
-            return
+            self._increment("health_callback_errors", 1)
 
     def _catalog_storage_size(self) -> int:
+        storage_size = getattr(self.catalog, "storage_size", None)
+        if callable(storage_size):
+            return int(storage_size())
         return sum(
-            candidate.stat().st_size
+            private_file_size(candidate, trusted_root=self.root, missing_ok=True)
             for candidate in (
                 self.catalog.path,
                 Path(f"{self.catalog.path}-wal"),
                 Path(f"{self.catalog.path}-shm"),
             )
-            if candidate.exists() and candidate.is_file() and not candidate.is_symlink()
         )
+
+    def _catalog_mutation_guard(self):
+        guard = getattr(self.catalog, "mutation_guard", None)
+        return guard() if callable(guard) else nullcontext()
 
     def _maybe_write_status(self, elapsed_ms: float) -> None:
         now = time.monotonic()
@@ -585,5 +726,9 @@ class DiagnosticsWriter:
                 writer_latency_ms=round(elapsed_ms, 3),
                 last_error_class=self.metrics().get("last_error_class"),
             )
-        except Exception:  # noqa: BLE001 - status coalescing cannot invalidate a durable ACK.
-            return
+        except Exception as exc:  # noqa: BLE001 - status is diagnostics-only.
+            self._increment("status_write_errors", 1)
+            self._notify_failure(
+                "writer_status_write_failed",
+                {"error_class": exc.__class__.__name__},
+            )

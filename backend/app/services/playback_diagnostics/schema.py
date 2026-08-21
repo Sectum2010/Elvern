@@ -60,6 +60,9 @@ class PlaybackDiagnosticEvent(DiagnosticsModel):
     clock_offset_ns: DecimalTimestamp | None = None
     clock_uncertainty_ns: DecimalTimestamp | None = None
     network_rtt_ns: DecimalTimestamp | None = None
+    clock_generation: int | None = Field(default=None, ge=1)
+    clock_valid: bool | None = None
+    clock_invalid_reason: str | None = Field(default=None, max_length=64)
 
     playhead_ms: float | None = Field(default=None, ge=0)
     media_element_time_ms: float | None = Field(default=None, ge=0)
@@ -148,12 +151,15 @@ class PlaybackDiagnosticsBootstrapResponse(DiagnosticsModel):
     server_wall_time_ns: DecimalTimestamp
     server_monotonic_time_ns: DecimalTimestamp
     ack_watermark: int = Field(ge=0)
+    state: Literal["active", "interrupted_recoverable"] = "active"
 
 
 class PlaybackDiagnosticsBatchRequest(DiagnosticsModel):
     diagnostics_session_id: str = Field(min_length=8, max_length=128)
     source_id: str = Field(min_length=8, max_length=128)
-    events: list[PlaybackDiagnosticEvent]
+    # Event objects are validated one at a time by the diagnostics service so a
+    # 422 response can identify the exact durable source sequence to replace.
+    events: list[dict[str, Any]]
 
 
 class PlaybackDiagnosticsBatchResponse(DiagnosticsModel):
@@ -163,6 +169,35 @@ class PlaybackDiagnosticsBatchResponse(DiagnosticsModel):
     out_of_order: int
     ack_watermark: int
     capacity_state: str
+
+
+class PlaybackDiagnosticsGapRequest(DiagnosticsModel):
+    diagnostics_session_id: str = Field(min_length=8, max_length=128)
+    source_id: str = Field(min_length=8, max_length=128)
+    start_sequence: int = Field(ge=1)
+    end_sequence: int = Field(ge=1)
+    reason_code: Literal[
+        "client_capacity_drop",
+        "client_invalid_event",
+        "client_request_too_large",
+        "client_storage_failure",
+        "client_overhead_circuit",
+        "incident_snapshot_truncated",
+    ]
+    rejected_event_name: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[a-z0-9_.:-]+$",
+    )
+    rejected_event_hash: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+    )
+
+
+class PlaybackDiagnosticsGapResponse(DiagnosticsModel):
+    accepted: bool
+    ack_watermark: int = Field(ge=0)
 
 
 class PlaybackDiagnosticsClockRequest(DiagnosticsModel):
@@ -222,6 +257,17 @@ class SessionMetadataV2(DiagnosticsModel):
     dolby_vision: bool | None = None
     audio_channels: int | None = Field(default=None, ge=0, le=128)
     selected_audio_stream_index: int | None = Field(default=None, ge=0)
+    nominal_bitrate: int | None = Field(default=None, ge=0)
+    frame_rate: float | None = Field(default=None, ge=0)
+    video_profile: str | None = Field(default=None, max_length=128)
+    video_level: str | None = Field(default=None, max_length=128)
+    color_primaries: str | None = Field(default=None, max_length=64)
+    color_transfer: str | None = Field(default=None, max_length=64)
+    color_space: str | None = Field(default=None, max_length=64)
+    audio_sample_rate: int | None = Field(default=None, ge=0)
+    audio_track_count: int | None = Field(default=None, ge=0, le=128)
+    subtitle_count: int | None = Field(default=None, ge=0)
+    container_profile: str | None = Field(default=None, max_length=128)
     profile: str = Field(max_length=64)
     playback_mode: str = Field(max_length=32)
     stream_mode: str = Field(max_length=32)
@@ -280,10 +326,13 @@ def build_server_event(
     priority: EventPriority = "normal",
     severity: EventSeverity = "info",
     payload: dict[str, Any] | None = None,
+    event_id: str | None = None,
+    captured_wall_time_ns: int | None = None,
+    captured_monotonic_time_ns: int | None = None,
     **identities: Any,
 ) -> PlaybackDiagnosticEvent:
-    wall_ns = time.time_ns()
-    monotonic_ns = time.monotonic_ns()
+    wall_ns = int(captured_wall_time_ns or time.time_ns())
+    monotonic_ns = int(captured_monotonic_time_ns or time.monotonic_ns())
     allowed_identities = {
         key: value
         for key, value in identities.items()
@@ -320,7 +369,7 @@ def build_server_event(
         }
     }
     return PlaybackDiagnosticEvent(
-        event_id=uuid.uuid4().hex,
+        event_id=event_id or uuid.uuid4().hex,
         event_name=event_name,
         event_source=event_source,
         severity=severity,

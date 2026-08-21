@@ -24,6 +24,7 @@ from backend.app.services.playback_diagnostics.fileio import (
     UnsafeDiagnosticsPathError,
     atomic_write_bytes,
     ensure_private_directory,
+    read_private_bytes,
     resolve_beneath,
 )
 from backend.app.services.playback_diagnostics.identity import (
@@ -43,6 +44,7 @@ from backend.app.services.playback_diagnostics.privacy import (
 )
 from backend.app.services.playback_diagnostics.schema import (
     PlaybackDiagnosticEvent,
+    PlaybackDiagnosticsGapRequest,
     SessionMetadataV2,
 )
 from backend.app.services.playback_diagnostics.summaries import build_summary
@@ -81,6 +83,19 @@ def test_diagnostics_config_defaults_are_disabled_without_retention(test_setting
     assert not hasattr(test_settings, "playback_diagnostics_ttl")
     assert DIAGNOSTICS_NORMAL_BUDGET_BYTES == 79_500_000_000
     assert DIAGNOSTICS_EMERGENCY_RESERVE_BYTES == 500_000_000
+
+
+def test_gap_contract_distinguishes_an_oversized_single_client_event():
+    gap = PlaybackDiagnosticsGapRequest(
+        diagnostics_session_id="session-00000001",
+        source_id="source-00000001",
+        start_sequence=7,
+        end_sequence=7,
+        reason_code="client_request_too_large",
+        rejected_event_name="client_aggregate",
+    )
+
+    assert gap.reason_code == "client_request_too_large"
 
 
 def test_diagnostics_installation_switch_parses_explicit_values_and_example_is_off(
@@ -307,6 +322,33 @@ def test_private_paths_reject_symlinks_and_traversal(tmp_path):
     link.symlink_to(target)
     with pytest.raises(UnsafeDiagnosticsPathError):
         atomic_write_bytes(link, b"replacement")
+
+
+def test_trusted_root_operations_reject_symlinked_ancestor_components(tmp_path):
+    root = ensure_private_directory(tmp_path / "root")
+    outside = ensure_private_directory(tmp_path / "outside")
+    (root / "sessions").symlink_to(outside, target_is_directory=True)
+    target = resolve_beneath(root, "sessions", "session.json")
+
+    with pytest.raises(UnsafeDiagnosticsPathError):
+        atomic_write_bytes(target, b"private", trusted_root=root)
+
+    assert not (outside / "session.json").exists()
+
+
+def test_private_reads_and_replacements_reject_unexpected_hardlinks(tmp_path):
+    root = ensure_private_directory(tmp_path / "root")
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"outside")
+    linked = root / "capacity-ledger.json"
+    os.link(outside, linked)
+
+    with pytest.raises(UnsafeDiagnosticsPathError):
+        read_private_bytes(linked, max_bytes=1_024, trusted_root=root)
+    with pytest.raises(UnsafeDiagnosticsPathError):
+        atomic_write_bytes(linked, b"replacement", trusted_root=root)
+
+    assert outside.read_bytes() == b"outside"
 
 
 def test_privacy_preserves_exact_basename_but_rejects_paths_urls_and_secrets():

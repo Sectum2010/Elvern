@@ -36,36 +36,67 @@ to ingest/control the local recorder when it is explicitly enabled.
 
 ## Data flow
 
-1. Browser Playback creates its existing playback session. Diagnostic metadata
-   registration is best effort and never gates that playback response.
+1. Browser Playback creates its existing playback session. Its production hook
+   performs only a non-blocking bounded immutable snapshot into the diagnostics
+   ingress queue. Diagnostic registration, identity work, filesystem setup, and
+   catalog persistence happen on diagnostics workers and never gate playback.
 2. Backend observations that race registration enter a bounded provisional
    buffer and are flushed only after validated session metadata is durable.
-3. The browser allocates source sequence and inserts the event in one IndexedDB
-   transaction before upload. Early play intent/HLS observations survive a
-   bootstrap failure, reload, or offline interval.
+3. A browser module Worker owns event construction, sanitization, IndexedDB,
+   batching, upload, clock work, and persistent close recovery. The UI thread
+   posts bounded scalar snapshots only. Browser source sequence and IndexedDB
+   insertion are one transaction.
 4. The browser sends bounded authenticated batches. A small `sendBeacon` batch
    on `pagehide` is best effort only and never authorizes local deletion.
 5. The ingestion API validates ownership, schema, event and batch sizes,
    sequence, rate, and privacy, then submits bounded work to a dedicated writer.
 6. The writer performs compression, AES-GCM encryption, journal append/fsync,
-   catalog commit, and contiguous watermark recomputation outside the ASGI
-   thread. The HTTP request waits for that completion receipt. Queue admission
-   is not an ACK.
+   catalog commit, durable gap accounting, and contiguous watermark
+   recomputation outside playback/ASGI execution. The diagnostics HTTP request
+   waits for that completion receipt; queue admission alone is never an ACK.
 7. Only the durable ACK watermark returned after both journal fsync and catalog
    commit permits the browser to delete IndexedDB rows. Retriable failure leaves
    them intact.
 8. Server, provider, FFmpeg, Route 2, ETA, and host observers copy only existing
-   state into the same asynchronous observation plane.
-9. Close records a client final-source barrier, drains backend observations and
-   writer work, writes direct-open files, writes/verifies the manifest last, and
-   then seals the catalog row. No event may append after seal.
-10. Startup recovery inspects only unsealed sessions. It reindexes valid durable
-   chunks and leaves a crashed active session `interrupted_recoverable` so an
-   offline browser can replay; it does not auto-finalize it.
+   bounded state into the same non-blocking ingress. Internal source sequences
+   are assigned at the durable writer boundary, not by hot-path observers.
+9. Close records a client final-source barrier, drains accepted observations and
+   writer work, seals internal maxima, freezes host links, writes optional
+   derived output when normal capacity permits, then writes and verifies the
+   critical seal capsule/manifest last. No event may append after seal.
+10. Backend startup recovery inspects only unsealed sessions. Browser startup or
+   authenticated-login recovery independently scans the owner-isolated
+   IndexedDB registry in bounded pages. A crashed active source remains
+   `interrupted_recoverable`; neither side fabricates a clean completion.
 
-The diagnostics API is separate from playback progress and has four endpoints:
-`bootstrap`, `batch`, `clock`, and `close` under
+The diagnostics API is separate from playback progress and has five endpoint
+families: `bootstrap`, `batch`, `gap`, `clock`, and `close` under
 `/api/playback-diagnostics/`.
+
+## Playback-isolation and overhead contract
+
+`try_capture_diagnostic_observation(...)` is the sole production ingress from
+playback modules. It never raises, waits, serializes a full event, performs I/O,
+starts work, or acquires a blocking diagnostics lock. It immediately drops when
+disabled, unavailable, contended, full, degraded beyond the event's priority,
+or circuit-open. Diagnostic return values are optional correlation only and
+cannot select a playback path.
+
+Diagnostics workers/executors and all ingress/spool/recovery structures are
+bounded. Self-health measures main-thread capture, Worker delay/depth, IDB,
+backend ingress/writer depth and latency, host sampler latency, repeated errors,
+spool pressure, CPU pressure, I/O pressure, and memory pressure. The exact
+ordered modes are `normal`, `reduced_sampling`, `optional_disabled`,
+`reduced_aggregates`, `critical_only`, and `circuit_open`. High-frequency data
+is removed first, optional resource/performance data second, aggregate
+frequency third, and non-critical data fourth. The open circuit accepts only
+terminal and gap evidence. These health counters never re-enter the event
+stream.
+
+An IndexedDB open that is blocked or rejected for quota immediately uses the
+bounded memory fallback instead of delaying recorder startup. Runtime storage
+failures are reported only through bounded diagnostics health and cannot escape
+into the player/controller call chain.
 
 ## Identity model
 
@@ -129,6 +160,26 @@ Internal source maxima are frozen after their observation/writer queues drain.
 Missing ranges keep the session open/closing. Duplicate and concurrent
 finalizers collapse onto one result, `manifest.json` is generated and verified
 last, and only then may the state become `sealed`.
+
+The client state machine is `open -> closing -> sealed`, with explicit
+`paused_authentication`, `paused_capacity`, `interrupted_recoverable`,
+`orphaned_local`, and `terminal_rejected` states. Once closing starts, ordinary
+media/HLS/performance/clock/ACK self-events stop. Exactly one terminal event (or
+an explicit durable gap if local persistence cannot accept it) determines the
+frozen final client sequence; no N+1 event is allowed.
+
+The persistent recovery registry records client/source identity, close reason
+and state, final sequence, last durable ACK, timestamps, response code,
+generation, and a short renewable active-worker lease. Recovery skips a live
+lease, retries expired/pending rows on startup, login, reconnect, visibility,
+and periodic wakeup with bounded jittered backoff, and cleans up only after all
+ACK obligations and a stable sealed response.
+
+Allocated sequence loss is never hidden. Durable gap rows retain the exact
+inclusive range, reason, declaration origin, timestamp, and optional rejected
+event identity. Missing ranges keep a source closing unless covered by such an
+explicit declaration; completeness and seal evidence continue to disclose the
+loss.
 
 ## Observation certainty
 
@@ -228,6 +279,13 @@ cannot overlap. Read-only `status`, `list`, `inspect`, and `verify` do not start
 recorder, recovery, writer, or host sampler and do not create files; inspect,
 verify, and export accept sealed sessions only.
 
+Finalization atomically freezes host-evidence links before deriving output. The
+critical `seal.json` canonicalizes source/gap state, journal verification,
+frozen host link count/time bounds/digest, close reason, and derived-artifact
+status into one evidence digest. Verification rejects unknown or malformed host
+payload fields, duplicate or post-cutoff links, altered source/gap values, and
+manifest/hash mismatches. A sealed session is immutable.
+
 ## Capacity contract
 
 - Exact hard cap: `80,000,000,000` bytes.
@@ -249,6 +307,35 @@ the batch path and prevents concurrent oversubscription. The conservative ledger
 may temporarily exceed physical bytes after SQLite sidecars shrink; this can
 reject early but cannot permit the physical tree to exceed the exact hard cap.
 
+All catalog, journal, session artifact, seal/manifest, host, identity, key,
+status, lease metadata, export, quarantine, recovery scratch, temporary file,
+and SQLite sidecar bytes use the same atomic reserve/commit/release model. A
+clean startup fast path is allowed only after every mutation worker stopped and
+the integrity-protected clean ledger was durably written; otherwise startup
+reconciles physical bytes and marks the ledger dirty. Derived summaries never
+consume critical reserve. If normal capacity is unavailable, the small critical
+seal capsule can still close honestly and records derived output as deferred.
+
+## Typed failure and corruption policy
+
+Diagnostics HTTP errors have stable safe codes: authentication pauses on
+`401/403`; exact `422` invalid-event identity permits one gap; `413` permits
+bounded split or a single-event gap; `429` uses bounded backoff; `507` pauses for
+operator capacity recovery; missing, closing, sealed, corrupt, and identity
+conflict remain distinct. No raw exception, path, or secret is returned.
+
+Automatic journal repair is limited to a physically incomplete final record.
+The tail is written/fsynced and atomically renamed/fsynced in quarantine before
+the source journal is truncated/fsynced. Every complete-record, crypto, chain,
+identity, path, inode, permission, or generic I/O defect preserves original
+bytes and marks the session corrupt. Descriptor-relative operations reject
+traversal, symlinks, non-regular files, hardlinks, and destination replacement.
+
+There is no TTL or automatic deletion. The operator must stop the mutating
+owner, copy evidence if needed, delete selected whole session directories, and
+run the local `playback-diagnostics reconcile` command. There is no diagnostics
+data-reading web API or visible diagnostics UI.
+
 ## Performance evidence
 
 The repository includes accelerated synthetic benchmarks:
@@ -261,19 +348,26 @@ node frontend/scripts/benchmark-playback-diagnostics.mjs \
   --client-report tmp/playback-diagnostics-benchmark/client.json
 ```
 
-The 2026-08-21 local synthetic run measured 1,800 client events: event creation
-p95 about 0.10 ms, IndexedDB enqueue p95 about 1.60 ms, occupied-ring push p95
-0.00 ms/max about 0.10 ms, incremental serialization p95 about 0.10 ms, and a
-256-event loopback-only upload p95 about 13.12 ms. The bounded 60-second rings
-held 240 sample entries and 7,200 frame entries (modeled 120 fps), about 1.25 MB
-in the serialized benchmark representation.
+The 2026-08-21 local synthetic run measured 1,800 client events. The dedicated
+Worker capture boundary accepted 4,096 of 4,096 compact observations with p95
+and p99 of 0.10 ms, an ordinary maximum of 0.20 ms, a maximum 16-observation
+capture task of 0.50 ms, and no attributable long task. IndexedDB enqueue p95
+was 1.90 ms; occupied-ring push p95 was 0.00 ms/max 0.10 ms; incremental
+serialization p95 was 0.10 ms; and a 256-event loopback-only upload p95 was
+12.75 ms. The bounded 60-second rings held 240 sample entries and 7,200 frame
+entries (modeled 120 fps), about 1.25 MB in the serialized benchmark
+representation.
 
 The no-incident and incident server models durably wrote 4,020 and 4,895 events
 with zero writer errors and no capacity-reservation underestimate. A scale case
 created 2,000 sealed synthetic sessions plus one open journal; normal startup
-decrypted only the open journal. Concurrent capacity contenders admitted one and
-rejected one without oversubscription, and an unindexed two-event journal rebuilt
-to ACK 2 without duplicate raw IDs.
+reconciled capacity in 75.64 ms, recovered open sessions in 61.19 ms, and
+decrypted only the one open journal. The 40,000-iteration ingress benchmark
+measured disabled p95/p99 at 0.0038/0.0039 ms and ready p95/p99 at
+0.0048/0.0050 ms; a contended capture dropped in 0.0220 ms without waiting.
+Concurrent capacity contenders admitted one and rejected one without
+oversubscription, and an unindexed two-event journal rebuilt to ACK 2 without
+duplicate raw IDs.
 
 These are accelerated local Linux/headless-Chromium synthetic measurements.
 Upload latency is localhost only; storage projections come from synthetic event

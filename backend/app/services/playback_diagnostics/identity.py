@@ -17,7 +17,12 @@ from .fileio import (
     atomic_write_json,
     encode_json_document,
     ensure_private_directory,
+    open_private_descriptor,
+    private_file_size,
+    private_file_stat,
+    read_private_bytes,
     resolve_beneath,
+    unlink_private_file,
 )
 
 
@@ -31,16 +36,32 @@ class DiagnosticsIdentityKey:
     material: bytes
 
 
-def load_identity_key(root: Path) -> DiagnosticsIdentityKey:
+def load_identity_key(
+    root: Path,
+    *,
+    trusted_root: Path | None = None,
+) -> DiagnosticsIdentityKey:
     root = Path(root)
-    if root.is_symlink() or not root.is_dir():
-        raise FileNotFoundError("Diagnostics identity key directory is unavailable")
+    authority_root = Path(trusted_root) if trusted_root is not None else root.parent
     path = resolve_beneath(root, "identity-hmac-key.bin")
     metadata_path = resolve_beneath(root, "identity-hmac-key.json")
-    if not path.exists() or not metadata_path.exists():
+    try:
+        private_file_size(path, trusted_root=authority_root)
+        private_file_size(metadata_path, trusted_root=authority_root)
+    except FileNotFoundError:
         raise FileNotFoundError("Diagnostics identity key files are incomplete")
-    material = path.read_bytes()
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    material = read_private_bytes(
+        path,
+        max_bytes=IDENTITY_KEY_BYTES,
+        trusted_root=authority_root,
+    )
+    metadata = json.loads(
+        read_private_bytes(
+            metadata_path,
+            max_bytes=8_192,
+            trusted_root=authority_root,
+        ).decode("utf-8")
+    )
     if len(material) != IDENTITY_KEY_BYTES:
         raise ValueError("Invalid diagnostics identity key material")
     if metadata.get("schema_version") != "playback-diagnostics-identity-key-v1":
@@ -55,16 +76,50 @@ def load_or_create_identity_key(
     root: Path,
     *,
     capacity: DiagnosticsCapacityGuard | None = None,
+    trusted_root: Path | None = None,
 ) -> DiagnosticsIdentityKey:
-    root = ensure_private_directory(Path(root))
+    root = Path(root)
+    authority_root = Path(trusted_root) if trusted_root is not None else root.parent
+    root = ensure_private_directory(root, trusted_root=authority_root)
     path = resolve_beneath(root, "identity-hmac-key.bin")
     metadata_path = resolve_beneath(root, "identity-hmac-key.json")
-    if path.exists() and metadata_path.exists():
-        identity_key = load_identity_key(root)
-        os.chmod(path, FILE_MODE)
-        os.chmod(metadata_path, FILE_MODE)
+    path_exists = private_file_stat(
+        path,
+        trusted_root=authority_root,
+        missing_ok=True,
+    ) is not None
+    metadata_exists = private_file_stat(
+        metadata_path,
+        trusted_root=authority_root,
+        missing_ok=True,
+    ) is not None
+    if path_exists and metadata_exists:
+        identity_key = load_identity_key(root, trusted_root=authority_root)
+        for candidate in (path, metadata_path):
+            descriptor = open_private_descriptor(
+                candidate,
+                os.O_RDONLY,
+                trusted_root=authority_root,
+            )
+            try:
+                os.fchmod(descriptor, FILE_MODE)
+            finally:
+                os.close(descriptor)
         return identity_key
-    if path.exists() or metadata_path.exists():
+    if path_exists and not metadata_exists:
+        identity_map_path = resolve_beneath(root, "identity-map.enc")
+        if private_file_stat(
+            identity_map_path,
+            trusted_root=authority_root,
+            missing_ok=True,
+        ) is not None:
+            raise ValueError("Diagnostics identity key files are incomplete")
+        orphan_size = private_file_size(path, trusted_root=authority_root)
+        unlink_private_file(path, trusted_root=authority_root)
+        if capacity is not None:
+            capacity.account_deletion(old_size=orphan_size)
+        path_exists = False
+    if path_exists or metadata_exists:
         raise ValueError("Diagnostics identity key files are incomplete")
     material = secrets.token_bytes(IDENTITY_KEY_BYTES)
     key_id = secrets.token_hex(12)
@@ -81,18 +136,21 @@ def load_or_create_identity_key(
         else None
     )
     try:
-        atomic_write_bytes(path, material)
-        atomic_write_json(metadata_path, metadata)
+        atomic_write_bytes(path, material, trusted_root=authority_root)
+        atomic_write_json(metadata_path, metadata, trusted_root=authority_root)
         if reservation is not None:
-            reservation.commit(len(material) + len(encoded_metadata))
+            reservation.commit_append(len(material) + len(encoded_metadata))
     except Exception:
         if reservation is not None:
             actual = sum(
-                candidate.stat().st_size
+                private_file_size(
+                    candidate,
+                    trusted_root=authority_root,
+                    missing_ok=True,
+                )
                 for candidate in (path, metadata_path)
-                if candidate.is_file() and not candidate.is_symlink()
             )
-            reservation.commit(actual)
+            reservation.commit_append(actual)
         raise
     return DiagnosticsIdentityKey(key_id=key_id, material=material)
 
@@ -107,8 +165,16 @@ class DiagnosticIdentityStore:
         active_key: DiagnosticsKey,
         identity_key: DiagnosticsIdentityKey | None = None,
         capacity: DiagnosticsCapacityGuard | None = None,
+        trusted_root: Path | None = None,
     ) -> None:
-        self.root = ensure_private_directory(Path(root))
+        requested_root = Path(root)
+        self.trusted_root = (
+            Path(trusted_root) if trusted_root is not None else requested_root.parent
+        )
+        self.root = ensure_private_directory(
+            requested_root,
+            trusted_root=self.trusted_root,
+        )
         self.path = resolve_beneath(self.root, "identity-map.enc")
         self.key_store = key_store
         self.active_key = active_key
@@ -116,6 +182,7 @@ class DiagnosticIdentityStore:
         self.identity_key = identity_key or load_or_create_identity_key(
             self.root,
             capacity=capacity,
+            trusted_root=self.trusted_root,
         )
         self._lock = threading.RLock()
 
@@ -154,11 +221,19 @@ class DiagnosticIdentityStore:
             return str(value) if value else None
 
     def _read(self) -> dict[str, str]:
-        if not self.path.exists():
+        if private_file_stat(
+            self.path,
+            trusted_root=self.trusted_root,
+            missing_ok=True,
+        ) is None:
             return {}
         plaintext = decrypt_blob(
             self.key_store,
-            self.path.read_bytes(),
+            read_private_bytes(
+                self.path,
+                max_bytes=16 * 1024 * 1024,
+                trusted_root=self.trusted_root,
+            ),
             context=IDENTITY_CONTEXT,
         )
         payload = json.loads(plaintext.decode("utf-8"))
@@ -184,16 +259,23 @@ class DiagnosticIdentityStore:
         ).encode("utf-8")
         encrypted = encrypt_blob(self.active_key, plaintext, context=IDENTITY_CONTEXT)
         if self.capacity is None:
-            atomic_write_bytes(self.path, encrypted)
+            atomic_write_bytes(self.path, encrypted, trusted_root=self.trusted_root)
             return
-        old_size = self.path.stat().st_size if self.path.is_file() else 0
+        old_size = private_file_size(
+            self.path,
+            trusted_root=self.trusted_root,
+            missing_ok=True,
+        )
         reservation = self.capacity.reserve(len(encrypted), critical=critical)
         try:
-            atomic_write_bytes(self.path, encrypted)
-            reservation.commit(0)
-            self.capacity.account_replacement(old_size=old_size, new_size=len(encrypted))
+            atomic_write_bytes(self.path, encrypted, trusted_root=self.trusted_root)
+            reservation.commit_replacement(old_size=old_size, new_size=len(encrypted))
         except Exception:
-            new_size = self.path.stat().st_size if self.path.is_file() else 0
-            reservation.commit(0)
-            self.capacity.account_replacement(old_size=old_size, new_size=new_size)
+            new_size = private_file_size(
+                self.path,
+                trusted_root=self.trusted_root,
+                missing_ok=True,
+            )
+            if not reservation.closed:
+                reservation.commit_replacement(old_size=old_size, new_size=new_size)
             raise

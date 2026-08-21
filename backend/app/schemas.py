@@ -29,6 +29,7 @@ class UserResponse(BaseModel):
     assistant_beta_enabled: bool = False
     age_credential: int = Field(default=18, ge=1, le=18)
     session_id: int | None = None
+    playback_diagnostics_enabled: bool = False
 
 
 class AuthUserEnvelope(BaseModel):

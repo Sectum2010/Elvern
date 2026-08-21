@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import secrets
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
-from .runtime import observe_runtime_event
+from .ingress import next_diagnostic_correlation_id
+from .runtime import observe_runtime_event, record_runtime_health
 
 
 _lock = threading.RLock()
@@ -25,12 +25,12 @@ _pending: OrderedDict[str, _PendingPrediction] = OrderedDict()
 _MAX_PENDING = 4_096
 
 
-def _confidence_for_source(source: str) -> tuple[float | None, str]:
+def _confidence_for_source(source: str) -> tuple[float | None, str, str, bool]:
     if source in {"published_frontier", "fast_start_supply_surplus"}:
-        return 0.75, "derived_from_measured_frontier_and_supply"
+        return 0.75, "derived_from_measured_frontier_and_supply", "heuristic", False
     if source in {"none", "unknown", ""}:
-        return None, "unknown"
-    return None, "source_does_not_expose_confidence"
+        return None, "unknown", "unavailable", False
+    return None, "source_does_not_expose_confidence", "unavailable", False
 
 
 def _emit_superseded(
@@ -66,7 +66,10 @@ def observe_eta_snapshot(payload: dict[str, Any]) -> None:
         now_wall_ns = time.time_ns()
         estimate = payload.get("mode_estimate_seconds")
         ready = bool(payload.get("mode_ready"))
-        with _lock:
+        if not _lock.acquire(blocking=False):
+            record_runtime_health("eta_observer", "eta_ledger_busy")
+            return
+        try:
             previous = _pending.get(session_id)
             if estimate is not None and not ready:
                 estimate_seconds = max(0.0, float(estimate))
@@ -79,7 +82,7 @@ def observe_eta_snapshot(payload: dict[str, Any]) -> None:
                 ):
                     _pending.move_to_end(session_id)
                     return
-                prediction_id = f"prediction_{secrets.token_urlsafe(18)}"
+                prediction_id = next_diagnostic_correlation_id("prediction")
                 if previous is not None:
                     _emit_superseded(
                         session_id,
@@ -87,7 +90,9 @@ def observe_eta_snapshot(payload: dict[str, Any]) -> None:
                         replacement_prediction_id=prediction_id,
                         reason="estimate_recalculated",
                     )
-                confidence, confidence_basis = _confidence_for_source(algorithm_version)
+                confidence, confidence_basis, confidence_kind, calibrated = (
+                    _confidence_for_source(algorithm_version)
+                )
                 _pending[session_id] = _PendingPrediction(
                     prediction_id=prediction_id,
                     created_monotonic_ns=now_monotonic_ns,
@@ -126,6 +131,8 @@ def observe_eta_snapshot(payload: dict[str, Any]) -> None:
                         },
                         "confidence": confidence,
                         "confidence_basis": confidence_basis,
+                        "confidence_kind": confidence_kind,
+                        "calibrated": calibrated,
                     },
                 )
             if ready and previous is not None:
@@ -159,7 +166,10 @@ def observe_eta_snapshot(payload: dict[str, Any]) -> None:
                     reason="estimate_became_unavailable",
                 )
                 _pending.pop(session_id, None)
+        finally:
+            _lock.release()
     except Exception:  # noqa: BLE001 - response payload is never changed.
+        record_runtime_health("eta_observer", "eta_snapshot_failed")
         return
 
 
@@ -167,4 +177,11 @@ def forget_eta_session(playback_session_id: str) -> None:
     """Release completed-session state without changing playback responses."""
 
     with _lock:
-        _pending.pop(playback_session_id, None)
+        previous = _pending.pop(playback_session_id, None)
+    if previous is not None:
+        _emit_superseded(
+            playback_session_id,
+            previous,
+            replacement_prediction_id=None,
+            reason="session_forgotten",
+        )

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,16 +41,37 @@ class DiagnosticsCatalog:
         if self.path.exists() and self.path.is_symlink():
             raise ValueError("Diagnostics catalog must not be a symlink")
         self._lock = threading.RLock()
+        self._connection: sqlite3.Connection | None = None
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=5, check_same_thread=False)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = FULL")
-        os.chmod(self.path, FILE_MODE)
-        return connection
+        if self._connection is None:
+            connection = sqlite3.connect(self.path, timeout=5, check_same_thread=False)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = FULL")
+            os.chmod(self.path, FILE_MODE)
+            self._connection = connection
+        return self._connection
+
+    def close(self) -> None:
+        with self._lock:
+            connection = self._connection
+            self._connection = None
+            if connection is not None:
+                connection.close()
+
+    @contextmanager
+    def mutation_guard(self):
+        """Serialize catalog size measurement, mutation, and capacity settlement."""
+
+        with self._lock:
+            yield
+
+    def storage_size(self) -> int:
+        with self._lock:
+            return self._storage_size()
 
     def _initialize(self) -> None:
         old_size = self._storage_size()
@@ -116,6 +139,23 @@ class DiagnosticsCatalog:
                     UNIQUE(source_id, source_sequence)
                 );
 
+                CREATE TABLE IF NOT EXISTS diagnostic_source_gaps (
+                    source_id TEXT NOT NULL REFERENCES diagnostic_sources(source_id),
+                    start_sequence INTEGER NOT NULL,
+                    end_sequence INTEGER NOT NULL,
+                    reason_code TEXT NOT NULL,
+                    declaration_origin TEXT NOT NULL,
+                    declared_at_utc TEXT NOT NULL,
+                    rejected_event_name TEXT,
+                    rejected_event_hash TEXT,
+                    PRIMARY KEY(source_id, start_sequence, end_sequence),
+                    CHECK(start_sequence >= 1),
+                    CHECK(end_sequence >= start_sequence)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_diagnostic_source_gaps_source
+                    ON diagnostic_source_gaps(source_id, start_sequence, end_sequence);
+
                 CREATE INDEX IF NOT EXISTS idx_diagnostic_sessions_created
                     ON diagnostic_sessions(created_at_utc DESC);
                 CREATE INDEX IF NOT EXISTS idx_diagnostic_sessions_basename
@@ -166,6 +206,16 @@ class DiagnosticsCatalog:
                     ON diagnostic_host_observations(observed_wall_time_ns);
                 CREATE INDEX IF NOT EXISTS idx_diagnostic_session_host_links_session
                     ON diagnostic_session_host_links(playback_session_id, sample_id);
+
+                CREATE TABLE IF NOT EXISTS diagnostic_host_link_cutoffs (
+                    playback_session_id TEXT PRIMARY KEY
+                        REFERENCES diagnostic_sessions(playback_session_id),
+                    cutoff_at_utc TEXT NOT NULL,
+                    link_count INTEGER NOT NULL,
+                    first_observed_wall_time_ns TEXT,
+                    last_observed_wall_time_ns TEXT,
+                    link_digest_sha256 TEXT NOT NULL
+                );
                 """
             )
                 columns = {
@@ -185,13 +235,19 @@ class DiagnosticsCatalog:
         except Exception:
             if reservation is not None:
                 new_size = self._storage_size()
-                reservation.commit(0)
-                self.capacity.account_replacement(old_size=old_size, new_size=new_size)
+                reservation.commit_replacement(
+                    old_size=old_size,
+                    new_size=new_size,
+                    actual_peak_bytes=max(0, new_size - old_size),
+                )
             raise
         if reservation is not None:
             new_size = self._storage_size()
-            reservation.commit(0)
-            self.capacity.account_replacement(old_size=old_size, new_size=new_size)
+            reservation.commit_replacement(
+                old_size=old_size,
+                new_size=new_size,
+                actual_peak_bytes=max(0, new_size - old_size),
+            )
 
     def record_host_observation(
         self,
@@ -231,7 +287,12 @@ class DiagnosticsCatalog:
                     INSERT OR IGNORE INTO diagnostic_session_host_links (
                         playback_session_id, sample_id, incident_id,
                         incident_phase, linked_at_utc
-                    ) VALUES (?, ?, ?, ?, ?)
+                    )
+                    SELECT ?, ?, ?, ?, ?
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM diagnostic_host_link_cutoffs
+                        WHERE playback_session_id = ?
+                    )
                     """,
                     (
                         playback_session_id,
@@ -239,6 +300,7 @@ class DiagnosticsCatalog:
                         str(incident_id or ""),
                         str(incident_phase or ""),
                         now,
+                        playback_session_id,
                     ),
                 )
             connection.commit()
@@ -253,7 +315,7 @@ class DiagnosticsCatalog:
                        observation.observed_wall_time_ns,
                        observation.observed_monotonic_time_ns,
                        observation.encrypted_payload,
-                       link.incident_id, link.incident_phase
+                       link.incident_id, link.incident_phase, link.linked_at_utc
                 FROM diagnostic_session_host_links AS link
                 JOIN diagnostic_host_observations AS observation
                   ON observation.sample_id = link.sample_id
@@ -263,6 +325,87 @@ class DiagnosticsCatalog:
                 (playback_session_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _host_link_digest(rows: Iterable[sqlite3.Row | dict[str, Any]]) -> str:
+        canonical = [
+            {
+                "sample_id": str(row["sample_id"]),
+                "incident_id": str(row["incident_id"] or ""),
+                "incident_phase": str(row["incident_phase"] or ""),
+                "observed_wall_time_ns": str(row["observed_wall_time_ns"]),
+            }
+            for row in rows
+        ]
+        return hashlib.sha256(
+            json.dumps(
+                canonical,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def freeze_host_links(self, playback_session_id: str) -> dict[str, Any]:
+        """Atomically freeze and describe the host evidence linked to a session."""
+
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM diagnostic_host_link_cutoffs
+                WHERE playback_session_id = ?
+                """,
+                (playback_session_id,),
+            ).fetchone()
+            if existing is not None:
+                return dict(existing)
+            rows = connection.execute(
+                """
+                SELECT link.sample_id, link.incident_id, link.incident_phase,
+                       observation.observed_wall_time_ns
+                FROM diagnostic_session_host_links AS link
+                JOIN diagnostic_host_observations AS observation
+                  ON observation.sample_id = link.sample_id
+                WHERE link.playback_session_id = ?
+                ORDER BY observation.observed_wall_time_ns, link.sample_id,
+                         link.incident_id, link.incident_phase
+                """,
+                (playback_session_id,),
+            ).fetchall()
+            first = str(rows[0]["observed_wall_time_ns"]) if rows else None
+            last = str(rows[-1]["observed_wall_time_ns"]) if rows else None
+            digest = self._host_link_digest(rows)
+            connection.execute(
+                """
+                INSERT INTO diagnostic_host_link_cutoffs (
+                    playback_session_id, cutoff_at_utc, link_count,
+                    first_observed_wall_time_ns, last_observed_wall_time_ns,
+                    link_digest_sha256
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (playback_session_id, now, len(rows), first, last, digest),
+            )
+            connection.commit()
+            return {
+                "playback_session_id": playback_session_id,
+                "cutoff_at_utc": now,
+                "link_count": len(rows),
+                "first_observed_wall_time_ns": first,
+                "last_observed_wall_time_ns": last,
+                "link_digest_sha256": digest,
+            }
+
+    def host_link_cutoff(self, playback_session_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM diagnostic_host_link_cutoffs
+                WHERE playback_session_id = ?
+                """,
+                (playback_session_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def _chmod_sidecars(self) -> None:
         for suffix in ("", "-wal", "-shm"):
@@ -427,6 +570,66 @@ class DiagnosticsCatalog:
             return "duplicate"
         return "conflict"
 
+    def classify_event_batch(
+        self,
+        source_id: str,
+        events: Iterable[dict[str, Any]],
+    ) -> tuple[str, ...]:
+        event_list = tuple(events)
+        if not event_list:
+            return ()
+        event_ids = [str(event["event_id"]) for event in event_list]
+        sequences = [int(event["source_sequence"]) for event in event_list]
+        event_placeholders = ",".join("?" for _value in event_ids)
+        sequence_placeholders = ",".join("?" for _value in sequences)
+        # Only the number of SQLite placeholders is dynamic; every event ID,
+        # source ID, and sequence remains a bound parameter below.
+        query = f"""SELECT event_id, source_id, source_sequence FROM diagnostic_events WHERE event_id IN ({event_placeholders}) OR (source_id = ? AND source_sequence IN ({sequence_placeholders}))"""  # nosec B608
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                query,
+                (*event_ids, source_id, *sequences),
+            ).fetchall()
+            gap_rows = connection.execute(
+                """
+                SELECT start_sequence, end_sequence
+                FROM diagnostic_source_gaps
+                WHERE source_id = ?
+                  AND end_sequence >= ?
+                  AND start_sequence <= ?
+                """,
+                (source_id, min(sequences), max(sequences)),
+            ).fetchall()
+        by_id = {str(row["event_id"]): row for row in rows}
+        by_sequence = {
+            int(row["source_sequence"]): row
+            for row in rows
+            if str(row["source_id"]) == source_id
+        }
+        results: list[str] = []
+        for event_id, sequence in zip(event_ids, sequences, strict=True):
+            id_row = by_id.get(event_id)
+            sequence_row = by_sequence.get(sequence)
+            in_gap = any(
+                int(row["start_sequence"]) <= sequence <= int(row["end_sequence"])
+                for row in gap_rows
+            )
+            if in_gap:
+                results.append("conflict")
+            elif id_row is None and sequence_row is None:
+                results.append("new")
+            elif (
+                id_row is not None
+                and sequence_row is not None
+                and str(id_row["source_id"]) == source_id
+                and int(id_row["source_sequence"]) == sequence
+                and str(sequence_row["event_id"]) == event_id
+            ):
+                results.append("duplicate")
+            else:
+                results.append("conflict")
+        return tuple(results)
+
     def session_has_event_name(self, playback_session_id: str, event_name: str) -> bool:
         with self._lock, self._connect() as connection:
             row = connection.execute(
@@ -449,6 +652,7 @@ class DiagnosticsCatalog:
         events: Iterable[dict[str, Any]],
         source_type: str | None = None,
         journal_chunk_hash: str = "",
+        preclassified: bool = False,
     ) -> tuple[int, int, int]:
         event_list = tuple(events)
         inserted = 0
@@ -467,17 +671,20 @@ class DiagnosticsCatalog:
             max_seen = int(source["max_seen_sequence"])
             for event in event_list:
                 sequence = int(event["source_sequence"])
-                classification = self._classify_event_in_connection(
-                    connection,
-                    str(event["event_id"]),
-                    source_id,
-                    sequence,
-                )
-                if classification == "duplicate":
-                    duplicate += 1
-                    continue
-                if classification == "conflict":
-                    raise ValueError("Conflicting diagnostics event identity or source sequence")
+                if not preclassified:
+                    classification = self._classify_event_in_connection(
+                        connection,
+                        str(event["event_id"]),
+                        source_id,
+                        sequence,
+                    )
+                    if classification == "duplicate":
+                        duplicate += 1
+                        continue
+                    if classification == "conflict":
+                        raise ValueError(
+                            "Conflicting diagnostics event identity or source sequence"
+                        )
                 try:
                     connection.execute(
                         """
@@ -507,14 +714,11 @@ class DiagnosticsCatalog:
                 if sequence > watermark + 1:
                     out_of_order += 1
                 max_seen = max(max_seen, sequence)
-                while True:
-                    next_row = connection.execute(
-                        "SELECT 1 FROM diagnostic_events WHERE source_id = ? AND source_sequence = ?",
-                        (source_id, watermark + 1),
-                    ).fetchone()
-                    if next_row is None:
-                        break
-                    watermark += 1
+                watermark = self._advance_watermark_in_connection(
+                    connection,
+                    source_id,
+                    watermark,
+                )
 
             if source_type:
                 connection.execute(
@@ -554,6 +758,128 @@ class DiagnosticsCatalog:
             connection.commit()
         self._chmod_sidecars()
         return inserted, duplicate, out_of_order
+
+    @staticmethod
+    def _advance_watermark_in_connection(
+        connection: sqlite3.Connection,
+        source_id: str,
+        watermark: int,
+    ) -> int:
+        while True:
+            next_sequence = watermark + 1
+            event = connection.execute(
+                "SELECT 1 FROM diagnostic_events WHERE source_id = ? AND source_sequence = ?",
+                (source_id, next_sequence),
+            ).fetchone()
+            if event is not None:
+                watermark = next_sequence
+                continue
+            gap = connection.execute(
+                """
+                SELECT end_sequence FROM diagnostic_source_gaps
+                WHERE source_id = ? AND start_sequence <= ? AND end_sequence >= ?
+                ORDER BY end_sequence DESC LIMIT 1
+                """,
+                (source_id, next_sequence, next_sequence),
+            ).fetchone()
+            if gap is None:
+                return watermark
+            watermark = max(watermark, int(gap["end_sequence"]))
+
+    def declare_source_gap(
+        self,
+        *,
+        source_id: str,
+        start_sequence: int,
+        end_sequence: int,
+        reason_code: str,
+        declaration_origin: str,
+        rejected_event_name: str | None = None,
+        rejected_event_hash: str | None = None,
+    ) -> int:
+        start = int(start_sequence)
+        end = int(end_sequence)
+        if start < 1 or end < start:
+            raise ValueError("Invalid diagnostics source gap range")
+        now = _utc_now()
+        with self._lock, self._connect() as connection:
+            source = connection.execute(
+                "SELECT ack_watermark, max_seen_sequence FROM diagnostic_sources WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            if source is None:
+                raise KeyError("Diagnostics source is not registered")
+            overlap = connection.execute(
+                """
+                SELECT 1 FROM diagnostic_events
+                WHERE source_id = ? AND source_sequence BETWEEN ? AND ?
+                LIMIT 1
+                """,
+                (source_id, start, end),
+            ).fetchone()
+            if overlap is not None:
+                raise ValueError("Diagnostics gap overlaps a durable event")
+            conflict = connection.execute(
+                """
+                SELECT reason_code, declaration_origin
+                FROM diagnostic_source_gaps
+                WHERE source_id = ?
+                  AND NOT(end_sequence < ? OR start_sequence > ?)
+                """,
+                (source_id, start, end),
+            ).fetchall()
+            if any(
+                str(row["reason_code"]) != str(reason_code)
+                or str(row["declaration_origin"]) != str(declaration_origin)
+                for row in conflict
+            ):
+                raise ValueError("Conflicting diagnostics source gap declaration")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO diagnostic_source_gaps (
+                    source_id, start_sequence, end_sequence, reason_code,
+                    declaration_origin, declared_at_utc, rejected_event_name,
+                    rejected_event_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_id,
+                    start,
+                    end,
+                    str(reason_code)[:96],
+                    str(declaration_origin)[:64],
+                    now,
+                    str(rejected_event_name)[:128] if rejected_event_name else None,
+                    str(rejected_event_hash)[:128] if rejected_event_hash else None,
+                ),
+            )
+            max_seen = max(int(source["max_seen_sequence"] or 0), end)
+            watermark = self._advance_watermark_in_connection(
+                connection,
+                source_id,
+                int(source["ack_watermark"] or 0),
+            )
+            connection.execute(
+                """
+                UPDATE diagnostic_sources
+                SET ack_watermark = ?, max_seen_sequence = ?, updated_at_utc = ?
+                WHERE source_id = ?
+                """,
+                (watermark, max_seen, now, source_id),
+            )
+            connection.commit()
+        return watermark
+
+    def source_gaps(self, source_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM diagnostic_source_gaps
+                WHERE source_id = ? ORDER BY start_sequence, end_sequence
+                """,
+                (source_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     @staticmethod
     def _classify_event_in_connection(
@@ -695,8 +1021,8 @@ class DiagnosticsCatalog:
             if source is None:
                 return []
             upper = int(source["final_source_sequence"] or source["max_seen_sequence"] or 0)
-            present = [
-                int(row["source_sequence"])
+            intervals = [
+                (int(row["source_sequence"]), int(row["source_sequence"]))
                 for row in connection.execute(
                     """
                     SELECT source_sequence FROM diagnostic_events
@@ -706,14 +1032,29 @@ class DiagnosticsCatalog:
                     (source_id, upper),
                 ).fetchall()
             ]
+            intervals.extend(
+                (
+                    int(row["start_sequence"]),
+                    min(upper, int(row["end_sequence"])),
+                )
+                for row in connection.execute(
+                    """
+                    SELECT start_sequence, end_sequence
+                    FROM diagnostic_source_gaps
+                    WHERE source_id = ? AND start_sequence <= ?
+                    ORDER BY start_sequence, end_sequence
+                    """,
+                    (source_id, upper),
+                ).fetchall()
+            )
         ranges: list[list[int]] = []
         expected = 1
-        for sequence in present:
-            if sequence < expected:
+        for start, end in sorted(intervals):
+            if end < expected:
                 continue
-            if sequence > expected:
-                ranges.append([expected, sequence - 1])
-            expected = sequence + 1
+            if start > expected:
+                ranges.append([expected, start - 1])
+            expected = max(expected, end + 1)
         if expected <= upper:
             ranges.append([expected, upper])
         return ranges
@@ -837,6 +1178,12 @@ class DiagnosticsCatalog:
         stats: list[dict[str, Any]] = []
         for row in rows:
             source = dict(row)
+            gaps = self.source_gaps(str(source["source_id"]))
+            source["declared_gaps"] = gaps
+            source["declared_gap_sequence_count"] = sum(
+                int(gap["end_sequence"]) - int(gap["start_sequence"]) + 1
+                for gap in gaps
+            )
             missing_ranges = self.missing_source_ranges(str(source["source_id"]))
             source["missing_ranges"] = missing_ranges
             source["missing_sequence_count"] = sum(
@@ -847,6 +1194,23 @@ class DiagnosticsCatalog:
 
     def remove_missing_session(self, playback_session_id: str) -> None:
         with self._lock, self._connect() as connection:
+            connection.execute(
+                "DELETE FROM diagnostic_host_link_cutoffs WHERE playback_session_id = ?",
+                (playback_session_id,),
+            )
+            connection.execute(
+                "DELETE FROM diagnostic_session_host_links WHERE playback_session_id = ?",
+                (playback_session_id,),
+            )
+            connection.execute(
+                """
+                DELETE FROM diagnostic_source_gaps
+                WHERE source_id IN (
+                    SELECT source_id FROM diagnostic_sources WHERE playback_session_id = ?
+                )
+                """,
+                (playback_session_id,),
+            )
             connection.execute(
                 "DELETE FROM diagnostic_events WHERE playback_session_id = ?",
                 (playback_session_id,),

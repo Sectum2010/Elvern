@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .fileio import atomic_write_bytes, ensure_private_directory, resolve_beneath
+from .fileio import (
+    atomic_write_bytes,
+    ensure_private_directory,
+    private_file_size,
+    resolve_beneath,
+)
 from .privacy import spreadsheet_safe_cell
 
 
@@ -49,27 +54,37 @@ def export_events(
     normalized = format_name.strip().lower()
     if normalized not in {"ndjson", "csv", "parquet", "perfetto"}:
         raise ValueError("Export format must be ndjson, csv, parquet, or perfetto")
-    export_root = ensure_private_directory(resolve_beneath(root, "exports"))
+    export_root = ensure_private_directory(
+        resolve_beneath(root, "exports"),
+        trusted_root=root,
+    )
     destination = resolve_beneath(export_root, _safe_export_name(session_id, normalized))
     rows = [_flatten_event(event) for event in events]
 
     def write_reserved(payload: bytes) -> Path:
-        old_size = destination.stat().st_size if destination.exists() else 0
+        old_size = private_file_size(
+            destination,
+            trusted_root=root,
+            missing_ok=True,
+        )
         reservation = capacity.reserve(len(payload), critical=False) if capacity is not None else None
         try:
-            atomic_write_bytes(destination, payload)
+            atomic_write_bytes(destination, payload, trusted_root=root)
             if reservation is not None:
-                reservation.commit(0)
-                capacity.account_replacement(
+                reservation.commit_replacement(
                     old_size=old_size,
-                    new_size=destination.stat().st_size,
+                    new_size=private_file_size(destination, trusted_root=root),
                 )
             return destination
         except Exception:
             if reservation is not None:
-                new_size = destination.stat().st_size if destination.is_file() else 0
-                reservation.commit(0)
-                capacity.account_replacement(old_size=old_size, new_size=new_size)
+                new_size = private_file_size(
+                    destination,
+                    trusted_root=root,
+                    missing_ok=True,
+                )
+                if not reservation.closed:
+                    reservation.commit_replacement(old_size=old_size, new_size=new_size)
             raise
 
     if normalized == "ndjson":
@@ -132,25 +147,7 @@ def export_events(
             "requirements from backend/requirements-diagnostics-export.txt."
         ) from exc
     table = pa.Table.from_pylist(rows)
-    temporary = destination.with_name(f".{destination.name}.tmp")
-    old_size = destination.stat().st_size if destination.exists() else 0
-    source_bytes = sum(len(json.dumps(row, ensure_ascii=False)) for row in rows)
-    reservation = capacity.reserve(max(1_000_000, source_bytes * 16), critical=False) if capacity is not None else None
-    try:
-        pq.write_table(table, temporary, compression="zstd")
-        temporary.chmod(0o600)
-        if reservation is not None and temporary.stat().st_size > reservation.reserved_bytes:
-            raise RuntimeError("Parquet export exceeded its reserved diagnostics capacity")
-        temporary.replace(destination)
-        destination.chmod(0o600)
-        if reservation is not None:
-            reservation.commit(0)
-            capacity.account_replacement(old_size=old_size, new_size=destination.stat().st_size)
-        return destination
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        if reservation is not None:
-            new_size = destination.stat().st_size if destination.is_file() else 0
-            reservation.commit(0)
-            capacity.account_replacement(old_size=old_size, new_size=new_size)
-        raise
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink, compression="zstd")
+    payload = sink.getvalue().to_pybytes()
+    return write_reserved(payload)

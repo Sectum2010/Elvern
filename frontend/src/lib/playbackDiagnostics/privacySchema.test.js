@@ -67,7 +67,7 @@ test("URL identity keeps only a normalized route and hashes that query-free rout
 
   assert.equal(
     identity.normalized_route,
-    "/api/browser-playback/epochs/:id/segments/:segment",
+    "/api/browser-playback/epochs/:epoch_id/segments/:segment",
   );
   assert.equal(JSON.stringify(identity).includes("secret"), false);
   assert.equal(JSON.stringify(identity).includes("elvern.invalid"), false);
@@ -86,9 +86,9 @@ test("URL identity keeps only a normalized route and hashes that query-free rout
 test("client diagnostics accepts only normalized Browser Playback routes", () => {
   assert.deepEqual(
     sanitizeClientDiagnosticPayload({
-      normalized_route: "/api/browser-playback/epochs/:id/segments/:segment",
+      normalized_route: "/api/browser-playback/epochs/:epoch_id/segments/:segment",
     }),
-    { normalized_route: "/api/browser-playback/epochs/:id/segments/:segment" },
+    { normalized_route: "/api/browser-playback/epochs/:epoch_id/segments/:segment" },
   );
   for (const route of [
     "/srv/media/private.mkv",

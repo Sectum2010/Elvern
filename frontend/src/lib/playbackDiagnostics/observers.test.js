@@ -183,6 +183,33 @@ test("lifecycle hidden time is measured without claiming suspension or a Home ac
   observer.stop();
 });
 
+test("pagehide records critical evidence and requests a non-blocking diagnostics close", () => {
+  const record = vi.fn();
+  const close = vi.fn();
+  const documentRef = new EventTarget();
+  documentRef.visibilityState = "visible";
+  documentRef.hasFocus = () => true;
+  const windowRef = new EventTarget();
+  windowRef.screen = { orientation: new EventTarget() };
+  windowRef.screen.orientation.type = "portrait-primary";
+  windowRef.matchMedia = () => ({ matches: false });
+  const observer = new PlaybackLifecycleDiagnosticObserver({
+    record,
+    close,
+    windowRef,
+    documentRef,
+    navigatorRef: { onLine: true },
+  });
+  observer.start();
+
+  windowRef.dispatchEvent(new Event("pagehide"));
+
+  const pagehide = record.mock.calls.find(([name]) => name === "pagehide");
+  assert.equal(pagehide[1].priority, "critical");
+  assert.deepEqual(close.mock.calls[0], ["pagehide"]);
+  observer.stop();
+});
+
 test("capability matrix reports unsupported Web-only measurements honestly", () => {
   const capabilities = collectPlaybackDiagnosticCapabilities({
     windowRef: { performance: {}, PerformanceObserver: undefined },
@@ -296,6 +323,40 @@ test("RVFC is authoritative for measured first frame and playing remains only a 
   observer.stop();
 });
 
+test("RVFC keeps detailed samples low-rate at 24, 30, 60, and 120 fps", () => {
+  for (const fps of [24, 30, 60, 120]) {
+    let frameCallback = null;
+    const video = new EventTarget();
+    Object.assign(video, {
+      requestVideoFrameCallback: (callback) => { frameCallback = callback; return 1; },
+      cancelVideoFrameCallback: vi.fn(),
+      getVideoPlaybackQuality: () => ({ totalVideoFrames: fps, droppedVideoFrames: 0 }),
+    });
+    const record = vi.fn();
+    const observer = new MediaElementDiagnosticObserver({ video, record, windowRef: window });
+    observer.startFrameLoop();
+
+    for (let frame = 0; frame < fps; frame += 1) {
+      const now = frame * (1_000 / fps);
+      frameCallback(now, {
+        presentationTime: now,
+        expectedDisplayTime: now,
+        mediaTime: now / 1_000,
+        presentedFrames: frame + 1,
+        processingDuration: 0.001,
+      });
+    }
+
+    assert.equal(observer.frameAccumulator.count, fps);
+    assert.equal(observer.frameRing.length <= 5, true);
+    assert.equal(
+      record.mock.calls.filter(([name]) => name === "first_video_frame_presented").length,
+      1,
+    );
+    observer.stop();
+  }
+});
+
 test("startup, seeking, paused, and hidden waiting never become confirmed stalls", () => {
   vi.useFakeTimers();
   const video = new EventTarget();
@@ -396,6 +457,138 @@ test("incident pre-window is byte-bounded, chunked, and excludes the ring from s
     assert.equal(options.payload.samples[0].buffered_range_count, 100);
     assert.equal(options.payload.samples[0].ranges_truncated, true);
   });
+  const emittedTimes = sampleChunks.flatMap(([, options]) => (
+    options.payload.samples.map((sample) => sample.current_time_ms)
+  ));
+  assert.deepEqual(
+    emittedTimes,
+    Array.from({ length: 240 }, (_, index) => index * 250),
+  );
+});
+
+test("snapshot chunks resume after task-budget yields and cancellation is explicit", () => {
+  const callbacks = [];
+  let clock = 0;
+  const windowRef = {
+    performance: { now: () => { const current = clock; clock += 9; return current; } },
+    requestIdleCallback: (callback) => { callbacks.push(callback); return callbacks.length; },
+    cancelIdleCallback: vi.fn(),
+    clearTimeout: vi.fn(),
+  };
+  const record = vi.fn();
+  const observer = new MediaElementDiagnosticObserver({
+    video: new EventTarget(),
+    record,
+    windowRef,
+  });
+  const ring = new DiagnosticRingBuffer(8);
+  [1, 2, 3].forEach((value) => ring.push({ sample_monotonic_ms: value, value }));
+
+  observer.scheduleSnapshot({
+    incidentId: "incident-budget",
+    ring,
+    eventName: "client_incident_pre_samples",
+    payloadKey: "samples",
+    chunkEntries: 8,
+    completeKey: "ring_complete",
+    complete: true,
+    transform: (value) => value,
+  });
+  callbacks.shift()();
+  assert.deepEqual(
+    record.mock.calls
+      .filter(([name]) => name === "client_incident_pre_samples")
+      .flatMap(([, options]) => options.payload.samples.map((sample) => sample.value)),
+    [1],
+  );
+
+  observer.stop();
+  assert.equal(
+    record.mock.calls.some(([name, options]) => (
+      name === "incident_snapshot_truncated"
+      && options.incidentId === "incident-budget"
+      && options.payload.reason === "observer_stopped"
+    )),
+    true,
+  );
+});
+
+test("one oversized snapshot candidate becomes explicit truncation evidence", () => {
+  const callbacks = [];
+  const windowRef = {
+    performance: { now: () => 0 },
+    requestIdleCallback: (callback) => { callbacks.push(callback); return callbacks.length; },
+    cancelIdleCallback: vi.fn(),
+  };
+  const record = vi.fn();
+  const observer = new MediaElementDiagnosticObserver({
+    video: new EventTarget(),
+    record,
+    windowRef,
+  });
+  const ring = new DiagnosticRingBuffer(2);
+  ring.push({ sample_monotonic_ms: 1, payload: "x".repeat(60_000) });
+
+  observer.scheduleSnapshot({
+    incidentId: "incident-oversized",
+    ring,
+    eventName: "client_incident_pre_samples",
+    payloadKey: "samples",
+    chunkEntries: 2,
+    completeKey: "ring_complete",
+    complete: false,
+    transform: (value) => value,
+  });
+  callbacks.shift()();
+
+  assert.equal(
+    record.mock.calls.some(([name]) => name === "client_incident_pre_samples"),
+    false,
+  );
+  const truncation = record.mock.calls.find(
+    ([name, options]) => name === "incident_snapshot_truncated"
+      && options.payload.reason === "snapshot_candidate_oversized",
+  );
+  assert.equal(truncation[1].payload.events_dropped, 1);
+  assert.equal(observer.snapshotJobs.size, 0);
+});
+
+test("many repeated stall snapshots remain bounded and attribute every eviction", () => {
+  vi.useFakeTimers();
+  const video = new EventTarget();
+  const record = vi.fn();
+  const observer = new MediaElementDiagnosticObserver({ video, record, windowRef: window });
+  const ring = new DiagnosticRingBuffer(8);
+  ring.push({ sample_monotonic_ms: 1, current_time_ms: 1 });
+
+  for (let index = 1; index <= 100; index += 1) {
+    observer.scheduleSnapshot({
+      incidentId: `incident-${index}`,
+      ring,
+      eventName: "client_incident_pre_samples",
+      payloadKey: "samples",
+      chunkEntries: 1,
+      completeKey: "ring_complete",
+      complete: true,
+      transform: (value) => value,
+    });
+  }
+
+  const truncations = record.mock.calls.filter(
+    ([name, options]) => name === "incident_snapshot_truncated"
+      && options.payload.reason === "snapshot_job_capacity",
+  );
+  assert.equal(observer.snapshotJobs.size, 4);
+  assert.equal(truncations.length, 96);
+  assert.deepEqual(
+    truncations.map(([, options]) => options.incidentId),
+    Array.from({ length: 96 }, (_, index) => `incident-${index + 1}`),
+  );
+  assert.deepEqual(
+    [...observer.snapshotJobs.values()].map((job) => job.incidentId),
+    ["incident-97", "incident-98", "incident-99", "incident-100"],
+  );
+  observer.stop();
 });
 
 test("incident recovery is recorded once while post-recovery sampling continues", () => {
@@ -504,11 +697,15 @@ test("frame aggregate reports interval deltas and detects cumulative counter res
   };
   const record = vi.fn();
   const observer = new MediaElementDiagnosticObserver({ video, record, windowRef: window });
-  observer.frameAggregateSamples = [{ frame_cadence_ms: 16 }];
+  observer.frameAccumulator = {
+    count: 1, cadence_total_ms: 16, cadence_count: 1, latest: { frame_cadence_ms: 16 },
+  };
   observer.flushFrameAggregate();
 
   quality = { droppedVideoFrames: 11, totalVideoFrames: 200, corruptedVideoFrames: 0 };
-  observer.frameAggregateSamples = [{ frame_cadence_ms: 17 }];
+  observer.frameAccumulator = {
+    count: 1, cadence_total_ms: 17, cadence_count: 1, latest: { frame_cadence_ms: 17 },
+  };
   observer.flushFrameAggregate();
   const interval = record.mock.calls.at(-1)[1].payload;
   assert.equal(interval.delta_dropped_frames, 1);
@@ -516,7 +713,9 @@ test("frame aggregate reports interval deltas and detects cumulative counter res
   assert.equal(interval.window_dropped_frame_ratio, 0.01);
 
   quality = { droppedVideoFrames: 1, totalVideoFrames: 5, corruptedVideoFrames: 0 };
-  observer.frameAggregateSamples = [{ frame_cadence_ms: 18 }];
+  observer.frameAccumulator = {
+    count: 1, cadence_total_ms: 18, cadence_count: 1, latest: { frame_cadence_ms: 18 },
+  };
   observer.flushFrameAggregate();
   const reset = record.mock.calls.at(-1)[1].payload;
   assert.equal(reset.frame_counter_reset, true);

@@ -43,6 +43,7 @@ function benchmarkHtml() {
       import { MediaElementDiagnosticObserver } from "/src/lib/playbackDiagnostics/mediaObserver.js";
       import { DiagnosticRingBuffer } from "/src/lib/playbackDiagnostics/ringBuffer.js";
       import { createPlaybackDiagnosticEvent } from "/src/lib/playbackDiagnostics/schema.js";
+      import { PlaybackDiagnosticsWorkerClient } from "/src/lib/playbackDiagnostics/workerClient.js";
 
       const EVENT_COUNT = 1_800;
       const SAMPLE_RING_ENTRIES = 240;
@@ -50,6 +51,11 @@ function benchmarkHtml() {
       const FRAME_RATE = 120;
       const SUSTAINED_PUSH_COUNT = 50_000;
       const SERIALIZATION_CHUNK_ENTRIES = 128;
+      const WORKER_CAPTURE_EVENTS = 4_096;
+      // Keep each synthetic task below the worker-pressure model. A 64-event
+      // instantaneous burst represents roughly 16 seconds of 250 ms samples
+      // arriving at once and correctly trips the production circuit breaker.
+      const WORKER_CAPTURE_CHUNK_EVENTS = 16;
       const SESSION_ID = "session-synthetic-client-benchmark";
 
       function percentile(values, fraction) {
@@ -70,8 +76,19 @@ function benchmarkHtml() {
           mean_ms: values.length ? total / values.length : null,
           p50_ms: percentile(values, 0.5),
           p95_ms: percentile(values, 0.95),
+          p99_ms: percentile(values, 0.99),
           max_ms: values.length ? Math.max(...values) : null,
         };
+      }
+
+      async function waitForWorkerAcks(client, timeoutMs = 15_000) {
+        const deadline = performance.now() + timeoutMs;
+        while (client.pending.size > 0) {
+          if (performance.now() >= deadline) {
+            throw new Error("Timed out waiting for diagnostics Worker acknowledgements");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
       }
 
       function makeEvent(sequence) {
@@ -290,6 +307,91 @@ function benchmarkHtml() {
 
         resumedSpool.close();
         await deleteBenchmarkDatabase();
+
+        const longTasks = [];
+        let longTaskObserver = null;
+        if (typeof PerformanceObserver === "function"
+            && PerformanceObserver.supportedEntryTypes?.includes("longtask")) {
+          longTaskObserver = new PerformanceObserver((list) => {
+            for (const entry of list.getEntries()) {
+              longTasks.push({ start_ms: entry.startTime, duration_ms: entry.duration });
+            }
+          });
+          longTaskObserver.observe({ type: "longtask", buffered: false });
+        }
+        const workerClient = new PlaybackDiagnosticsWorkerClient({
+          options: {
+            playbackSessionId: "session-worker-capture-benchmark",
+            playbackAttemptId: "attempt-worker-capture-benchmark",
+            context: {
+              platform: "synthetic",
+              device_class: "desktop",
+              browser_family: "chromium",
+              playback_mode: "lite",
+              stream_mode: "route2",
+              source_kind: "local",
+            },
+            bootstrapContext: {
+              client_timer_resolution_us: 5,
+            },
+          },
+        });
+        const workerReady = await workerClient.start();
+        const workerCaptureLatencies = [];
+        const workerCaptureTaskLatencies = [];
+        let acceptedWorkerCaptures = 0;
+        const workerCaptureWindowStart = performance.now();
+        for (let chunkStart = 0; chunkStart < WORKER_CAPTURE_EVENTS;
+          chunkStart += WORKER_CAPTURE_CHUNK_EVENTS) {
+          const taskStarted = performance.now();
+          const chunkEnd = Math.min(
+            WORKER_CAPTURE_EVENTS,
+            chunkStart + WORKER_CAPTURE_CHUNK_EVENTS,
+          );
+          for (let sequence = chunkStart; sequence < chunkEnd; sequence += 1) {
+            const started = performance.now();
+            const accepted = workerClient.capture("media_aggregate", {
+              payload: {
+                buffered_ahead_ms: 45_000 - (sequence % 10) * 250,
+                ready_state: 4,
+                network_state: 1,
+                state: "playing",
+              },
+              playheadMs: sequence * 250,
+              durationMs: 7_200_000,
+              sampleWindowMs: 250,
+            });
+            workerCaptureLatencies.push(performance.now() - started);
+            if (accepted) acceptedWorkerCaptures += 1;
+          }
+          workerCaptureTaskLatencies.push(performance.now() - taskStarted);
+          await waitForWorkerAcks(workerClient);
+        }
+        const workerCaptureWindowEnd = performance.now();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        longTaskObserver?.disconnect();
+        const attributableLongTasks = longTasks.filter((entry) => (
+          entry.start_ms < workerCaptureWindowEnd
+          && entry.start_ms + entry.duration_ms > workerCaptureWindowStart
+        ));
+        const workerCaptureSummary = summarized(workerCaptureLatencies);
+        const workerTaskSummary = summarized(workerCaptureTaskLatencies);
+        const workerCaptureAssertions = {
+          all_captures_accepted: acceptedWorkerCaptures === WORKER_CAPTURE_EVENTS,
+          p95_within_0_25_ms: workerCaptureSummary.p95_ms <= 0.25,
+          p99_within_0_75_ms: workerCaptureSummary.p99_ms <= 0.75,
+          ordinary_max_within_2_ms: workerCaptureSummary.max_ms <= 2,
+          capture_task_max_below_10_ms: workerTaskSummary.max_ms < 10,
+          no_observed_long_task: attributableLongTasks.length === 0,
+        };
+        if (Object.values(workerCaptureAssertions).some((value) => value !== true)) {
+          throw new Error(
+            "Diagnostics Worker capture budget failed: " + JSON.stringify(workerCaptureAssertions),
+          );
+        }
+        workerClient.dispose();
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        await deleteBenchmarkDatabase();
         globalThis.gc?.();
         const heapAfter = performance.memory?.usedJSHeapSize ?? null;
         return {
@@ -328,6 +430,16 @@ function benchmarkHtml() {
             ...summarized(uploadLatencies),
             batch_events: batch.entries.length,
             batch_bytes: batch.totalBytes,
+          },
+          worker_capture_boundary: {
+            ready: workerReady,
+            requested_events: WORKER_CAPTURE_EVENTS,
+            accepted_events: acceptedWorkerCaptures,
+            chunk_events: WORKER_CAPTURE_CHUNK_EVENTS,
+            synchronous_capture: workerCaptureSummary,
+            synchronous_chunk_tasks: workerTaskSummary,
+            attributable_long_tasks: attributableLongTasks,
+            assertions: workerCaptureAssertions,
           },
           ring_buffers: {
             modeled_window_seconds: 60,
@@ -388,6 +500,73 @@ const benchmarkPlugin = {
         });
         return;
       }
+      if (request.method === "POST"
+          && requestUrl.pathname.startsWith("/api/playback-diagnostics/")) {
+        const chunks = [];
+        request.on("data", (chunk) => chunks.push(chunk));
+        request.on("end", () => {
+          let body = {};
+          try {
+            body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+          } catch {
+            response.statusCode = 422;
+            response.setHeader("Content-Type", "application/json");
+            response.end(JSON.stringify({ detail: { code: "diagnostics_invalid_event" } }));
+            return;
+          }
+          let payload;
+          if (requestUrl.pathname.endsWith("/bootstrap")) {
+            payload = {
+              enabled: true,
+              diagnostics_session_id: body.playback_session_id,
+              source_id: "source-worker-capture-benchmark",
+              schema_version: "playback-diagnostics-event-v2",
+              client_spool_max_bytes: 64_000_000,
+              batch_max_events: 256,
+              batch_max_bytes: 524_288,
+              clock_algorithm: "monotonic-rtt-median-offset-v2",
+              server_wall_time_ns: String(Date.now() * 1_000_000),
+              server_monotonic_time_ns: "1",
+              ack_watermark: 0,
+            };
+          } else if (requestUrl.pathname.endsWith("/clock")) {
+            const now = String(Date.now() * 1_000_000);
+            payload = {
+              sample_id: body.sample_id,
+              client_send_wall_time_ms: body.client_send_wall_time_ms,
+              client_send_monotonic_time_us: body.client_send_monotonic_time_us,
+              server_receive_wall_time_ns: now,
+              server_receive_monotonic_time_ns: "1",
+              server_send_wall_time_ns: now,
+              server_send_monotonic_time_ns: "2",
+              monotonic_raw_time_ns: null,
+            };
+          } else if (requestUrl.pathname.endsWith("/batch")) {
+            const sequences = (body.events || []).map((event) => Number(event.source_sequence) || 0);
+            payload = {
+              accepted: sequences.length,
+              duplicate: 0,
+              rejected: 0,
+              out_of_order: 0,
+              ack_watermark: sequences.length ? Math.max(...sequences) : 0,
+              missing_sequences: [],
+              durable_gap_ranges: [],
+              source_state: "open",
+            };
+          } else if (requestUrl.pathname.endsWith("/close")) {
+            payload = { sealed: true, state: "sealed", ack_watermark: body.final_source_sequence || 0 };
+          } else {
+            response.statusCode = 404;
+            response.end();
+            return;
+          }
+          response.statusCode = 200;
+          response.setHeader("Content-Type", "application/json");
+          response.setHeader("Cache-Control", "no-store");
+          response.end(JSON.stringify(payload));
+        });
+        return;
+      }
       next();
     });
   },
@@ -427,6 +606,10 @@ try {
       [report.main_thread_event_creation.p95_ms].filter(Number.isFinite),
       0.95,
     ),
+    worker_capture_p95_ms: report.worker_capture_boundary.synchronous_capture.p95_ms,
+    worker_capture_p99_ms: report.worker_capture_boundary.synchronous_capture.p99_ms,
+    worker_capture_max_ms: report.worker_capture_boundary.synchronous_capture.max_ms,
+    worker_capture_task_max_ms: report.worker_capture_boundary.synchronous_chunk_tasks.max_ms,
     indexeddb_enqueue_p95_ms: report.indexeddb.enqueue.p95_ms,
     loopback_upload_p95_ms: report.loopback_batch_upload.p95_ms,
     occupied_ring_push_p50_ms: report.ring_buffers.occupied_push.p50_ms,

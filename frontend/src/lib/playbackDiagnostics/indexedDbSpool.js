@@ -2,18 +2,42 @@ import {
   PLAYBACK_DIAGNOSTICS_CRITICAL_RESERVE_RATIO,
   PLAYBACK_DIAGNOSTICS_DB_NAME,
   PLAYBACK_DIAGNOSTICS_DB_VERSION,
+  PLAYBACK_DIAGNOSTICS_DEGRADED_SPOOL_MAX_BYTES,
   PLAYBACK_DIAGNOSTICS_DEFAULT_SPOOL_MAX_BYTES,
+  PLAYBACK_DIAGNOSTICS_MAX_PENDING_GAPS,
 } from "./constants";
 import { createDiagnosticId } from "./schema";
 
 const EVENT_STORE = "events";
 const META_STORE = "metadata";
 const GLOBAL_USAGE_KEY = "usage:global";
+const OWNER_SCOPE_SALT_KEY = "owner-scope:salt";
 
-function requestResult(request) {
+function requestResult(request, { rejectOnBlocked = false } = {}) {
   return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
+    let settled = false;
+    request.onsuccess = () => {
+      if (settled) {
+        request.result?.close?.();
+        return;
+      }
+      settled = true;
+      resolve(request.result);
+    };
+    request.onerror = () => {
+      if (settled) return;
+      settled = true;
+      reject(request.error || new Error("IndexedDB request failed"));
+    };
+    if (rejectOnBlocked) {
+      request.onblocked = () => {
+        if (settled) return;
+        settled = true;
+        const error = new Error("IndexedDB open request was blocked");
+        error.name = "IndexedDBBlockedError";
+        reject(error);
+      };
+    }
   });
 }
 
@@ -27,6 +51,23 @@ function transactionComplete(transaction) {
 
 function encodedBytes(value) {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+async function ownerScopeDigest(salt, ownerUserId) {
+  const bytes = new TextEncoder().encode(`${String(salt || "")}:${String(ownerUserId ?? "")}`);
+  if (globalThis.crypto?.subtle?.digest) {
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    return [...new Uint8Array(digest)]
+      .map((entry) => entry.toString(16).padStart(2, "0"))
+      .join("");
+  }
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  bytes.forEach((entry) => {
+    first = Math.imul(first ^ entry, 0x01000193) >>> 0;
+    second = Math.imul(second ^ entry, 0x85ebca6b) >>> 0;
+  });
+  return `local-${first.toString(16).padStart(8, "0")}${second.toString(16).padStart(8, "0")}`;
 }
 
 function eventKey(sessionId, sequence) {
@@ -70,6 +111,25 @@ function capacityResult({ critical, globalUsageBytes, sessionUsageBytes, maxByte
   };
 }
 
+function boundedPendingGaps(value) {
+  return Array.isArray(value)
+    ? value.slice(0, PLAYBACK_DIAGNOSTICS_MAX_PENDING_GAPS)
+    : [];
+}
+
+function normalizeGap(gap) {
+  const start = Math.max(1, Number(gap?.start_sequence) || 0);
+  const end = Math.max(start, Number(gap?.end_sequence) || start);
+  return {
+    start_sequence: start,
+    end_sequence: end,
+    reason_code: String(gap?.reason_code || "client_storage_failure"),
+    rejected_event_name: gap?.rejected_event_name || null,
+    rejected_event_hash: gap?.rejected_event_hash || null,
+    created_at_ms: Number(gap?.created_at_ms) || Date.now(),
+  };
+}
+
 export class IndexedDbDiagnosticSpool {
   constructor({
     indexedDBRef = globalThis.indexedDB,
@@ -109,7 +169,7 @@ export class IndexedDbDiagnosticSpool {
       }
     };
     try {
-      this.database = await requestResult(request);
+      this.database = await requestResult(request, { rejectOnBlocked: true });
       this.database.onversionchange = () => {
         this.database?.close();
         this.database = null;
@@ -141,16 +201,29 @@ export class IndexedDbDiagnosticSpool {
     return value;
   }
 
+  async getOwnerScopeHash(ownerUserId) {
+    await this.open();
+    const transaction = this.database.transaction(META_STORE, "readwrite");
+    const completed = transactionComplete(transaction);
+    const store = transaction.objectStore(META_STORE);
+    const existing = await requestResult(store.get(OWNER_SCOPE_SALT_KEY));
+    const salt = existing?.value || createDiagnosticId("owner_scope_salt");
+    if (!existing) store.put({ key: OWNER_SCOPE_SALT_KEY, value: salt });
+    await completed;
+    return ownerScopeDigest(salt, ownerUserId);
+  }
+
   async createAndEnqueue(sessionId, eventFactory, { priority = "normal" } = {}) {
     await this.open();
     const transaction = this.database.transaction([EVENT_STORE, META_STORE], "readwrite");
     const completed = transactionComplete(transaction);
     const eventStore = transaction.objectStore(EVENT_STORE);
     const metaStore = transaction.objectStore(META_STORE);
-    const [sequenceRow, sessionUsageRow, globalUsageRow] = await Promise.all([
+    const [sequenceRow, sessionUsageRow, globalUsageRow, registryRow] = await Promise.all([
       requestResult(metaStore.get(sequenceMetaKey(sessionId))),
       requestResult(metaStore.get(usageMetaKey(sessionId))),
       requestResult(metaStore.get(GLOBAL_USAGE_KEY)),
+      requestResult(metaStore.get(registryMetaKey(sessionId))),
     ]);
     const sequence = numeric(sequenceRow?.value) + 1;
     let event;
@@ -197,6 +270,7 @@ export class IndexedDbDiagnosticSpool {
     metaStore.put({ key: usageMetaKey(sessionId), bytes: sessionUsageBytes + bytes });
     metaStore.put({ key: GLOBAL_USAGE_KEY, bytes: globalUsageBytes + bytes });
     metaStore.put({
+      ...(registryRow || {}),
       key: registryMetaKey(sessionId),
       session_id: sessionId,
       queue_bytes: sessionUsageBytes + bytes,
@@ -259,11 +333,192 @@ export class IndexedDbDiagnosticSpool {
     const completed = transactionComplete(transaction);
     const store = transaction.objectStore(META_STORE);
     const key = recoveryMetaKey(sessionId);
-    const row = await requestResult(store.get(key));
+    const [row, registryRow] = await Promise.all([
+      requestResult(store.get(key)),
+      requestResult(store.get(registryMetaKey(sessionId))),
+    ]);
     const value = { ...(row?.value || {}), ...updates, updated_at_ms: Date.now() };
     store.put({ key, value });
+    store.put({
+      ...(registryRow || {}),
+      key: registryMetaKey(sessionId),
+      session_id: sessionId,
+      close_state: value.close_state || "open",
+      source_id: value.source_id || null,
+      client_instance_id: value.client_instance_id || null,
+      owner_scope_hash: value.owner_scope_hash || null,
+      final_source_sequence: value.final_source_sequence ?? null,
+      last_durable_ack: numeric(value.last_durable_ack),
+      pending_gap_count: boundedPendingGaps(value.pending_gaps).length,
+      active_lease_id: value.active_lease_id || null,
+      active_lease_expires_at_ms: numeric(value.active_lease_expires_at_ms),
+      updated_at_ms: value.updated_at_ms,
+    });
     await completed;
     return value;
+  }
+
+  async listRecoverySessions({ afterSessionId = "", limit = 64 } = {}) {
+    await this.open();
+    const transaction = this.database.transaction(META_STORE, "readonly");
+    const completed = transactionComplete(transaction);
+    const store = transaction.objectStore(META_STORE);
+    const rows = [];
+    const boundedLimit = Math.max(1, Math.min(256, Number(limit) || 64));
+    const lowerKey = afterSessionId
+      ? registryMetaKey(String(afterSessionId))
+      : "registry:";
+    await new Promise((resolve, reject) => {
+      const range = this.keyRangeRef.bound(
+        lowerKey,
+        "registry:\uffff",
+        Boolean(afterSessionId),
+        false,
+      );
+      const request = store.openCursor(range, "next");
+      request.onerror = () => reject(request.error || new Error("IndexedDB registry cursor failed"));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor || rows.length >= boundedLimit) {
+          resolve();
+          return;
+        }
+        rows.push({ ...cursor.value });
+        cursor.continue();
+      };
+    });
+    await completed;
+    return rows;
+  }
+
+  async queueGap(sessionId, gap, { sequence = null } = {}) {
+    await this.open();
+    const transaction = this.database.transaction([EVENT_STORE, META_STORE], "readwrite");
+    const completed = transactionComplete(transaction);
+    const eventStore = transaction.objectStore(EVENT_STORE);
+    const metaStore = transaction.objectStore(META_STORE);
+    const [sequenceRow, recoveryRow, registryRow] = await Promise.all([
+      requestResult(metaStore.get(sequenceMetaKey(sessionId))),
+      requestResult(metaStore.get(recoveryMetaKey(sessionId))),
+      requestResult(metaStore.get(registryMetaKey(sessionId))),
+    ]);
+    const nextSequence = sequence == null
+      ? numeric(sequenceRow?.value) + 1
+      : Math.max(1, Number(sequence) || 1);
+    const normalized = normalizeGap({
+      ...gap,
+      start_sequence: gap?.start_sequence ?? nextSequence,
+      end_sequence: gap?.end_sequence ?? nextSequence,
+    });
+    if (sequence != null) {
+      const existing = await requestResult(eventStore.get(eventKey(sessionId, nextSequence)));
+      if (!existing) {
+        transaction.abort();
+        await completed.catch(() => {});
+        return null;
+      }
+    }
+    const current = recoveryRow?.value || {};
+    const pending = boundedPendingGaps(current.pending_gaps);
+    const duplicate = pending.some((entry) => (
+      Number(entry.start_sequence) === normalized.start_sequence
+      && Number(entry.end_sequence) === normalized.end_sequence
+      && entry.reason_code === normalized.reason_code
+    ));
+    if (!duplicate && pending.length >= PLAYBACK_DIAGNOSTICS_MAX_PENDING_GAPS) {
+      transaction.abort();
+      await completed.catch(() => {});
+      return null;
+    }
+    const pendingGaps = duplicate ? pending : [...pending, normalized];
+    if (sequence == null) {
+      metaStore.put({ key: sequenceMetaKey(sessionId), value: normalized.end_sequence });
+    }
+    const updatedAt = Date.now();
+    const recovery = { ...current, pending_gaps: pendingGaps, updated_at_ms: updatedAt };
+    metaStore.put({ key: recoveryMetaKey(sessionId), value: recovery });
+    metaStore.put({
+      ...(registryRow || {}),
+      key: registryMetaKey(sessionId),
+      session_id: sessionId,
+      last_sequence: Math.max(numeric(registryRow?.last_sequence), normalized.end_sequence),
+      close_state: recovery.close_state || "open",
+      pending_gap_count: pendingGaps.length,
+      updated_at_ms: updatedAt,
+    });
+    await completed;
+    return normalized;
+  }
+
+  async pendingGaps(sessionId) {
+    return boundedPendingGaps((await this.getRecoveryState(sessionId))?.pending_gaps);
+  }
+
+  async completeGap(sessionId, gap, watermark = 0) {
+    await this.open();
+    const normalized = normalizeGap(gap);
+    const transaction = this.database.transaction([EVENT_STORE, META_STORE], "readwrite");
+    const completed = transactionComplete(transaction);
+    const eventStore = transaction.objectStore(EVENT_STORE);
+    const index = eventStore.index("by_session_sequence");
+    const range = this.keyRangeRef.bound(
+      [sessionId, normalized.start_sequence],
+      [sessionId, normalized.end_sequence],
+    );
+    let deletedBytes = 0;
+    await new Promise((resolve, reject) => {
+      const request = index.openCursor(range, "next");
+      request.onerror = () => reject(request.error || new Error("IndexedDB gap cursor failed"));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+        deletedBytes += numeric(cursor.value?.bytes);
+        cursor.delete();
+        cursor.continue();
+      };
+    });
+    const metaStore = transaction.objectStore(META_STORE);
+    const [recoveryRow, usageRow, globalUsageRow, registryRow] = await Promise.all([
+      requestResult(metaStore.get(recoveryMetaKey(sessionId))),
+      requestResult(metaStore.get(usageMetaKey(sessionId))),
+      requestResult(metaStore.get(GLOBAL_USAGE_KEY)),
+      requestResult(metaStore.get(registryMetaKey(sessionId))),
+    ]);
+    const current = recoveryRow?.value || {};
+    const pending = boundedPendingGaps(current.pending_gaps).filter((entry) => !(
+      Number(entry.start_sequence) === normalized.start_sequence
+      && Number(entry.end_sequence) === normalized.end_sequence
+      && entry.reason_code === normalized.reason_code
+    ));
+    const updatedAt = Date.now();
+    const recovery = {
+      ...current,
+      pending_gaps: pending,
+      last_durable_ack: Math.max(numeric(current.last_durable_ack), numeric(watermark)),
+      updated_at_ms: updatedAt,
+    };
+    metaStore.put({ key: recoveryMetaKey(sessionId), value: recovery });
+    metaStore.put({
+      key: usageMetaKey(sessionId),
+      bytes: Math.max(0, numeric(usageRow?.bytes) - deletedBytes),
+    });
+    metaStore.put({
+      key: GLOBAL_USAGE_KEY,
+      bytes: Math.max(0, numeric(globalUsageRow?.bytes) - deletedBytes),
+    });
+    metaStore.put({
+      ...(registryRow || {}),
+      key: registryMetaKey(sessionId),
+      session_id: sessionId,
+      pending_gap_count: pending.length,
+      last_durable_ack: recovery.last_durable_ack,
+      updated_at_ms: updatedAt,
+    });
+    await completed;
+    return recovery;
   }
 
   async readBatch(sessionId, { maxEvents, maxBytes } = {}) {
@@ -325,10 +580,11 @@ export class IndexedDbDiagnosticSpool {
       };
     });
     const metaStore = transaction.objectStore(META_STORE);
-    const [sessionUsageRow, globalUsageRow, recoveryRow] = await Promise.all([
+    const [sessionUsageRow, globalUsageRow, recoveryRow, registryRow] = await Promise.all([
       requestResult(metaStore.get(usageMetaKey(sessionId))),
       requestResult(metaStore.get(GLOBAL_USAGE_KEY)),
       requestResult(metaStore.get(recoveryMetaKey(sessionId))),
+      requestResult(metaStore.get(registryMetaKey(sessionId))),
     ]);
     const nextUsage = Math.max(0, numeric(sessionUsageRow?.bytes) - deletedBytes);
     const nextGlobalUsage = Math.max(0, numeric(globalUsageRow?.bytes) - deletedBytes);
@@ -343,9 +599,14 @@ export class IndexedDbDiagnosticSpool {
       },
     });
     metaStore.put({
+      ...(registryRow || {}),
       key: registryMetaKey(sessionId),
       session_id: sessionId,
       queue_bytes: nextUsage,
+      last_durable_ack: Math.max(
+        numeric(registryRow?.last_durable_ack),
+        numericWatermark,
+      ),
       updated_at_ms: Date.now(),
     });
     await completed;
@@ -365,7 +626,10 @@ export class IndexedDbDiagnosticSpool {
     const stats = await this.stats(sessionId);
     if (stats.queueDepth > 0) return false;
     const recovery = await this.getRecoveryState(sessionId);
-    if (recovery?.close_state !== "sealed") return false;
+    if (
+      recovery?.close_state !== "sealed"
+      || boundedPendingGaps(recovery?.pending_gaps).length > 0
+    ) return false;
     const transaction = this.database.transaction(META_STORE, "readwrite");
     const completed = transactionComplete(transaction);
     const store = transaction.objectStore(META_STORE);
@@ -422,6 +686,7 @@ export class MemoryDiagnosticSpool {
     this.sequences = new Map();
     this.clientIds = new Map();
     this.recovery = new Map();
+    this.ownerScopeSalt = createDiagnosticId("owner_scope_salt");
     this.available = true;
     this.failureReason = "indexeddb_unavailable_memory_fallback";
   }
@@ -433,6 +698,10 @@ export class MemoryDiagnosticSpool {
   async getOrCreateClientInstanceId(sessionId) {
     if (!this.clientIds.has(sessionId)) this.clientIds.set(sessionId, createDiagnosticId("client"));
     return this.clientIds.get(sessionId);
+  }
+
+  async getOwnerScopeHash(ownerUserId) {
+    return ownerScopeDigest(this.ownerScopeSalt, ownerUserId);
   }
 
   async createAndEnqueue(sessionId, eventFactory, { priority = "normal" } = {}) {
@@ -495,6 +764,90 @@ export class MemoryDiagnosticSpool {
     return next;
   }
 
+  async listRecoverySessions({ afterSessionId = "", limit = 64 } = {}) {
+    const boundedLimit = Math.max(1, Math.min(256, Number(limit) || 64));
+    return [...new Set([
+      ...this.sequences.keys(),
+      ...this.recovery.keys(),
+      ...[...this.entries.values()].map((entry) => entry.session_id),
+    ])]
+      .map((sessionId) => String(sessionId))
+      .filter((sessionId) => sessionId > String(afterSessionId || ""))
+      .sort()
+      .slice(0, boundedLimit)
+      .map((sessionId) => {
+      const state = this.recovery.get(sessionId) || {};
+      const queueBytes = [...this.entries.values()]
+        .filter((entry) => entry.session_id === sessionId)
+        .reduce((total, entry) => total + numeric(entry.bytes), 0);
+      return {
+        session_id: sessionId,
+        close_state: state.close_state || "open",
+        source_id: state.source_id || null,
+        owner_scope_hash: state.owner_scope_hash || null,
+        final_source_sequence: state.final_source_sequence ?? null,
+        pending_gap_count: boundedPendingGaps(state.pending_gaps).length,
+        queue_bytes: queueBytes,
+        active_lease_id: state.active_lease_id || null,
+        active_lease_expires_at_ms: numeric(state.active_lease_expires_at_ms),
+        updated_at_ms: state.updated_at_ms || 0,
+      };
+    });
+  }
+
+  async queueGap(sessionId, gap, { sequence = null } = {}) {
+    const nextSequence = sequence == null
+      ? (this.sequences.get(sessionId) || 0) + 1
+      : Math.max(1, Number(sequence) || 1);
+    if (sequence != null && !this.entries.has(eventKey(sessionId, nextSequence))) return null;
+    const normalized = normalizeGap({
+      ...gap,
+      start_sequence: gap?.start_sequence ?? nextSequence,
+      end_sequence: gap?.end_sequence ?? nextSequence,
+    });
+    const current = this.recovery.get(sessionId) || {};
+    const pending = boundedPendingGaps(current.pending_gaps);
+    const duplicate = pending.some((entry) => (
+      Number(entry.start_sequence) === normalized.start_sequence
+      && Number(entry.end_sequence) === normalized.end_sequence
+      && entry.reason_code === normalized.reason_code
+    ));
+    if (!duplicate && pending.length >= PLAYBACK_DIAGNOSTICS_MAX_PENDING_GAPS) return null;
+    if (!duplicate) pending.push(normalized);
+    if (sequence == null) this.sequences.set(sessionId, normalized.end_sequence);
+    this.recovery.set(sessionId, {
+      ...current,
+      pending_gaps: pending,
+      updated_at_ms: Date.now(),
+    });
+    return normalized;
+  }
+
+  async pendingGaps(sessionId) {
+    return boundedPendingGaps(this.recovery.get(sessionId)?.pending_gaps);
+  }
+
+  async completeGap(sessionId, gap, watermark = 0) {
+    const normalized = normalizeGap(gap);
+    for (let sequence = normalized.start_sequence; sequence <= normalized.end_sequence; sequence += 1) {
+      this.entries.delete(eventKey(sessionId, sequence));
+    }
+    const current = this.recovery.get(sessionId) || {};
+    const pending = boundedPendingGaps(current.pending_gaps).filter((entry) => !(
+      Number(entry.start_sequence) === normalized.start_sequence
+      && Number(entry.end_sequence) === normalized.end_sequence
+      && entry.reason_code === normalized.reason_code
+    ));
+    const next = {
+      ...current,
+      pending_gaps: pending,
+      last_durable_ack: Math.max(numeric(current.last_durable_ack), numeric(watermark)),
+      updated_at_ms: Date.now(),
+    };
+    this.recovery.set(sessionId, next);
+    return next;
+  }
+
   async readBatch(sessionId, { maxEvents = 1, maxBytes = 1 } = {}) {
     const ordered = [...this.entries.values()]
       .filter((entry) => entry.session_id === sessionId)
@@ -540,7 +893,12 @@ export class MemoryDiagnosticSpool {
 
   async cleanupSealedSession(sessionId) {
     const stats = await this.stats(sessionId);
-    if (stats.queueDepth || this.recovery.get(sessionId)?.close_state !== "sealed") return false;
+    const recovery = this.recovery.get(sessionId);
+    if (
+      stats.queueDepth
+      || recovery?.close_state !== "sealed"
+      || boundedPendingGaps(recovery?.pending_gaps).length > 0
+    ) return false;
     this.sequences.delete(sessionId);
     this.clientIds.delete(sessionId);
     this.recovery.delete(sessionId);
@@ -570,7 +928,13 @@ export async function createDiagnosticSpool(options = {}) {
     return { spool: persistent, persistent: true, unavailableReason: null };
   } catch (error) {
     return {
-      spool: new MemoryDiagnosticSpool(options),
+      spool: new MemoryDiagnosticSpool({
+        ...options,
+        maxBytes: Math.min(
+          Number(options.degradedMaxBytes) || PLAYBACK_DIAGNOSTICS_DEGRADED_SPOOL_MAX_BYTES,
+          PLAYBACK_DIAGNOSTICS_DEGRADED_SPOOL_MAX_BYTES,
+        ),
+      }),
       persistent: false,
       unavailableReason: error?.name || persistent.failureReason || "indexeddb_unavailable",
     };

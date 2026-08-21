@@ -5,9 +5,7 @@ import hashlib
 import json
 import os
 import secrets
-import shutil
 import struct
-import tempfile
 import time
 import zlib
 from dataclasses import dataclass
@@ -32,8 +30,13 @@ from .fileio import (
     UnsafeDiagnosticsPathError,
     atomic_write_bytes,
     ensure_private_directory,
+    fsync_directory,
     open_private_append,
+    open_private_descriptor,
+    private_file_size,
+    rename_private_file,
     resolve_beneath,
+    unlink_private_file,
 )
 
 
@@ -105,13 +108,26 @@ def _quarantine_tail(
     *,
     offset: int,
     quarantine_root: Path | None,
+    trusted_root: Path | None = None,
 ) -> Path | None:
     if quarantine_root is None:
         return None
-    quarantine_root = ensure_private_directory(quarantine_root)
+    source_root = trusted_root or path.parent
+    quarantine_trusted_root = trusted_root or quarantine_root
+    quarantine_root = ensure_private_directory(
+        quarantine_root,
+        trusted_root=quarantine_trusted_root,
+    )
     digest_builder = hashlib.sha256()
     tail_size = 0
-    with path.open("rb") as source:
+    with os.fdopen(
+        open_private_descriptor(
+            path,
+            os.O_RDONLY,
+            trusted_root=source_root,
+        ),
+        "rb",
+    ) as source:
         source.seek(offset)
         while True:
             chunk = source.read(1024 * 1024)
@@ -124,25 +140,60 @@ def _quarantine_tail(
     digest = digest_builder.hexdigest()[:16]
     destination = resolve_beneath(
         quarantine_root,
-        f"{path.stem}-{int(time.time())}-{digest}.corrupt",
+        f"{path.stem}-{int(time.time())}-{digest}-{secrets.token_hex(6)}.corrupt",
     )
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-        dir=quarantine_root,
+    temporary = resolve_beneath(
+        quarantine_root,
+        f".{destination.name}.{secrets.token_hex(12)}.tmp",
     )
-    temporary_path = Path(temporary_name)
+    descriptor = -1
     try:
+        descriptor = open_private_descriptor(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            trusted_root=quarantine_trusted_root,
+        )
         os.fchmod(descriptor, FILE_MODE)
-        with path.open("rb") as source, os.fdopen(descriptor, "wb", closefd=True) as target:
+        with os.fdopen(
+            open_private_descriptor(
+                path,
+                os.O_RDONLY,
+                trusted_root=source_root,
+            ),
+            "rb",
+        ) as source, os.fdopen(
+            descriptor,
+            "wb",
+            closefd=True,
+        ) as target:
+            descriptor = -1
             source.seek(offset)
-            shutil.copyfileobj(source, target, length=1024 * 1024)
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                target.write(chunk)
             target.flush()
             os.fsync(target.fileno())
-        os.replace(temporary_path, destination)
-        os.chmod(destination, FILE_MODE)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+        rename_private_file(
+            temporary,
+            destination,
+            trusted_root=quarantine_trusted_root,
+        )
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        unlink_private_file(
+            temporary,
+            trusted_root=quarantine_trusted_root,
+            missing_ok=True,
+        )
+        unlink_private_file(
+            destination,
+            trusted_root=quarantine_trusted_root,
+            missing_ok=True,
+        )
+        raise
     return destination
 
 
@@ -158,12 +209,14 @@ def verify_journal(
     expected_source_id: str | None = None,
     expected_source_type: str | None = None,
     capacity: Any | None = None,
+    trusted_root: Path | None = None,
 ) -> tuple[JournalVerification, list[dict[str, Any]]]:
     path = Path(path)
-    if path.is_symlink():
-        raise UnsafeDiagnosticsPathError(f"Refusing diagnostics journal symlink: {path}")
+    source_root = Path(trusted_root) if trusted_root is not None else path.parent
     events: list[dict[str, Any]] = []
-    if not path.exists():
+    try:
+        private_file_size(path, trusted_root=source_root)
+    except FileNotFoundError:
         return JournalVerification(str(path), True, 0, 0, ""), events
 
     valid_end = 0
@@ -178,7 +231,14 @@ def verify_journal(
     bound_source_id: str | None = None
     bound_source_type: str | None = None
     try:
-        with path.open("rb") as handle:
+        with os.fdopen(
+            open_private_descriptor(
+                path,
+                os.O_RDONLY,
+                trusted_root=source_root,
+            ),
+            "rb",
+        ) as handle:
             magic = handle.read(len(JOURNAL_MAGIC))
             if magic == JOURNAL_MAGIC:
                 journal_schema = JOURNAL_SCHEMA_VERSION
@@ -294,7 +354,7 @@ def verify_journal(
     recovered_bytes = 0
     quarantined_path: Path | None = None
     if error is not None and recover and incomplete_tail:
-        original_size = path.stat().st_size
+        original_size = private_file_size(path, trusted_root=source_root)
         tail_size = max(0, original_size - valid_end)
         reservation = capacity.reserve(tail_size, critical=True) if capacity else None
         try:
@@ -302,8 +362,16 @@ def verify_journal(
                 path,
                 offset=corruption_offset or valid_end,
                 quarantine_root=quarantine_root,
+                trusted_root=trusted_root,
             )
-            with path.open("r+b") as handle:
+            with os.fdopen(
+                open_private_descriptor(
+                    path,
+                    os.O_RDWR,
+                    trusted_root=source_root,
+                ),
+                "r+b",
+            ) as handle:
                 handle.truncate(valid_end)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -311,13 +379,27 @@ def verify_journal(
             if reservation is not None:
                 # The quarantine copy replaces the removed journal tail, so the
                 # final root usage is unchanged after the temporary peak.
-                reservation.commit(0)
+                reservation.commit_temporary_peak(final_growth_bytes=0)
             error = None
             incomplete_tail = False
         except Exception:
             if reservation is not None:
                 if quarantined_path and quarantined_path.exists():
-                    reservation.commit(quarantined_path.stat().st_size)
+                    current_source_size = private_file_size(
+                        path,
+                        trusted_root=source_root,
+                    )
+                    removed_source_bytes = max(0, original_size - current_source_size)
+                    reservation.commit_temporary_peak(
+                        final_growth_bytes=max(
+                            0,
+                            private_file_size(
+                                quarantined_path,
+                                trusted_root=trusted_root or quarantine_root,
+                            )
+                            - removed_source_bytes,
+                        ),
+                    )
                 else:
                     reservation.release()
             raise
@@ -352,6 +434,7 @@ class EncryptedJournal:
         active_key: DiagnosticsKey,
         quarantine_root: Path,
         capacity: Any | None = None,
+        trusted_root: Path | None = None,
     ) -> None:
         self.path = Path(path)
         self.playback_session_id = playback_session_id
@@ -361,11 +444,8 @@ class EncryptedJournal:
         self.active_key = active_key
         self.quarantine_root = quarantine_root
         self.capacity = capacity
-        ensure_private_directory(self.path.parent)
-        if self.path.exists() and self.path.is_symlink():
-            raise UnsafeDiagnosticsPathError("Refusing diagnostics journal symlink")
-        if self.path.exists():
-            os.chmod(self.path, FILE_MODE)
+        self.trusted_root = Path(trusted_root) if trusted_root is not None else self.path.parent
+        ensure_private_directory(self.path.parent, trusted_root=self.trusted_root)
         verification, _ = verify_journal(
             self.path,
             self.key_store,
@@ -375,6 +455,7 @@ class EncryptedJournal:
             expected_source_id=self.source_id,
             expected_source_type=self.source_type,
             capacity=self.capacity,
+            trusted_root=self.trusted_root,
         )
         if not verification.valid:
             raise DiagnosticsJournalError(verification.error or "Invalid diagnostics journal")
@@ -423,14 +504,20 @@ class EncryptedJournal:
             + LENGTH_STRUCT.pack(len(ciphertext))
             + ciphertext
         )
-        existing_size = self.path.stat().st_size if self.path.exists() else 0
+        existing_size = private_file_size(
+            self.path,
+            trusted_root=self.trusted_root,
+            missing_ok=True,
+        )
         offset = existing_size or len(JOURNAL_MAGIC)
-        with open_private_append(self.path) as handle:
+        with open_private_append(self.path, trusted_root=self.trusted_root) as handle:
             if existing_size == 0:
                 handle.write(JOURNAL_MAGIC)
             handle.write(record)
             handle.flush()
             os.fsync(handle.fileno())
+        if existing_size == 0:
+            fsync_directory(self.path.parent, trusted_root=self.trusted_root)
         self.chunk_sequence = sequence
         self.previous_chunk_hash = current_hash
         return JournalChunkRecord(
@@ -453,6 +540,7 @@ class EncryptedJournal:
             expected_playback_session_id=self.playback_session_id,
             expected_source_id=self.source_id,
             expected_source_type=self.source_type,
+            trusted_root=self.trusted_root,
         )
         if not verification.valid:
             raise DiagnosticsJournalError(verification.error or "Invalid diagnostics journal")

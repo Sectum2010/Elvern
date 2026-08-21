@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import re
-import secrets
 import time
 from typing import Any
 
-from .runtime import observe_runtime_event
+from .ingress import next_diagnostic_correlation_id
+from .runtime import observe_runtime_event, record_runtime_health
 
 
 _BYTE_RANGE = re.compile(r"^bytes=(\d+)-(\d*)$")
@@ -29,7 +29,7 @@ class ProviderRequestObserver:
         retry_count: int = 0,
     ) -> None:
         self.playback_session_id = str(playback_session_id or "") or None
-        self.provider_request_id = f"provider_{secrets.token_urlsafe(18)}"
+        self.provider_request_id = next_diagnostic_correlation_id("provider")
         self.range_start, self.range_end = parse_byte_range(range_header)
         self.retry_count = max(0, int(retry_count))
         self.started_ns = time.monotonic_ns()
@@ -76,6 +76,7 @@ class ProviderRequestObserver:
                 },
             )
         except Exception:  # noqa: BLE001 - observer cannot alter provider behavior.
+            record_runtime_health("provider_observer", "headers_capture_failed")
             return
 
     def read_started(self) -> None:
@@ -88,6 +89,7 @@ class ProviderRequestObserver:
                 self._consumer_wait_started_ns = None
             self._read_started_ns = now
         except Exception:  # noqa: BLE001
+            record_runtime_health("provider_observer", "read_start_capture_failed")
             return
 
     def chunk(self, size: int) -> None:
@@ -118,6 +120,7 @@ class ProviderRequestObserver:
                 )
             self.actual_bytes += normalized_size
         except Exception:  # noqa: BLE001
+            record_runtime_health("provider_observer", "chunk_capture_failed")
             return
 
     def downstream_wait_started(self) -> None:
@@ -126,6 +129,7 @@ class ProviderRequestObserver:
         try:
             self._consumer_wait_started_ns = time.monotonic_ns()
         except Exception:  # noqa: BLE001
+            record_runtime_health("provider_observer", "downstream_wait_capture_failed")
             return
 
     def downstream_resumed(self) -> None:
@@ -136,6 +140,7 @@ class ProviderRequestObserver:
             self.consumer_backpressure_ns += max(0, now - self._consumer_wait_started_ns)
             self._consumer_wait_started_ns = None
         except Exception:  # noqa: BLE001
+            record_runtime_health("provider_observer", "downstream_resume_capture_failed")
             return
 
     def finish(self, *, eof: bool, cancelled: bool = False) -> None:

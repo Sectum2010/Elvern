@@ -24,7 +24,8 @@ from ..services.mobile_playback_service import (
     PlaybackWorkerCooldownError,
 )
 from ..services.playback_diagnostics.eta_observer import observe_eta_snapshot
-from ..services.playback_diagnostics.runtime import observe_runtime_event
+from ..services.playback_diagnostics.ingress import try_capture_diagnostic_observation
+from ..services.playback_diagnostics.runtime import record_runtime_health
 
 
 router = APIRouter(tags=["browser_playback"])
@@ -59,15 +60,22 @@ def _observe_browser_session_created(
     session_id: str,
     user_id: int,
 ) -> None:
+    del manager
     try:
-        context = manager.get_diagnostic_session_context(session_id, user_id=user_id)
-        request.app.state.playback_diagnostics_service.observe_playback_session_created(
-            context,
-            user_id=user_id,
-            client_user_agent=request.headers.get("user-agent"),
-            client_ip=resolve_client_ip(request),
+        try_capture_diagnostic_observation(
+            "diagnostics_session_registration_requested",
+            playback_session_id=session_id,
+            event_source="server",
+            observation_kind="inferred",
+            priority="critical",
+            payload={
+                "owner_user_id": int(user_id),
+                "client_user_agent": request.headers.get("user-agent") or "",
+                "client_address": resolve_client_ip(request),
+            },
         )
-    except Exception:  # noqa: BLE001 - diagnostics cannot alter session creation.
+    except Exception:  # noqa: BLE001 - diagnostics cannot alter playback routes.
+        record_runtime_health("browser_playback", "session_registration_capture_failed")
         return
 
 
@@ -130,7 +138,7 @@ def _observe_browser_event(
     payload: dict[str, object] | None = None,
 ) -> None:
     try:
-        observe_runtime_event(
+        try_capture_diagnostic_observation(
             event_name,
             playback_session_id=session_id,
             event_source="server",
@@ -139,6 +147,7 @@ def _observe_browser_event(
             payload=payload or {},
         )
     except Exception:  # noqa: BLE001 - diagnostics cannot alter playback routes.
+        record_runtime_health("browser_playback", "event_capture_failed")
         return
 
 
@@ -432,12 +441,12 @@ def stop_browser_playback_session(
             priority="critical",
             payload={"state": "stopped"},
         )
-        try:
-            diagnostics = getattr(request.app.state, "playback_diagnostics_service", None)
-            if diagnostics is not None:
-                diagnostics.finalize_session_async(session_id)
-        except Exception:  # noqa: BLE001 - diagnostics cannot alter stop behavior.
-            pass
+        _observe_browser_event(
+            "diagnostics_session_finalize_requested",
+            session_id=session_id,
+            priority="critical",
+            payload={"reason": "playback_stopped"},
+        )
     return MobilePlaybackStopResponse(
         stopped=stopped,
         message="Browser playback session released" if stopped else "No active browser playback session to release",

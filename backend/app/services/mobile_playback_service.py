@@ -216,6 +216,7 @@ from .playback_diagnostics.manager_observer import (
     observe_atc_controller_evaluation,
     observe_route2_manager_event,
 )
+from .playback_diagnostics.runtime import record_runtime_health
 
 
 logger = logging.getLogger(__name__)
@@ -1698,14 +1699,9 @@ class MobilePlaybackManager:
 
         with self._lock:
             session = self._get_owned_session_locked(session_id, user_id)
-            source_size_bytes: int | None = None
-            if session.source_kind == "local":
-                try:
-                    source_size_bytes = Path(session.source_locator).stat().st_size
-                except OSError:
-                    source_size_bytes = None
             browser = session.browser_playback
-            return {
+            source_locator = session.source_locator if session.source_kind == "local" else None
+            context: dict[str, object] = {
                 "playback_session_id": session.session_id,
                 "media_item_id": session.media_item_id,
                 "source_original_filename": (
@@ -1714,7 +1710,7 @@ class MobilePlaybackManager:
                 ),
                 "source_fingerprint": session.source_fingerprint,
                 "source_kind": session.source_kind,
-                "source_size_bytes": source_size_bytes,
+                "source_size_bytes": None,
                 "duration_ms": int(max(0.0, session.duration_seconds) * 1_000),
                 "container": session.source_container,
                 "video_codec": session.source_video_codec,
@@ -1737,6 +1733,12 @@ class MobilePlaybackManager:
                 "attachment_revision": browser.attach_revision,
                 "state": session.state,
             }
+        if source_locator:
+            try:
+                context["source_size_bytes"] = Path(source_locator).stat().st_size
+            except OSError:
+                pass
+        return context
 
     def resolve_diagnostic_session_for_epoch(self, epoch_id: str) -> str | None:
         """Resolve an epoch for HTTP correlation without mutating playback state."""
@@ -4671,6 +4673,7 @@ class MobilePlaybackManager:
         try:
             item = get_media_item_record(self.settings, item_id=record.media_item_id)
         except Exception:  # noqa: BLE001 - diagnostic-only helper must not break status.
+            record_runtime_health("mobile_playback", "source_size_lookup_failed")
             item = None
         if item is not None:
             try:

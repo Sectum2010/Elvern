@@ -12,7 +12,11 @@ from ..services.playback_diagnostics.schema import (
     PlaybackDiagnosticsClockResponse,
     PlaybackDiagnosticsCloseRequest,
     PlaybackDiagnosticsCloseResponse,
+    PlaybackDiagnosticsGapRequest,
+    PlaybackDiagnosticsGapResponse,
 )
+from ..services.playback_diagnostics.capacity import DiagnosticsCapacityError
+from ..services.playback_diagnostics.errors import PlaybackDiagnosticsError
 from ..services.playback_diagnostics.service import (
     PlaybackDiagnosticsOwnershipError,
     PlaybackDiagnosticsUnavailableError,
@@ -27,24 +31,54 @@ def _service(request: Request):
 
 
 def _raise_diagnostics_error(exc: Exception) -> None:
+    if isinstance(exc, PlaybackDiagnosticsError):
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.response_detail(),
+        ) from exc
+    if isinstance(exc, DiagnosticsCapacityError):
+        raise HTTPException(
+            status_code=507,
+            detail={
+                "code": "diagnostics_capacity_reached",
+                "message": "Playback diagnostics storage capacity was reached.",
+                "retryable": False,
+            },
+        ) from exc
     if isinstance(exc, PlaybackDiagnosticsOwnershipError | PermissionError | KeyError):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Playback diagnostics session not found",
+            detail={
+                "code": "diagnostics_not_found",
+                "message": "Playback diagnostics session or source was not found.",
+                "retryable": False,
+            },
         ) from exc
     if isinstance(exc, PlaybackDiagnosticsUnavailableError):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Playback diagnostics are unavailable",
+            detail={
+                "code": "diagnostics_unavailable",
+                "message": "Playback diagnostics are unavailable.",
+                "retryable": True,
+            },
         ) from exc
     if isinstance(exc, ValueError):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "diagnostics_conflict",
+                "message": "Playback diagnostics state conflicts with this request.",
+                "retryable": False,
+            },
         ) from exc
     raise HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Playback diagnostics are unavailable",
+        detail={
+            "code": "diagnostics_worker_unavailable",
+            "message": "Playback diagnostics worker is temporarily unavailable.",
+            "retryable": True,
+        },
     ) from exc
 
 
@@ -77,6 +111,19 @@ def ingest_playback_diagnostics(
             events=payload.events,
             user_id=int(user.id),
         )
+    except Exception as exc:  # noqa: BLE001
+        _raise_diagnostics_error(exc)
+
+
+@router.post("/gap", response_model=PlaybackDiagnosticsGapResponse)
+def declare_playback_diagnostics_gap(
+    payload: PlaybackDiagnosticsGapRequest,
+    request: Request,
+    user=CurrentUser,
+) -> PlaybackDiagnosticsGapResponse:
+    try:
+        watermark = _service(request).declare_client_gap(payload, user_id=int(user.id))
+        return PlaybackDiagnosticsGapResponse(accepted=True, ack_watermark=watermark)
     except Exception as exc:  # noqa: BLE001
         _raise_diagnostics_error(exc)
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import secrets
 import threading
 from collections import OrderedDict
 from dataclasses import asdict, is_dataclass
@@ -9,7 +7,8 @@ from typing import Any
 
 from ..mobile_playback_models import SEGMENT_DURATION_SECONDS
 from .ffmpeg_observer import route2_frontier_ms
-from .runtime import observe_runtime_event
+from .ingress import next_diagnostic_correlation_id
+from .runtime import observe_runtime_event, record_runtime_health
 
 
 _DETAIL_KEYS = {
@@ -43,23 +42,31 @@ def bind_atc_decision(
 ) -> None:
     if not playback_session_id or not epoch_id or not decision_id:
         return
-    with _decision_lock:
+    if not _decision_lock.acquire(blocking=False):
+        return
+    try:
         key = (playback_session_id, epoch_id)
         _decisions_by_epoch[key] = decision_id
         _decisions_by_epoch.move_to_end(key)
         while len(_decisions_by_epoch) > _MAX_DECISION_LINKS:
             _decisions_by_epoch.popitem(last=False)
+    finally:
+        _decision_lock.release()
 
 
 def _linked_atc_decision(playback_session_id: str, epoch_id: str | None) -> str | None:
     if not epoch_id:
         return None
-    with _decision_lock:
+    if not _decision_lock.acquire(blocking=False):
+        return None
+    try:
         key = (playback_session_id, epoch_id)
         decision_id = _decisions_by_epoch.get(key)
         if decision_id is not None:
             _decisions_by_epoch.move_to_end(key)
         return decision_id
+    finally:
+        _decision_lock.release()
 
 
 def forget_manager_session(playback_session_id: str) -> None:
@@ -115,11 +122,13 @@ def observe_route2_manager_event(
                 value = _safe_scalar(details[key])
                 if value is not None:
                     payload[key] = value
-        error_text = details.get("error") or details.get("stderr_tail")
-        if error_text:
-            payload["error_detail_hash"] = hashlib.sha256(
-                str(error_text).encode("utf-8", errors="replace")
-            ).hexdigest()
+        error_value = details.get("error") or details.get("stderr_tail")
+        if error_value:
+            payload["error_class"] = (
+                error_value.__class__.__name__
+                if not isinstance(error_value, str)
+                else "reported_error"
+            )
         decision_id = None
         if source == "atc":
             decision_id = str(details.get("diagnostic_decision_id") or "") or _linked_atc_decision(
@@ -139,6 +148,7 @@ def observe_route2_manager_event(
             payload=payload,
         )
     except Exception:  # noqa: BLE001 - diagnostics cannot alter Route2.
+        record_runtime_health("manager_observer", "route2_event_capture_failed")
         return
 
 
@@ -151,7 +161,7 @@ def observe_atc_evaluation(
     adaptive_decision: Any,
 ) -> str | None:
     try:
-        decision_id = f"decision_{secrets.token_urlsafe(18)}"
+        decision_id = next_diagnostic_correlation_id("decision")
         raw_input = asdict(adaptive_input) if is_dataclass(adaptive_input) else {}
         input_snapshot = {
             key: raw_input.get(key)
@@ -205,6 +215,7 @@ def observe_atc_evaluation(
         )
         return decision_id
     except Exception:  # noqa: BLE001 - classification result is untouched.
+        record_runtime_health("manager_observer", "atc_evaluation_capture_failed")
         return None
 
 
@@ -225,7 +236,7 @@ def observe_atc_controller_evaluation(
     """Record one evaluation at an existing controller boundary."""
 
     try:
-        decision_id = f"decision_{secrets.token_urlsafe(18)}"
+        decision_id = next_diagnostic_correlation_id("decision")
         common = {
             "playback_session_id": playback_session_id,
             "event_source": "atc",
@@ -262,6 +273,7 @@ def observe_atc_controller_evaluation(
         bind_atc_decision(playback_session_id, epoch_id, decision_id)
         return decision_id
     except Exception:  # noqa: BLE001 - diagnostics cannot alter the controller.
+        record_runtime_health("manager_observer", "atc_controller_capture_failed")
         return None
 
 
@@ -294,4 +306,5 @@ def observe_atc_action(
             },
         )
     except Exception:  # noqa: BLE001 - diagnostics cannot alter the controller.
+        record_runtime_health("manager_observer", "atc_action_capture_failed")
         return

@@ -94,8 +94,8 @@ async def lifespan(app: FastAPI):
     app.state.admin_event_hub = admin_event_hub
     app.state.poster_derivative_manager.start()
     app.state.transcode_manager.start()
-    app.state.playback_diagnostics_service.start()
     set_active_diagnostics_service(app.state.playback_diagnostics_service)
+    app.state.playback_diagnostics_service.start_async()
     app.state.mobile_playback_manager.start()
     app.state.admin_event_hub.start()
     app.state.login_ip_rate_limiter, app.state.login_username_rate_limiter = build_login_rate_limiters(settings)

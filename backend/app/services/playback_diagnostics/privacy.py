@@ -58,6 +58,9 @@ EVENT_ENVELOPE_FIELDS = frozenset(
         "clock_offset_ns",
         "clock_uncertainty_ns",
         "network_rtt_ns",
+        "clock_generation",
+        "clock_valid",
+        "clock_invalid_reason",
         "playhead_ms",
         "media_element_time_ms",
         "duration_ms",
@@ -100,7 +103,8 @@ SAFE_PAYLOAD_KEYS = frozenset(
         "client_queue_bytes", "client_queue_depth", "client_received", "client_throughput_bps",
         "clock_algorithm", "clock_drift_ns", "clock_step_detected", "codec", "color_primaries",
         "color_space", "color_transfer", "command_fingerprint", "committed_playhead_ms",
-        "compression_ms", "confidence", "connection_path", "container", "content_range_end",
+        "calibrated", "compression_ms", "confidence", "confidence_basis",
+        "confidence_kind", "connection_path", "container", "content_range_end",
         "content_range_start", "contiguous_buffered_ahead_ms", "corrupted_frames",
         "cpu_percent", "cpu_seconds", "cpu_seconds_per_media_second", "created_at_utc",
         "current_source_hash", "current_time_ms", "decision_action", "decoded_body_bytes",
@@ -129,7 +133,8 @@ SAFE_PAYLOAD_KEYS = frozenset(
         "orientation", "out_of_order_count", "out_time_ms", "output_bitrate_bps", "output_bytes",
         "page_state", "path_class", "pause_duration_ms", "paused", "peer_pseudonym",
         "pixel_format", "playback_rate", "playhead_advancement_rate", "policy_version",
-        "predicted_duration_ms", "predicted_ready_time_ns", "prediction_id", "prediction_kind",
+        "predicted_duration_ms", "predicted_ready_monotonic_ns", "predicted_ready_time_ns",
+        "prediction_id", "prediction_kind", "estimated_ready_wall_time_ns",
         "presented_frames", "presentation_time_ms", "priority", "process_state", "profile",
         "progress", "provider_request_id", "provider_throughput_bps", "publish_latency_ms",
         "queue_depth", "queue_wait_ms", "range_end", "range_start", "rate_bps", "ready_state",
@@ -163,7 +168,8 @@ SAFE_PAYLOAD_KEYS = frozenset(
         "host", "client", "server", "provider", "atc", "recorder", "ranges", "start_ms", "end_ms",
         "size_bytes", "count", "type", "state", "revision", "selected", "current", "previous",
         "requested", "applied", "blocked", "failed", "success", "complete", "final",
-        "absolute_error_ms", "relative_error", "signed_bias_ms", "missing_signals",
+        "absolute_error_ms", "relative_error", "replacement_prediction_id",
+        "replacement_reason", "signed_bias_ms", "missing_signals",
         "bottleneck_class", "pid", "assigned_threads", "ahead_runway_seconds",
         "cpu_cores_used", "client_goodput_bytes_per_second", "server_goodput_bytes_per_second",
         "starvation_risk", "stalled_recovery_needed", "playback_mode", "session_state",
@@ -306,9 +312,26 @@ def normalized_route_identity(value: object) -> tuple[str, str]:
     raw = str(value or "")
     split = urlsplit(raw)
     path = split.path if split.scheme or split.netloc else raw.split("?", 1)[0].split("#", 1)[0]
-    route = re.sub(r"/[0-9a-fA-F]{24,64}(?=/|$)", "/:id", path)
-    route = re.sub(r"/segments/\d+\.(?:m4s|mp4)(?=/|$)", "/segments/:segment", route)
-    normalized = route[:512]
+    api_index = path.find("/api/browser-playback")
+    route = path[api_index:] if api_index >= 0 else ""
+    templates = (
+        (r"^/api/browser-playback/sessions$", "/api/browser-playback/sessions"),
+        (r"^/api/browser-playback/active$", "/api/browser-playback/active"),
+        (r"^/api/browser-playback/items/[^/]+/active$", "/api/browser-playback/items/:item_id/active"),
+        (r"^/api/browser-playback/sessions/[^/]+$", "/api/browser-playback/sessions/:session_id"),
+        (r"^/api/browser-playback/sessions/[^/]+/(?:seek|audio|heartbeat|stop)$", "/api/browser-playback/sessions/:session_id/:action"),
+        (r"^/api/browser-playback/sessions/[^/]+/audio/(?:commit|cancel)$", "/api/browser-playback/sessions/:session_id/audio/:action"),
+        (r"^/api/browser-playback/sessions/[^/]+/subtitles/[^/]+/prepare$", "/api/browser-playback/sessions/:session_id/subtitles/:stream_index/prepare"),
+        (r"^/api/browser-playback/sessions/[^/]+/subtitles/[^/]+\.vtt$", "/api/browser-playback/sessions/:session_id/subtitles/:stream_index.vtt"),
+        (r"^/api/browser-playback/sessions/[^/]+/(?:index\.m3u8|init\.mp4)$", "/api/browser-playback/sessions/:session_id/:asset"),
+        (r"^/api/browser-playback/sessions/[^/]+/segments/[^/]+\.(?:m4s|mp4)$", "/api/browser-playback/sessions/:session_id/segments/:segment"),
+        (r"^/api/browser-playback/epochs/[^/]+/(?:index\.m3u8|init\.mp4)$", "/api/browser-playback/epochs/:epoch_id/:asset"),
+        (r"^/api/browser-playback/epochs/[^/]+/segments/[^/]+\.(?:m4s|mp4)$", "/api/browser-playback/epochs/:epoch_id/segments/:segment"),
+    )
+    normalized = next(
+        (template for pattern, template in templates if re.fullmatch(pattern, route)),
+        "/api/browser-playback/:unrecognized",
+    )
     return normalized, hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
@@ -413,6 +436,17 @@ def sanitize_payload(payload: object, *, depth: int = 0) -> dict[str, Any]:
             sanitized[key] = items
         else:
             sanitized[key] = _sanitize_scalar(key, value)
+    return sanitized
+
+
+def validate_canonical_payload(payload: object) -> dict[str, Any]:
+    """Require a decoded payload to already match the persisted safe schema."""
+
+    sanitized = sanitize_payload(payload)
+    if sanitized != payload:
+        raise DiagnosticsPrivacyError(
+            "Persisted diagnostics payload is not canonical"
+        )
     return sanitized
 
 

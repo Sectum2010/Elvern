@@ -24,14 +24,22 @@ persisted.
 Nanosecond values are decimal strings because JavaScript `Number` cannot safely
 represent nanosecond integers. A missing field is `null`/absent, not zero.
 
-`event_sequence` is monotonic within the client recorder. `source_sequence` is
-allocated atomically with the browser IndexedDB insert and is monotonic within
-one registered source. A capacity-rejected insert does not consume a sequence.
+`event_sequence` is monotonic within the client recorder. For browser sources,
+`source_sequence` is allocated atomically with the IndexedDB insert. For
+server, provider, FFmpeg, ATC, host, and recorder-internal sources it is
+allocated only by the diagnostics writer under the serialized catalog mutation
+boundary. A capture rejected before allocation consumes no sequence. Once a
+sequence is allocated, it is either durably persisted or covered by an explicit
+durable gap declaration.
+
 The server-created `source_id` binds a journal to one playback session, source
 type, and (for browser sources) stable `client_instance_id`. `event_id` and
 `(source_id, source_sequence)` are both unique catalog keys. Duplicate and
 out-of-order events are counted, and a contiguous durable ACK advances only
-after journal fsync and catalog commit.
+after journal fsync, catalog event commit, and durable gap accounting. A batch
+is never silently partially filtered: an invalid client event is returned with
+its exact index, ID, sequence, and stable reason so that the client can isolate
+that one event and declare the corresponding gap.
 
 ## Version registry
 
@@ -43,7 +51,9 @@ after journal fsync and catalog commit.
 | Session metadata | `playback-diagnostics-session-v2` | validated before catalog registration or derived output |
 | Summary | `playback-diagnostics-summary-v2` | derived from sealed raw evidence |
 | Completeness | `playback-diagnostics-completeness-v2` | reports lifecycle/source/drop/capability evidence separately |
+| Seal capsule | `playback-diagnostics-seal-v1` | immutable critical evidence and derived-artifact status |
 | Manifest | `playback-diagnostics-session-manifest-v2` | generated last from visible files and journal verification reports |
+| Capacity ledger | `playback-diagnostics-capacity-ledger-v1` | trusted only after a verified clean shutdown |
 
 New records are never silently written under a legacy version.
 
@@ -60,7 +70,9 @@ Durable states are `provisional`, `registering`, `active`,
 - `closing`: a final source sequence is declared, but final source barriers or
   backend observation/writer drains may still be pending.
 - `sealed`: all accepted source barriers are durable, derived files and the
-  final manifest are complete, and all later appends are rejected.
+  critical seal/manifest are durable, and all later appends are rejected.
+  Optional derived files may be complete, deferred for capacity, or failed as
+  recorded by the immutable seal.
 - `corrupt`: strict recovery found a defect that must not be truncated or
   reinterpreted automatically.
 
@@ -174,6 +186,23 @@ sensitive value allowed. Normalized routes have their own strict
 Authorization, arbitrary header/body, media bytes, subtitle content, full user
 agent, and full FFmpeg command values are prohibited.
 
+## Typed diagnostics HTTP errors
+
+Diagnostics errors use a closed JSON `detail` with stable `code`, safe
+`message`, and `retryable`. `413` declares request-size handling and whether a
+batch may be split. `422` identifies exactly one rejected event by index,
+event ID, source sequence, and bounded reason. `401`/`403` pause authenticated
+recovery; `429` is bounded rate/concurrency pressure; `507` is local capacity
+pressure; `404`, `409 closing/corrupt`, and `410 sealed` retain distinct source
+lifecycle meaning. Raw exception strings, paths, secrets, and storage internals
+are not returned.
+
+Gap declarations are first-class durable catalog rows with source, inclusive
+start/end sequence, bounded reason code, declaration origin, timestamp, and
+optional rejected-event identity hash. Gaps advance contiguous source coverage
+without pretending the missing event exists, and remain visible in source,
+completeness, and seal evidence.
+
 ## Clock fields and uncertainty
 
 Client/server clock exchange uses five samples at session bootstrap. The
@@ -187,18 +216,28 @@ is a correlation estimate, not a claim of nanosecond cross-device accuracy.
 
 ## Direct-open derived schema
 
-Each durably sealed session produces:
+Every durably sealed session produces the critical capsule:
 
 - `session.json`: pseudonymous identity, exact basename, media/build/platform
   metadata and capabilities.
+- `seal.json`: canonical source/gap watermarks, journal verification, frozen
+  host-evidence cutoff/digest, close reason, and derived-artifact status.
+- `manifest.json`: generated and directory-fsynced last, with SHA-256 and size
+  of every visible critical/derived file plus journal verification reports.
+
+When normal capacity and artifact generation permit, the session also produces:
+
 - `summary.json`: identity, movie complexity, QoE, client/server distributions,
   and diagnostics quality.
 - `summary.md`: human-readable local summary.
 - `timeline.csv`: aligned semantic/aggregate timeline.
 - `completeness.json`: source, sequence, drop, clock, capability, and writer
   quality evidence.
-- `manifest.json`: generated last, with SHA-256 and size of every other visible
-  direct-open file plus journal verification reports.
+
+Derived output never consumes the emergency seal reserve. If it cannot be
+created, the seal states `derived_artifacts_deferred_capacity` or
+`derived_artifacts_failed`; the raw journals and critical capsule remain the
+authoritative immutable evidence.
 
 Manifest verification re-hashes every declared visible file and compares raw
 journals with the catalog. An `interrupted_recoverable` session is not presented

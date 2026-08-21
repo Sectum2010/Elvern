@@ -887,6 +887,8 @@ export function DetailPage() {
     item,
     progress,
     iosMobile,
+    diagnosticsInitiallyEnabled: user?.playback_diagnostics_enabled === true,
+    diagnosticsOwnerUserId: user?.id ?? null,
     onProgressChange: handleProgressChange,
     onProgressDirty: handleProgressDirty,
     onProviderAuthRequired: (requirement, { playbackMode = "lite" } = {}) => {

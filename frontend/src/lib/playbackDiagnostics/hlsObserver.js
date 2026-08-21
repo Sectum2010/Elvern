@@ -1,5 +1,6 @@
 import { diagnosticUrlIdentity } from "./privacy";
-import { createDiagnosticId } from "./schema";
+
+const MAX_LOGICAL_REQUESTS = 512;
 
 function finite(value) {
   const number = Number(value);
@@ -30,6 +31,8 @@ const EVENT_MAP = Object.freeze({
   MANIFEST_PARSED: "hls_manifest_parsed",
   LEVEL_LOADING: "hls_level_loading",
   LEVEL_LOADED: "hls_level_loaded",
+  KEY_LOADING: "hls_key_loading",
+  KEY_LOADED: "hls_key_loaded",
   FRAG_LOADING: "hls_fragment_loading",
   FRAG_LOAD_EMERGENCY_ABORTED: "hls_fragment_emergency_abort",
   FRAG_LOADED: "hls_fragment_loaded",
@@ -56,14 +59,24 @@ export class HlsJsDiagnosticObserver {
     this.manifestRevision = 0;
     this.logicalAttempts = new Map();
     this.fragmentAttempts = new WeakMap();
+    this.requestCounter = 0;
+  }
+
+  requestFamily(eventName, data) {
+    if (eventName.startsWith("hls_manifest")) return "manifest";
+    if (eventName.startsWith("hls_level")) return "level";
+    if (eventName.startsWith("hls_key")) return "key";
+    const fragmentType = String(data?.frag?.type || "").toLowerCase();
+    if (fragmentType.includes("init")) return "init";
+    return "fragment";
   }
 
   logicalIdentity(eventName, data) {
     const fragment = data?.frag || {};
-    const url = fragment.url || fragment.relurl || data?.url || "";
+    const url = fragment.url || fragment.relurl || data?.url || data?.details?.url || "";
     const route = url ? diagnosticUrlIdentity(url).normalized_route : "";
     return [
-      eventName.startsWith("hls_manifest") ? "manifest" : (fragment.type || "fragment"),
+      this.requestFamily(eventName, data),
       this.manifestRevision,
       fragment.level ?? data?.level ?? "",
       fragment.sn ?? "",
@@ -74,23 +87,28 @@ export class HlsJsDiagnosticObserver {
 
   attemptFor(eventName, data) {
     const fragment = data?.frag;
-    const loading = eventName === "hls_fragment_loading" || eventName === "hls_level_loading";
+    const loading = eventName.endsWith("_loading");
     if (fragment && !loading && this.fragmentAttempts.has(fragment)) {
       return this.fragmentAttempts.get(fragment);
     }
     const logical = this.logicalIdentity(eventName, data);
-    let attempt = this.logicalAttempts.get(logical) || 0;
-    if (loading || attempt === 0) {
-      attempt += 1;
-      this.logicalAttempts.set(logical, attempt);
+    let state = this.logicalAttempts.get(logical);
+    if (loading || !state) {
+      const attempt = Number(state?.attempt || 0) + 1;
+      this.requestCounter += 1;
+      state = {
+        attempt,
+        identity: {
+          request_attempt_id: `hlsreq_${this.manifestRevision}_${this.requestCounter}`,
+          request_attempt: attempt,
+          logical_request_identity: logical,
+        },
+      };
+      this.logicalAttempts.set(logical, state);
     }
-    const identity = {
-      request_attempt_id: createDiagnosticId("hlsreq"),
-      request_attempt: attempt,
-      logical_request_identity: logical,
-    };
+    const identity = state.identity;
     if (fragment) this.fragmentAttempts.set(fragment, identity);
-    if (this.logicalAttempts.size > 2_048) {
+    if (this.logicalAttempts.size > MAX_LOGICAL_REQUESTS) {
       const oldest = this.logicalAttempts.keys().next().value;
       this.logicalAttempts.delete(oldest);
     }

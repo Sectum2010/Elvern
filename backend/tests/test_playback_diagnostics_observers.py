@@ -4,6 +4,9 @@ import inspect
 import json
 from types import SimpleNamespace
 
+from starlette.requests import Request
+
+from backend.app.routes import browser_playback
 from backend.app.services import google_drive_service
 from backend.app.services.mobile_playback_service import MobilePlaybackManager
 from backend.app.services.playback_diagnostics import (
@@ -26,6 +29,9 @@ from backend.app.services.playback_diagnostics.host_sampler import (
 )
 from backend.app.services.playback_diagnostics.catalog import DiagnosticsCatalog
 from backend.app.services.playback_diagnostics.fileio import ensure_private_directory
+from backend.app.services.playback_diagnostics.event_normalization import (
+    normalize_deferred_observation,
+)
 
 
 def test_provider_observer_measures_existing_request_without_url_or_headers(monkeypatch):
@@ -66,6 +72,13 @@ def test_route2_frontier_uses_the_authoritative_segment_duration():
 
 
 def test_provider_observer_failure_preserves_existing_stream_bytes(monkeypatch):
+    health = []
+    monkeypatch.setattr(
+        google_drive_service,
+        "record_runtime_health",
+        lambda component, reason: health.append((component, reason)),
+    )
+
     class ExplodingObserver:
         def chunk(self, _size):
             raise RuntimeError("synthetic diagnostics failure")
@@ -103,6 +116,11 @@ def test_provider_observer_failure_preserves_existing_stream_bytes(monkeypatch):
         playback_session_id="session-synthetic-00000001",
         range_header="bytes=0-9",
     ) is None
+    assert health[-1] == ("provider_integration", "observer_construction_failed")
+    assert len(health[:-1]) >= 3
+    assert set(health[:-1]) == {
+        ("provider_integration", "observer_callback_failed"),
+    }
 
 
 def test_provider_active_read_time_is_separate_from_downstream_backpressure(monkeypatch):
@@ -161,7 +179,103 @@ def test_ffmpeg_fingerprint_redacts_paths_urls_and_secret_option_values():
     assert len(first) == 64
 
 
+def test_ffmpeg_process_hook_defers_fingerprinting_and_exposes_no_command_secret(
+    monkeypatch,
+):
+    events = []
+    monkeypatch.setattr(
+        ffmpeg_observer,
+        "observe_runtime_event",
+        lambda name, **kwargs: events.append((name, kwargs)),
+    )
+    ffmpeg_observer.observe_ffmpeg_process_spawned(
+        playback_session_id="session-synthetic-00000001",
+        command=[
+            "/usr/bin/ffmpeg",
+            "-headers",
+            "Authorization: Bearer synthetic-secret",
+            "-i",
+            "https://provider.invalid/file?token=one",
+            "/private/output/segment.m4s",
+        ],
+        pid=123,
+        worker_id="worker-1",
+        epoch_id="epoch-1",
+        selected_threads=4,
+    )
+
+    captured = events[0][1]
+    serialized = repr(captured)
+    assert "synthetic-secret" not in serialized
+    assert "provider.invalid" not in serialized
+    assert "/private/output" not in serialized
+    assert "command_fingerprint" not in captured["payload"]
+    normalized = normalize_deferred_observation(
+        {"payload": captured["payload"]}
+    )
+    assert len(normalized["payload"]["command_fingerprint"]) == 64
+    assert "diagnostics_command_shape" not in normalized["payload"]
+
+
+def test_playback_observers_use_monotonic_ids_and_defer_crypto_from_hot_hooks():
+    for module in (
+        provider_observer,
+        manager_observer,
+        ffmpeg_observer,
+    ):
+        source = inspect.getsource(module)
+        assert "secrets." not in source
+        assert "hashlib." not in source
+    spawn_source = inspect.getsource(ffmpeg_observer.observe_ffmpeg_process_spawned)
+    assert "ffmpeg_command_fingerprint(" not in spawn_source
+
+
+def test_browser_playback_diagnostics_hook_failures_never_escape_routes(monkeypatch):
+    health = []
+    monkeypatch.setattr(
+        browser_playback,
+        "record_runtime_health",
+        lambda component, reason: health.append((component, reason)),
+    )
+    monkeypatch.setattr(
+        browser_playback,
+        "try_capture_diagnostic_observation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("synthetic")),
+    )
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/api/browser-playback/sessions",
+        "headers": [(b"user-agent", b"synthetic-browser")],
+        "client": ("127.0.0.1", 1234),
+        "server": ("127.0.0.1", 8000),
+        "scheme": "http",
+    })
+
+    browser_playback._observe_browser_session_created(
+        request,
+        object(),
+        session_id="session-synthetic-00000001",
+        user_id=1,
+    )
+    browser_playback._observe_browser_event(
+        "diagnostics_session_finalize_requested",
+        session_id="session-synthetic-00000001",
+        priority="critical",
+    )
+    assert health == [
+        ("browser_playback", "session_registration_capture_failed"),
+        ("browser_playback", "event_capture_failed"),
+    ]
+
+
 def test_ffmpeg_observer_failure_never_escapes_process_hook(monkeypatch):
+    health = []
+    monkeypatch.setattr(
+        ffmpeg_observer,
+        "record_runtime_health",
+        lambda component, reason: health.append((component, reason)),
+    )
     monkeypatch.setattr(
         ffmpeg_observer,
         "observe_runtime_event",
@@ -175,6 +289,7 @@ def test_ffmpeg_observer_failure_never_escapes_process_hook(monkeypatch):
         epoch_id="epoch-1",
         selected_threads=4,
     )
+    assert health == [("ffmpeg_observer", "process_spawn_capture_failed")]
 
 
 def test_linux_host_parsers_preserve_counters_and_intervals():
@@ -214,6 +329,24 @@ def test_runtime_observer_is_noop_without_service():
         playback_session_id="session-synthetic-00000001",
         payload={"state": "safe"},
     )
+
+
+def test_native_stream_correlation_skips_a_contended_diagnostics_lock(monkeypatch):
+    class _ContendedLock:
+        @staticmethod
+        def acquire(*, blocking):
+            assert blocking is False
+            return False
+
+        @staticmethod
+        def release():
+            raise AssertionError("A lock that was not acquired must not be released")
+
+    monkeypatch.setattr(runtime, "_lock", _ContendedLock())
+
+    runtime.register_native_stream_context("native-session", "playback-session")
+
+    assert runtime.resolve_native_stream_context("native-session") is None
 
 
 def test_atc_evaluation_and_action_share_one_decision_without_changing_values(monkeypatch):

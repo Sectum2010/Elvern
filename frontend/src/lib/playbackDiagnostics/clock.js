@@ -72,6 +72,9 @@ export function estimateClockOffset(samples, { timerResolutionUs = 0, previous =
     client_anchor_wall_ms: anchor.clientSendWallMs,
     client_anchor_monotonic_us: anchor.clientSendMonotonicUs,
     observed_drift_ppm: driftPpm,
+    clock_generation: Math.max(0, Number(previous?.clock_generation) || 0) + 1,
+    clock_valid: true,
+    clock_invalid_reason: null,
     sample_count: normalized.length,
     algorithm_version: "monotonic-rtt-median-offset-v2",
   };
@@ -82,6 +85,7 @@ export async function synchronizeDiagnosticClock(exchange, {
   timerResolutionUs = 0,
   previous = null,
   wallStepThresholdMs = 1_000,
+  maxAbsoluteDriftPpm = 10_000,
 } = {}) {
   const samples = [];
   for (let index = 0; index < sampleCount; index += 1) {
@@ -107,8 +111,21 @@ export async function synchronizeDiagnosticClock(exchange, {
     });
   }
   const estimate = estimateClockOffset(samples, { timerResolutionUs, previous });
+  const clockStepDetected = samples.some((sample) => sample.wallStepDetected);
+  const implausibleDrift = estimate.observed_drift_ppm != null
+    && Math.abs(estimate.observed_drift_ppm) > maxAbsoluteDriftPpm;
+  if (clockStepDetected || implausibleDrift) {
+    return {
+      ...estimate,
+      aligned_wall_time_ns: null,
+      clock_offset_ns: null,
+      clock_valid: false,
+      clock_invalid_reason: clockStepDetected ? "wall_clock_step" : "implausible_drift",
+      clock_step_detected: clockStepDetected,
+    };
+  }
   return {
     ...estimate,
-    clock_step_detected: samples.some((sample) => sample.wallStepDetected),
+    clock_step_detected: false,
   };
 }

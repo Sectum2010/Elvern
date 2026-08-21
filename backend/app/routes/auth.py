@@ -66,7 +66,12 @@ from ..schemas import (
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-def _auth_envelope(user: AuthenticatedUser, *, totp_setup_required: bool = False) -> AuthUserEnvelope:
+def _auth_envelope(
+    user: AuthenticatedUser,
+    settings,
+    *,
+    totp_setup_required: bool = False,
+) -> AuthUserEnvelope:
     return AuthUserEnvelope(
         session="ok",
         totp_setup_required=totp_setup_required,
@@ -78,6 +83,7 @@ def _auth_envelope(user: AuthenticatedUser, *, totp_setup_required: bool = False
             "assistant_beta_enabled": user.assistant_beta_enabled,
             "age_credential": user.age_credential,
             "session_id": user.session_id,
+            "playback_diagnostics_enabled": bool(settings.playback_diagnostics_enabled),
         },
     )
 
@@ -459,6 +465,7 @@ def login(payload: AuthLoginRequest, request: Request, response: Response) -> Au
             assistant_beta_enabled=user.assistant_beta_enabled,
             session_id=None,
         ),
+        settings,
         totp_setup_required=setup_required,
     )
 
@@ -577,7 +584,7 @@ def login_totp(payload: TotpLoginRequest, request: Request, response: Response) 
         user_agent=user_agent,
         details={"totp": "recovery" if recovery_used else "totp"},
     )
-    return _auth_envelope(user, totp_setup_required=False)
+    return _auth_envelope(user, settings, totp_setup_required=False)
 
 
 @router.post("/totp/setup", response_model=TotpSetupStartResponse)
@@ -844,7 +851,8 @@ def signup(payload: AuthSignupRequest, request: Request, response: Response) -> 
             enabled=user.enabled,
             assistant_beta_enabled=user.assistant_beta_enabled,
             session_id=None,
-        )
+        ),
+        settings,
     )
 
 
@@ -886,6 +894,7 @@ def me(request: Request, user: AuthenticatedUser = CurrentUser) -> AuthUserEnvel
     request.app.state.scan_service.maybe_refresh_local_library(trigger="session")
     return _auth_envelope(
         user,
+        request.app.state.settings,
         totp_setup_required=is_totp_setup_required(request.app.state.settings, user_id=user.id),
     )
 

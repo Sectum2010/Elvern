@@ -8,7 +8,11 @@ function defaultTimestamp(value) {
 }
 
 export class DiagnosticRingBuffer {
-  constructor(maxEntries, { windowMs = null, timestamp = defaultTimestamp } = {}) {
+  constructor(maxEntries, {
+    windowMs = null,
+    timestamp = defaultTimestamp,
+    maxCursors = 4,
+  } = {}) {
     this.maxEntries = Math.max(1, Number(maxEntries) || 1);
     this.windowMs = Number.isFinite(Number(windowMs)) && Number(windowMs) > 0
       ? Number(windowMs)
@@ -18,7 +22,9 @@ export class DiagnosticRingBuffer {
     this.firstSequence = 1;
     this.nextSequence = 1;
     this.latestTimestampMs = null;
+    this.coverageStartTimestampMs = null;
     this.cursors = new Set();
+    this.maxCursors = Math.max(1, Number(maxCursors) || 1);
   }
 
   push(value) {
@@ -32,7 +38,10 @@ export class DiagnosticRingBuffer {
     this.buffer[slot] = { sequence, value };
     this.nextSequence += 1;
     this.firstSequence = Math.max(this.firstSequence, this.nextSequence - this.maxEntries);
-    if (timestampMs != null) this.latestTimestampMs = timestampMs;
+    if (timestampMs != null) {
+      if (this.coverageStartTimestampMs == null) this.coverageStartTimestampMs = timestampMs;
+      this.latestTimestampMs = timestampMs;
+    }
     this.evictExpired(timestampMs);
   }
 
@@ -43,6 +52,11 @@ export class DiagnosticRingBuffer {
       const oldestRecord = this.recordAt(this.firstSequence);
       const oldestTimestamp = this.timestamp(oldestRecord?.value);
       if (oldestTimestamp == null || oldestTimestamp >= cutoff) break;
+      if (oldestRecord) {
+        this.cursors.forEach((cursor) => cursor.preserve(oldestRecord));
+        const slot = (oldestRecord.sequence - 1) % this.maxEntries;
+        if (this.buffer[slot]?.sequence === oldestRecord.sequence) this.buffer[slot] = undefined;
+      }
       this.firstSequence += 1;
     }
   }
@@ -62,6 +76,9 @@ export class DiagnosticRingBuffer {
   }
 
   createSnapshotCursor() {
+    if (this.cursors.size >= this.maxCursors) {
+      this.cursors.values().next().value?.cancel();
+    }
     const cursor = new DiagnosticRingCursor(
       this,
       this.firstSequence,
@@ -80,6 +97,7 @@ export class DiagnosticRingBuffer {
     this.firstSequence = 1;
     this.nextSequence = 1;
     this.latestTimestampMs = null;
+    this.coverageStartTimestampMs = null;
     this.cursors.forEach((cursor) => cursor.cancel());
     this.cursors.clear();
   }
@@ -91,10 +109,9 @@ export class DiagnosticRingBuffer {
   get complete() {
     if (!this.length) return false;
     if (this.windowMs == null) return this.length >= this.maxEntries;
-    const oldestTimestamp = this.timestamp(this.recordAt(this.firstSequence)?.value);
-    return oldestTimestamp != null
+    return this.coverageStartTimestampMs != null
       && this.latestTimestampMs != null
-      && this.latestTimestampMs - oldestTimestamp >= this.windowMs;
+      && this.latestTimestampMs - this.coverageStartTimestampMs >= this.windowMs;
   }
 }
 
@@ -122,16 +139,27 @@ class DiagnosticRingCursor {
     const result = [];
     const limit = Math.max(1, Number(maxEntries) || 1);
     while (this.currentSequence <= this.lastSequence && result.length < limit) {
-      const sequence = this.currentSequence;
-      const value = this.preserved.has(sequence)
-        ? this.preserved.get(sequence)
-        : this.ring.recordAt(sequence)?.value;
-      this.preserved.delete(sequence);
-      this.currentSequence += 1;
+      const value = this.peek();
+      this.commit();
       if (value !== undefined) result.push(value);
     }
     if (this.done) this.release();
     return result;
+  }
+
+  peek() {
+    if (this.done) return undefined;
+    return this.preserved.has(this.currentSequence)
+      ? this.preserved.get(this.currentSequence)
+      : this.ring?.recordAt(this.currentSequence)?.value;
+  }
+
+  commit() {
+    if (this.done) return false;
+    this.preserved.delete(this.currentSequence);
+    this.currentSequence += 1;
+    if (this.done) this.release();
+    return true;
   }
 
   release() {

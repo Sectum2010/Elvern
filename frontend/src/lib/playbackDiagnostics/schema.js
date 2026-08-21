@@ -79,6 +79,11 @@ export function createPlaybackDiagnosticEvent({
     network_rtt_ns: clock.network_rtt_ns != null
       ? decimalNanoseconds(clock.network_rtt_ns)
       : null,
+    clock_generation: Number.isInteger(Number(clock.clock_generation))
+      ? Number(clock.clock_generation)
+      : null,
+    clock_valid: typeof clock.clock_valid === "boolean" ? clock.clock_valid : null,
+    clock_invalid_reason: clock.clock_invalid_reason || null,
     playhead_ms: context.playhead_ms ?? null,
     media_element_time_ms: context.media_element_time_ms ?? null,
     duration_ms: context.duration_ms ?? null,

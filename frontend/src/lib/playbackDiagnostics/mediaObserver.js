@@ -9,9 +9,13 @@ import {
   PLAYBACK_DIAGNOSTICS_INCIDENT_SAMPLE_CHUNK,
   PLAYBACK_DIAGNOSTICS_INCIDENT_TASK_BUDGET_MS,
   PLAYBACK_DIAGNOSTICS_MEDIA_EVENTS,
+  PLAYBACK_DIAGNOSTICS_MAX_POST_WINDOWS,
+  PLAYBACK_DIAGNOSTICS_MAX_SNAPSHOT_JOBS,
+  PLAYBACK_DIAGNOSTICS_RVFC_DETAIL_SAMPLE_MS,
   PLAYBACK_DIAGNOSTICS_STALL_CONFIRM_MS,
 } from "./constants";
 import { diagnosticUrlIdentity } from "./privacy";
+import { overheadModeRank } from "./overheadMonitor";
 import { DiagnosticRingBuffer } from "./ringBuffer";
 import { createDiagnosticId } from "./schema";
 
@@ -29,7 +33,10 @@ const PICTURE_IN_PICTURE_EVENTS = Object.freeze({
   enterpictureinpicture: "picture_in_picture_entered",
   leavepictureinpicture: "picture_in_picture_exited",
 });
-const FRAME_RING_MAX_ENTRIES = PLAYBACK_DIAGNOSTICS_INCIDENT_PRE_SECONDS * 240;
+const FRAME_RING_MAX_ENTRIES = Math.ceil(
+  PLAYBACK_DIAGNOSTICS_INCIDENT_PRE_SECONDS * 1_000
+  / PLAYBACK_DIAGNOSTICS_RVFC_DETAIL_SAMPLE_MS,
+) + 8;
 const SAMPLE_RING_MAX_ENTRIES = Math.ceil(
   PLAYBACK_DIAGNOSTICS_INCIDENT_PRE_SECONDS * 1_000
   / PLAYBACK_DIAGNOSTICS_CLIENT_SAMPLE_MS,
@@ -194,7 +201,7 @@ export class MediaElementDiagnosticObserver {
       timestamp: (sample) => finite(sample?.callback_monotonic_ms),
     });
     this.aggregateSamples = [];
-    this.frameAggregateSamples = [];
+    this.frameAccumulator = this.emptyFrameAccumulator();
     this.previousSample = null;
     this.previousFrameQuality = null;
     this.sampleTimer = null;
@@ -210,6 +217,18 @@ export class MediaElementDiagnosticObserver {
     this.frameCallbackSupported = typeof video?.requestVideoFrameCallback === "function";
     this.hasStartedPlayback = false;
     this.handlers = new Map();
+    this.diagnosticsMode = "normal";
+    this.sampleInvocation = 0;
+    this.aggregateInvocation = 0;
+  }
+
+  emptyFrameAccumulator() {
+    return {
+      count: 0,
+      cadence_total_ms: 0,
+      cadence_count: 0,
+      latest: null,
+    };
   }
 
   start() {
@@ -235,15 +254,32 @@ export class MediaElementDiagnosticObserver {
     this.sample();
   }
 
+  setDiagnosticsMode(mode) {
+    if (overheadModeRank(mode) > overheadModeRank(this.diagnosticsMode)) {
+      this.diagnosticsMode = mode;
+    }
+  }
+
   stop() {
     this.handlers.forEach((handler, eventName) => this.video.removeEventListener(eventName, handler));
     this.handlers.clear();
     if (this.sampleTimer != null) this.windowRef.clearInterval(this.sampleTimer);
     if (this.aggregateTimer != null) this.windowRef.clearInterval(this.aggregateTimer);
     if (this.stallTimer != null) this.windowRef.clearTimeout(this.stallTimer);
-    this.postIncidentTimers.forEach((timer) => this.windowRef.clearTimeout(timer));
+    this.postIncidentTimers.forEach((entry, incidentId) => {
+      this.windowRef.clearTimeout(entry.timer);
+      this.record("incident_snapshot_truncated", {
+        incidentId,
+        priority: "high",
+        severity: "warning",
+        payload: {
+          reason: "observer_stopped",
+          actual_duration_ms: Math.max(0, monotonicNow(this.windowRef) - entry.startedAt),
+        },
+      });
+    });
     this.postIncidentTimers.clear();
-    this.snapshotJobs.forEach((job) => job.cancel());
+    this.snapshotJobs.forEach((job) => job.cancel("observer_stopped"));
     this.snapshotJobs.clear();
     if (this.frameRequest != null && typeof this.video.cancelVideoFrameCallback === "function") {
       this.video.cancelVideoFrameCallback(this.frameRequest);
@@ -256,6 +292,14 @@ export class MediaElementDiagnosticObserver {
   }
 
   sample() {
+    const modeRank = overheadModeRank(this.diagnosticsMode);
+    if (modeRank >= overheadModeRank("critical_only") && !this.activeCandidate) return;
+    this.sampleInvocation += 1;
+    if (
+      modeRank >= overheadModeRank("reduced_sampling")
+      && !this.activeCandidate
+      && this.sampleInvocation % 4 !== 0
+    ) return;
     const snapshot = readMediaDiagnosticSnapshot(
       this.video,
       this.previousSample,
@@ -268,6 +312,17 @@ export class MediaElementDiagnosticObserver {
   }
 
   flushAggregate() {
+    const modeRank = overheadModeRank(this.diagnosticsMode);
+    if (modeRank >= overheadModeRank("critical_only")) {
+      this.aggregateSamples.length = 0;
+      this.frameAccumulator = this.emptyFrameAccumulator();
+      return;
+    }
+    this.aggregateInvocation += 1;
+    if (
+      modeRank >= overheadModeRank("reduced_aggregates")
+      && this.aggregateInvocation % 4 !== 0
+    ) return;
     if (this.aggregateSamples.length) {
       const samples = this.aggregateSamples.splice(0);
       const aggregate = aggregateSamples(samples);
@@ -453,11 +508,11 @@ export class MediaElementDiagnosticObserver {
     if (!candidate) return;
     const progressed = snapshot.current_time_ms - candidate.start_playhead_ms >= 100;
     const intentionallyStopped = snapshot.paused || snapshot.seeking || reason === "ended";
-    if (!progressed && !intentionallyStopped && reason !== "playing") return;
-    this.finishCandidate(reason, snapshot);
+    if (!progressed && !intentionallyStopped) return;
+    this.finishCandidate(reason, snapshot, { progressed });
   }
 
-  finishCandidate(reason, snapshot) {
+  finishCandidate(reason, snapshot, { progressed = false } = {}) {
     const incident = this.activeCandidate;
     if (!incident) return;
     if (this.stallTimer != null) this.windowRef.clearTimeout(this.stallTimer);
@@ -472,16 +527,22 @@ export class MediaElementDiagnosticObserver {
       });
       return;
     }
-    this.record("playhead_progress_resumed", {
-      incidentId: incident.incident_id,
-      priority: "high",
-      payload: { actual_duration_ms: durationMs, stall_reason: incident.reason },
-    });
+    if (progressed) {
+      this.record("playhead_progress_resumed", {
+        incidentId: incident.incident_id,
+        priority: "high",
+        payload: { actual_duration_ms: durationMs, stall_reason: incident.reason },
+      });
+    }
     this.record("stall_ended", {
       incidentId: incident.incident_id,
       priority: "critical",
-      payload: { stall_duration_ms: durationMs, reason },
+      payload: {
+        stall_duration_ms: durationMs,
+        reason: progressed ? "measured_playhead_progress" : `without_progress_${reason}`,
+      },
     });
+    if (!progressed) return;
     const endedAt = monotonicNow(this.windowRef);
     this.lastConfirmedIncident = { incident_id: incident.incident_id, ended_at_ms: endedAt };
     const timer = this.windowRef.setTimeout(() => {
@@ -491,11 +552,24 @@ export class MediaElementDiagnosticObserver {
         payload: { actual_duration_ms: PLAYBACK_DIAGNOSTICS_INCIDENT_POST_SECONDS * 1_000 },
       });
     }, PLAYBACK_DIAGNOSTICS_INCIDENT_POST_SECONDS * 1_000);
-    this.postIncidentTimers.set(incident.incident_id, timer);
-    if (this.postIncidentTimers.size > 4) {
+    this.postIncidentTimers.set(incident.incident_id, { timer, startedAt: endedAt });
+    if (this.postIncidentTimers.size > PLAYBACK_DIAGNOSTICS_MAX_POST_WINDOWS) {
       const oldestId = this.postIncidentTimers.keys().next().value;
-      this.windowRef.clearTimeout(this.postIncidentTimers.get(oldestId));
+      const oldest = this.postIncidentTimers.get(oldestId);
+      this.windowRef.clearTimeout(oldest?.timer);
       this.postIncidentTimers.delete(oldestId);
+      this.record("incident_snapshot_truncated", {
+        incidentId: oldestId,
+        priority: "high",
+        severity: "warning",
+        payload: {
+          reason: "post_window_capacity",
+          actual_duration_ms: Math.max(
+            0,
+            monotonicNow(this.windowRef) - (oldest?.startedAt || 0),
+          ),
+        },
+      });
     }
     void snapshot;
   }
@@ -533,6 +607,11 @@ export class MediaElementDiagnosticObserver {
     complete,
     transform,
   }) {
+    if (this.snapshotJobs.size >= PLAYBACK_DIAGNOSTICS_MAX_SNAPSHOT_JOBS) {
+      const oldestJob = this.snapshotJobs.values().next().value;
+      oldestJob?.cancel("snapshot_job_capacity");
+      this.snapshotJobs.delete(oldestJob);
+    }
     const cursor = ring.createSnapshotCursor();
     let handle = null;
     let chunkIndex = 0;
@@ -544,10 +623,18 @@ export class MediaElementDiagnosticObserver {
       handle = null;
     };
     const job = {
-      cancel: () => {
+      incidentId,
+      cancel: (reason = "snapshot_cancelled") => {
+        if (cancelled) return;
         cancelled = true;
         cancelSchedule();
         cursor.cancel();
+        this.record("incident_snapshot_truncated", {
+          incidentId,
+          priority: "high",
+          severity: "warning",
+          payload: { reason, events_dropped: 1 },
+        });
       },
     };
     const schedule = () => {
@@ -564,18 +651,43 @@ export class MediaElementDiagnosticObserver {
       const startedAt = monotonicNow(this.windowRef);
       const values = [];
       let bytes = 0;
+      let oversizedCandidates = 0;
       while (!cursor.done && values.length < chunkEntries) {
-        const candidate = cursor.read(1).map(transform)[0];
-        if (candidate === undefined) continue;
+        const rawCandidate = cursor.peek();
+        if (rawCandidate === undefined) {
+          cursor.commit();
+          continue;
+        }
+        const candidate = transform(rawCandidate);
         const candidateBytes = encodedBytes(candidate);
+        if (!values.length && candidateBytes > PLAYBACK_DIAGNOSTICS_INCIDENT_CHUNK_TARGET_BYTES) {
+          cursor.commit();
+          oversizedCandidates += 1;
+          if (monotonicNow(this.windowRef) - startedAt >= PLAYBACK_DIAGNOSTICS_INCIDENT_TASK_BUDGET_MS) {
+            break;
+          }
+          continue;
+        }
         if (values.length && bytes + candidateBytes > PLAYBACK_DIAGNOSTICS_INCIDENT_CHUNK_TARGET_BYTES) {
           break;
         }
+        cursor.commit();
         values.push(candidate);
         bytes += candidateBytes;
         if (monotonicNow(this.windowRef) - startedAt >= PLAYBACK_DIAGNOSTICS_INCIDENT_TASK_BUDGET_MS) {
           break;
         }
+      }
+      if (oversizedCandidates) {
+        this.record("incident_snapshot_truncated", {
+          incidentId,
+          priority: "high",
+          severity: "warning",
+          payload: {
+            reason: "snapshot_candidate_oversized",
+            events_dropped: oversizedCandidates,
+          },
+        });
       }
       if (values.length) {
         chunkIndex += 1;
@@ -604,24 +716,44 @@ export class MediaElementDiagnosticObserver {
   startFrameLoop() {
     if (!this.frameCallbackSupported) return;
     let previous = null;
+    let lastDetailedSampleAt = -Infinity;
     const callback = (now, metadata) => {
-      const sample = {
-        callback_monotonic_ms: finite(now),
-        presentation_time_ms: finite(metadata?.presentationTime),
-        expected_display_time_ms: finite(metadata?.expectedDisplayTime),
-        media_element_time_ms: finite(metadata?.mediaTime) != null ? metadata.mediaTime * 1_000 : null,
-        presented_frames: finite(metadata?.presentedFrames),
-        decoder_delay_ms: finite(metadata?.processingDuration) != null
-          ? metadata.processingDuration * 1_000
-          : null,
-        callback_lateness_ms: finite(metadata?.expectedDisplayTime) != null
-          ? Math.max(0, now - metadata.expectedDisplayTime)
-          : null,
-        frame_cadence_ms: previous != null ? Math.max(0, now - previous) : null,
-      };
+      const cadenceMs = previous != null ? Math.max(0, now - previous) : null;
       previous = now;
-      this.frameRing.push(sample);
-      this.frameAggregateSamples.push(sample);
+      this.frameAccumulator.count += 1;
+      if (cadenceMs != null) {
+        this.frameAccumulator.cadence_total_ms += cadenceMs;
+        this.frameAccumulator.cadence_count += 1;
+      }
+      const modeRank = overheadModeRank(this.diagnosticsMode);
+      const detailInterval = modeRank >= overheadModeRank("reduced_sampling")
+        ? PLAYBACK_DIAGNOSTICS_RVFC_DETAIL_SAMPLE_MS * 4
+        : PLAYBACK_DIAGNOSTICS_RVFC_DETAIL_SAMPLE_MS;
+      const shouldCaptureDetail = !this.firstFrameSeen
+        || (
+          modeRank < overheadModeRank("critical_only")
+          && now - lastDetailedSampleAt >= detailInterval
+        );
+      let sample = null;
+      if (shouldCaptureDetail) {
+        lastDetailedSampleAt = now;
+        sample = {
+          callback_monotonic_ms: finite(now),
+          presentation_time_ms: finite(metadata?.presentationTime),
+          expected_display_time_ms: finite(metadata?.expectedDisplayTime),
+          media_element_time_ms: finite(metadata?.mediaTime) != null ? metadata.mediaTime * 1_000 : null,
+          presented_frames: finite(metadata?.presentedFrames),
+          decoder_delay_ms: finite(metadata?.processingDuration) != null
+            ? metadata.processingDuration * 1_000
+            : null,
+          callback_lateness_ms: finite(metadata?.expectedDisplayTime) != null
+            ? Math.max(0, now - metadata.expectedDisplayTime)
+            : null,
+          frame_cadence_ms: cadenceMs,
+        };
+        this.frameAccumulator.latest = sample;
+        this.frameRing.push(sample);
+      }
       if (!this.firstFrameSeen) {
         this.firstFrameSeen = true;
         this.record("first_video_frame_presented", {
@@ -637,15 +769,13 @@ export class MediaElementDiagnosticObserver {
   }
 
   flushFrameAggregate() {
-    const frames = this.frameAggregateSamples.splice(0);
-    if (!frames.length) return;
+    const accumulator = this.frameAccumulator;
+    this.frameAccumulator = this.emptyFrameAccumulator();
+    if (!accumulator.count) return;
     const quality = typeof this.video.getVideoPlaybackQuality === "function"
       ? this.video.getVideoPlaybackQuality()
       : null;
-    const latest = frames.at(-1);
-    const cadence = frames
-      .map((frame) => finite(frame.frame_cadence_ms))
-      .filter((value) => value != null);
+    const latest = accumulator.latest || {};
     const cumulativeDropped = finite(quality?.droppedVideoFrames);
     const cumulativeTotal = finite(quality?.totalVideoFrames);
     const previous = this.previousFrameQuality;
@@ -664,9 +794,9 @@ export class MediaElementDiagnosticObserver {
     this.record("frame_aggregate", {
       payload: {
         ...latest,
-        sample_count: frames.length,
-        frame_cadence_ms: cadence.length
-          ? cadence.reduce((sum, value) => sum + value, 0) / cadence.length
+        sample_count: accumulator.count,
+        frame_cadence_ms: accumulator.cadence_count
+          ? accumulator.cadence_total_ms / accumulator.cadence_count
           : null,
         cumulative_total_frames: cumulativeTotal,
         cumulative_dropped_frames: cumulativeDropped,

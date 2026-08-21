@@ -19,6 +19,7 @@ import {
   writePendingLogoutMarker,
 } from "../lib/pendingLogout.js";
 import { LogoutPendingView } from "../components/LogoutPendingView.jsx";
+import { wakePlaybackDiagnosticsRecovery } from "../lib/playbackDiagnostics/workerClient.js";
 
 
 const AuthContext = createContext(null);
@@ -67,6 +68,9 @@ export function AuthProvider({ children }) {
     }
     userRef.current = nextUser;
     setUser(nextUser);
+    if (nextUser?.playback_diagnostics_enabled === true) {
+      wakePlaybackDiagnosticsRecovery(nextUser.id, { authenticationRestored: true });
+    }
   }, []);
 
   const endSessionWithNotice = useCallback((message) => {

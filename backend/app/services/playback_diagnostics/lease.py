@@ -7,7 +7,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .fileio import FILE_MODE, assert_regular_nonsymlink, ensure_private_directory, resolve_beneath
+from .fileio import (
+    FILE_MODE,
+    UnsafeDiagnosticsPathError,
+    assert_regular_nonsymlink,
+    ensure_private_directory,
+    open_private_descriptor,
+    private_file_stat,
+    resolve_beneath,
+)
 
 try:
     import fcntl
@@ -42,11 +50,11 @@ class DiagnosticsRootLease:
         if fcntl is None:
             raise DiagnosticsLeaseError("Playback diagnostics require kernel file locking")
         ensure_private_directory(self.root)
-        assert_regular_nonsymlink(self.path)
-        descriptor = os.open(
+        assert_regular_nonsymlink(self.path, trusted_root=self.root)
+        descriptor = open_private_descriptor(
             self.path,
-            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
-            FILE_MODE,
+            os.O_RDWR | os.O_CREAT,
+            trusted_root=self.root,
         )
         os.fchmod(descriptor, FILE_MODE)
         handle = os.fdopen(descriptor, "r+b", buffering=0)
@@ -99,31 +107,48 @@ def read_lease_status(root: Path) -> dict[str, Any]:
 
     root = Path(root)
     path = root / LEASE_FILENAME
-    if not path.exists() or path.is_symlink() or not path.is_file():
+    try:
+        metadata_file = private_file_stat(
+            path,
+            trusted_root=root,
+            missing_ok=True,
+        )
+    except (OSError, UnsafeDiagnosticsPathError):
+        return {"held": None, "metadata": None}
+    if metadata_file is None:
         return {"held": False, "metadata": None}
     metadata: dict[str, Any] | None = None
     try:
-        with path.open("rb") as handle:
-            raw = handle.read(8_193)
-        if len(raw) > 8_192:
-            raise ValueError("Diagnostics lease metadata is unexpectedly large")
-        parsed = json.loads(raw.decode("utf-8"))
-        if isinstance(parsed, dict):
-            metadata = {
-                key: parsed.get(key)
-                for key in ("schema_version", "pid", "mode", "acquired_at_unix_ns", "elvern_commit")
-                if key in parsed
-            }
-    except (OSError, UnicodeDecodeError, ValueError):
-        metadata = None
-    if fcntl is None:
-        return {"held": None, "metadata": metadata}
-    try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError:
+        descriptor = open_private_descriptor(
+            path,
+            os.O_RDONLY,
+            trusted_root=root,
+        )
+    except (OSError, UnsafeDiagnosticsPathError):
         return {"held": None, "metadata": metadata}
     handle = os.fdopen(descriptor, "rb", buffering=0)
     try:
+        try:
+            raw = handle.read(8_193)
+            if len(raw) > 8_192:
+                raise ValueError("Diagnostics lease metadata is unexpectedly large")
+            parsed = json.loads(raw.decode("utf-8"))
+            if isinstance(parsed, dict):
+                metadata = {
+                    key: parsed.get(key)
+                    for key in (
+                        "schema_version",
+                        "pid",
+                        "mode",
+                        "acquired_at_unix_ns",
+                        "elvern_commit",
+                    )
+                    if key in parsed
+                }
+        except (OSError, UnicodeDecodeError, ValueError):
+            metadata = None
+        if fcntl is None:
+            return {"held": None, "metadata": metadata}
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:

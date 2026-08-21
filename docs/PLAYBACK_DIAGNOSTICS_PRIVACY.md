@@ -6,6 +6,12 @@ Playback diagnostics are local research records. They are not general activity
 logs and are not exported to an external service. The recorder observes only
 playback-related behavior and operational measurements.
 
+The browser exposes no diagnostics viewer, setting, route, DOM surface, or
+data-reading API. Authenticated diagnostics HTTP endpoints accept bootstrap,
+clock, bounded event/gap ingestion, and close control only. Local inspection,
+verification, export, reconciliation, and deletion remain explicit operator CLI
+actions on the Elvern host.
+
 ## Approved identity fields
 
 - Random pseudonymous subject, client, session, attempt, attachment, epoch,
@@ -67,6 +73,14 @@ Unknown payload keys are discarded. Non-finite numeric values become `null`.
 Nested values have depth and collection limits. Each persisted event is bounded
 to 64,000 encoded bytes.
 
+Host payloads are decrypted only into the same canonical closed payload shape;
+unknown keys, non-finite values, malformed nesting, and non-canonical sensitive
+content fail verification instead of being silently accepted. At seal time the
+catalog atomically freezes the session's host-link cutoff and records the link
+count, time bounds, and digest. Verification rejects duplicate, malformed, or
+post-cutoff links and compares the exact canonical host evidence against the
+seal capsule.
+
 Normalized routes are accepted only under `/api/browser-playback/` and may not
 contain `..`, query strings, fragments, or full URLs. This distinguishes an API
 route identity from an absolute filesystem path.
@@ -121,6 +135,12 @@ The CLI never uploads them. Anyone with operating-system access to the
 diagnostics root and key can read local records, so filesystem access remains a
 trusted administrative boundary.
 
+Sealed evidence is immutable: the critical seal contains a canonical evidence
+digest over source/gap watermarks, journal verification, host cutoff, and
+derived-artifact status. Deferred summaries do not weaken or rewrite that raw
+evidence. No TTL, automatic deletion, disk-pressure eviction, or background
+external transfer is permitted.
+
 ## Backup and repository exclusion
 
 The diagnostics root is explicitly absent from ordinary Elvern backup and
@@ -142,5 +162,7 @@ Focused tests prove:
 - terminal/Markdown controls and CSV formula prefixes are rendered safely while
   the structured exact basename remains intact;
 - identity mapping is encrypted and is unlinked on account deletion;
+- host evidence cannot be added beyond the frozen seal cutoff and its canonical
+  digest is verified;
 - ordinary backups and restore exclude diagnostics;
 - Git and Docker ignore rules explicitly cover the root.

@@ -12,7 +12,10 @@ from .cloud_library_service import refresh_cloud_media_item_metadata
 from .library_service import get_media_item_record
 from .mobile_playback_models import MobilePlaybackSession
 from .native_playback_service import close_native_playback_session, create_native_playback_session
-from .playback_diagnostics.runtime import register_native_stream_context
+from .playback_diagnostics.runtime import (
+    record_runtime_health,
+    register_native_stream_context,
+)
 
 
 def _coerce_duration(value: object) -> float | None:
@@ -165,7 +168,7 @@ def _resolve_worker_source_input(
             session.session_id,
         )
     except Exception:  # noqa: BLE001 - diagnostics cannot alter source resolution.
-        pass
+        record_runtime_health("mobile_source", "native_context_registration_failed")
     return _rewrite_stream_url_for_server_localhost(
         settings,
         stream_url=str(session_payload["stream_url"]),

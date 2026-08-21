@@ -60,10 +60,31 @@ export function normalizeDiagnosticRoute(value) {
   } catch {
     pathname = raw.split("?", 1)[0].split("#", 1)[0];
   }
-  return pathname
-    .replace(/\/[0-9a-f]{24,64}(?=\/|$)/gi, "/:id")
-    .replace(/\/segments\/\d+\.(?:m4s|mp4)$/i, "/segments/:segment")
-    .slice(0, 512);
+  const apiIndex = pathname.indexOf("/api/browser-playback");
+  if (apiIndex < 0) return "/api/browser-playback/:unrecognized";
+  const route = pathname.slice(apiIndex);
+  const templates = [
+    [/^\/api\/browser-playback\/sessions$/, "/api/browser-playback/sessions"],
+    [/^\/api\/browser-playback\/active$/, "/api/browser-playback/active"],
+    [/^\/api\/browser-playback\/items\/[^/]+\/active$/, "/api/browser-playback/items/:item_id/active"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+$/, "/api/browser-playback/sessions/:session_id"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+\/seek$/, "/api/browser-playback/sessions/:session_id/seek"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+\/audio$/, "/api/browser-playback/sessions/:session_id/audio"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+\/heartbeat$/, "/api/browser-playback/sessions/:session_id/heartbeat"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+\/stop$/, "/api/browser-playback/sessions/:session_id/stop"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+\/audio\/commit$/, "/api/browser-playback/sessions/:session_id/audio/commit"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+\/audio\/cancel$/, "/api/browser-playback/sessions/:session_id/audio/cancel"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+\/subtitles\/[^/]+\/prepare$/, "/api/browser-playback/sessions/:session_id/subtitles/:stream_index/prepare"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+\/subtitles\/[^/]+\.vtt$/, "/api/browser-playback/sessions/:session_id/subtitles/:stream_index.vtt"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+\/index\.m3u8$/, "/api/browser-playback/sessions/:session_id/index.m3u8"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+\/init\.mp4$/, "/api/browser-playback/sessions/:session_id/init.mp4"],
+    [/^\/api\/browser-playback\/sessions\/[^/]+\/segments\/[^/]+\.(m4s|mp4)$/, "/api/browser-playback/sessions/:session_id/segments/:segment"],
+    [/^\/api\/browser-playback\/epochs\/[^/]+\/index\.m3u8$/, "/api/browser-playback/epochs/:epoch_id/index.m3u8"],
+    [/^\/api\/browser-playback\/epochs\/[^/]+\/init\.mp4$/, "/api/browser-playback/epochs/:epoch_id/init.mp4"],
+    [/^\/api\/browser-playback\/epochs\/[^/]+\/segments\/[^/]+\.(m4s|mp4)$/, "/api/browser-playback/epochs/:epoch_id/segments/:segment"],
+  ];
+  return templates.find(([pattern]) => pattern.test(route))?.[1]
+    || "/api/browser-playback/:unrecognized";
 }
 
 export function diagnosticUrlIdentity(value) {

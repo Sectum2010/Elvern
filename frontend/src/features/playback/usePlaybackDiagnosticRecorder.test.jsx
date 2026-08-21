@@ -40,6 +40,9 @@ function options() {
     hlsEngineDiagnostics: null,
     deviceClass: "desktop",
     videoElementKey: 1,
+    itemId: 42,
+    initialDiagnosticsEnabled: true,
+    ownerUserId: 7,
   };
 }
 

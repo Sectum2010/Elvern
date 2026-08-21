@@ -8,7 +8,7 @@ LEGACY_EVENT_SCHEMA_VERSIONS = frozenset({"playback-diagnostics-event-v1"})
 SUPPORTED_EVENT_SCHEMA_VERSIONS = frozenset({SCHEMA_VERSION, *LEGACY_EVENT_SCHEMA_VERSIONS})
 JOURNAL_SCHEMA_VERSION = "elvern-diagnostics-journal-v2"
 LEGACY_JOURNAL_SCHEMA_VERSION = "elvern-diagnostics-journal-v1"
-CATALOG_SCHEMA_VERSION = "playback-diagnostics-catalog-v2"
+CATALOG_SCHEMA_VERSION = "playback-diagnostics-catalog-v3"
 CLOCK_ALGORITHM_VERSION = "min-rtt-median-offset-v1"
 CLASSIFIER_VERSION = "playback-incident-classifier-v1"
 
@@ -50,6 +50,7 @@ CRITICAL_EVENT_NAMES = frozenset(
 
 SESSION_VISIBLE_FILES = (
     "session.json",
+    "seal.json",
     "summary.md",
     "summary.json",
     "timeline.csv",

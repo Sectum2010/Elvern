@@ -22,7 +22,10 @@ from .cloud_library_service import build_cloud_stream_response, refresh_cloud_me
 from .library_service import get_media_item_record
 from .log_identity_service import local_media_path_log_fingerprint, native_session_log_fingerprint
 from .media_age_access_service import assert_user_can_access_media_by_age
-from .playback_diagnostics.runtime import resolve_native_stream_context
+from .playback_diagnostics.runtime import (
+    record_runtime_health,
+    resolve_native_stream_context,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -777,7 +780,7 @@ def build_native_stream_response(
     try:
         diagnostic_playback_session_id = resolve_native_stream_context(session_id)
     except Exception:  # noqa: BLE001 - diagnostics cannot alter native streaming.
-        pass
+        record_runtime_health("native_stream", "context_resolution_failed")
     target = build_cloud_stream_response(
         settings,
         user_id=int(row["user_id"]),

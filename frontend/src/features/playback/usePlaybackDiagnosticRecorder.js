@@ -13,16 +13,22 @@ export function usePlaybackDiagnosticRecorder({
   hlsEngineDiagnostics,
   deviceClass,
   videoElementKey,
+  itemId,
+  initialDiagnosticsEnabled = false,
+  ownerUserId = null,
 }) {
   const recorderRef = useRef(null);
   const pendingActionsRef = useRef([]);
-  const playbackAttemptIdRef = useRef(createDiagnosticId("attempt"));
+  const playbackAttemptIdRef = useRef(null);
+  const itemIdRef = useRef(itemId);
   const sessionId = mobileSession?.session_id || "";
-  const diagnosticsEnabled = mobileSession?.playback_diagnostics_enabled === true;
+  const diagnosticsAllowed = initialDiagnosticsEnabled === true;
+  const diagnosticsEnabled = diagnosticsAllowed
+    && mobileSession?.playback_diagnostics_enabled === true;
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!diagnosticsEnabled) {
+    if (!diagnosticsAllowed || !diagnosticsEnabled) {
       if (mobileSession?.playback_diagnostics_enabled === false) pendingActionsRef.current = [];
       return undefined;
     }
@@ -38,6 +44,8 @@ export function usePlaybackDiagnosticRecorder({
         playbackAttemptId: playbackAttemptIdRef.current,
         context: {
           device_class: deviceClass || "unknown",
+          owner_user_id: ownerUserId,
+          media_item_id: itemId ?? null,
           hls_engine: hlsEngineDiagnostics?.selectedEngine || mobileSession?.selected_hls_engine || "unknown",
           playback_mode: mobileSession?.playback_mode || "unknown",
           stream_mode: mobileSession?.engine_mode || "unknown",
@@ -56,18 +64,33 @@ export function usePlaybackDiagnosticRecorder({
     recorder.start().catch(() => {});
     return () => {
       try {
-        recorder.stop();
+        recorder.stop("component_unmounted");
       } catch {
         // Diagnostics teardown cannot affect playback component cleanup.
       }
       if (recorderRef.current === recorder) recorderRef.current = null;
     };
-  }, [diagnosticsEnabled, sessionId, videoElementKey]);
+  }, [diagnosticsAllowed, diagnosticsEnabled, ownerUserId, sessionId]);
+
+  useEffect(() => {
+    if (itemIdRef.current !== itemId) {
+      itemIdRef.current = itemId;
+      playbackAttemptIdRef.current = null;
+      pendingActionsRef.current = [];
+    }
+    try {
+      recorderRef.current?.replaceVideo(videoRef.current);
+    } catch {
+      // Diagnostics element replacement cannot affect playback attachment.
+    }
+  }, [itemId, videoElementKey]);
 
   useEffect(() => {
     try {
       recorderRef.current?.updateContext({
         device_class: deviceClass || "unknown",
+        owner_user_id: ownerUserId,
+        media_item_id: itemId ?? null,
         hls_engine: hlsEngineDiagnostics?.selectedEngine || mobileSession?.selected_hls_engine || "unknown",
         playback_mode: mobileSession?.playback_mode || "unknown",
         stream_mode: mobileSession?.engine_mode || "unknown",
@@ -83,6 +106,7 @@ export function usePlaybackDiagnosticRecorder({
     }
   }, [
     deviceClass,
+    itemId,
     hlsEngineDiagnostics?.selectedEngine,
     mobileSession?.active_epoch_id,
     mobileSession?.attach_revision,
@@ -91,6 +115,7 @@ export function usePlaybackDiagnosticRecorder({
     mobileSession?.selected_hls_engine,
     mobileSession?.source_kind,
     streamSource?.url,
+    ownerUserId,
   ]);
 
   useEffect(() => {
@@ -125,8 +150,21 @@ export function usePlaybackDiagnosticRecorder({
     },
     recordDiagnosticAction(eventName, origin, payload) {
       try {
+        if (!diagnosticsAllowed) return;
+        if (itemIdRef.current !== itemId) {
+          itemIdRef.current = itemId;
+          playbackAttemptIdRef.current = null;
+          pendingActionsRef.current = [];
+        }
+        if (eventName === "play_intent") {
+          playbackAttemptIdRef.current = createDiagnosticId("attempt");
+          recorderRef.current?.setPlaybackAttempt(playbackAttemptIdRef.current);
+        }
+        if (!playbackAttemptIdRef.current) return;
         if (recorderRef.current) {
-          recorderRef.current.recordAction(eventName, origin, payload);
+          recorderRef.current.recordAction(eventName, origin, payload, {
+            playbackAttemptId: playbackAttemptIdRef.current,
+          });
         } else if (mobileSession?.playback_diagnostics_enabled !== false) {
           pendingActionsRef.current.push({
             eventName,
@@ -145,6 +183,7 @@ export function usePlaybackDiagnosticRecorder({
     },
     recordDiagnosticEvent(eventName, options) {
       try {
+        if (!diagnosticsAllowed) return;
         recorderRef.current?.record(eventName, options);
       } catch {
         // Diagnostics are never a playback control input.
