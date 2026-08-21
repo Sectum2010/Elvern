@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+from ..mobile_playback_models import SEGMENT_DURATION_SECONDS
 from .runtime import observe_runtime_event
 
 
@@ -17,6 +18,17 @@ _progress_lock = threading.RLock()
 _progress_last_sample: OrderedDict[str, float] = OrderedDict()
 _PROGRESS_SAMPLE_INTERVAL_SECONDS = 1.0
 _PROGRESS_MAX_KEYS = 4_096
+
+
+def route2_frontier_ms(
+    frontier_segment: int | None,
+    *,
+    segment_duration_seconds: float = SEGMENT_DURATION_SECONDS,
+) -> int:
+    if frontier_segment is None:
+        return 0
+    duration = max(0.001, float(segment_duration_seconds))
+    return round(max(0, int(frontier_segment) + 1) * duration * 1_000)
 
 
 def ffmpeg_command_fingerprint(command: list[str] | tuple[str, ...]) -> str:
@@ -170,11 +182,8 @@ def observe_segment_publication(
                 "segment_index": segment_index,
                 "segment_bytes": segment_bytes,
                 "publish_latency_ms": max(0.0, float(publish_latency_seconds) * 1_000),
-                "frontier_ms": (
-                    max(0, int(frontier_segment) + 1) * 4_000
-                    if frontier_segment is not None
-                    else 0
-                ),
+                "frontier_ms": route2_frontier_ms(frontier_segment),
+                "segment_duration_ms": SEGMENT_DURATION_SECONDS * 1_000,
             },
         )
     except Exception:  # noqa: BLE001 - diagnostics cannot alter publication.

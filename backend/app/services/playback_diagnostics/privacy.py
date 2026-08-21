@@ -15,6 +15,7 @@ SECRET_PATTERNS = (
     re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{12,}"),
     re.compile(r"(?i)\b(access|refresh|session|id)[_-]?token\s*[:=]"),
     re.compile(r"(?i)\b(client[_-]?secret|totp|password|recovery[_-]?code)\s*[:=]"),
+    re.compile(r"(?i)\b(resource[_-]?key|signature|sig)\s*[:=]"),
     re.compile(r"(?i)\b(cookie|set-cookie)\s*[:=]"),
     re.compile(r"(?i)[?&](token|key|resourcekey|auth|signature|sig)="),
     re.compile(r"(?i)ya29\.[a-z0-9_-]+"),
@@ -121,7 +122,7 @@ SAFE_PAYLOAD_KEYS = frozenset(
         "last_error_class", "last_observed_ns", "latency_ms", "level", "load_average",
         "loader_stats", "long_animation_frame_ms", "long_task_ms", "longest_gap_ms",
         "manifest_revision", "max_buffer_size_bytes", "max_segment_bytes", "measurement",
-        "media_item_id", "media_start_ms", "media_end_ms", "memory_available_bytes",
+        "media_element_time_ms", "media_item_id", "media_start_ms", "media_end_ms", "memory_available_bytes",
         "memory_current_bytes", "memory_pressure", "memory_rss_bytes", "memory_pss_bytes",
         "minimum_buffer_ms", "missing_capabilities", "missing_evidence", "muted", "native_hls_internal_cache",
         "network_state", "nonce", "normalized_route", "oldest_event_age_ms", "online",
@@ -168,6 +169,21 @@ SAFE_PAYLOAD_KEYS = frozenset(
         "starvation_risk", "stalled_recovery_needed", "playback_mode", "session_state",
         "return_code", "effective_playhead_seconds", "observation_seconds",
         "diagnostics_free_inodes", "transcode_free_inodes",
+        "callback_monotonic_ms", "client_anchor_monotonic_us", "client_anchor_wall_ms",
+        "compute_pressure", "cumulative_dropped_frames", "cumulative_total_frames",
+        "delta_dropped_frames", "delta_total_frames", "device_memory",
+        "frame_counter_reset", "frame_ring_complete", "frame_samples",
+        "freeze_resume_events", "fullscreen", "global_queue_bytes", "hidden_duration_ms",
+        "indexeddb", "initiator_type", "loader_aborted", "logical_request_identity",
+        "long_animation_frame_timing", "long_task_timing", "network_information",
+        "observed_drift_ppm", "offset_spread_ns", "path_hash_sha256",
+        "performance_memory", "performance_observer", "picture_in_picture",
+        "previous_incident_id", "recorder_queue_delay_ms", "recurrence_group_id",
+        "rejected_event_name", "request_attempt", "request_attempt_id",
+        "request_video_frame_callback", "resource_timing", "retry_attempt",
+        "selected_sample_rtt_ns", "server_segment_request_trace", "storage_estimate",
+        "timer_callback_gap_ms", "user_agent_specific_memory", "video_playback_quality",
+        "window_dropped_frame_ratio", "sample_window_ms", "seeking",
     }
 )
 
@@ -232,6 +248,40 @@ def source_fingerprint(value: object) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8", errors="replace")).hexdigest()
 
 
+def safe_human_text(value: object) -> str:
+    """Render private structured text without terminal or line-injection control bytes."""
+
+    rendered: list[str] = []
+    for character in str(value if value is not None else ""):
+        codepoint = ord(character)
+        if character == "\n":
+            rendered.append("\\n")
+        elif character == "\r":
+            rendered.append("\\r")
+        elif character == "\t":
+            rendered.append("\\t")
+        elif codepoint < 32 or codepoint == 127:
+            rendered.append(f"\\u{codepoint:04x}")
+        else:
+            rendered.append(character)
+    return "".join(rendered)
+
+
+def markdown_inline_code(value: object) -> str:
+    text = safe_human_text(value)
+    longest_run = max((len(match.group(0)) for match in re.finditer(r"`+", text)), default=0)
+    delimiter = "`" * (longest_run + 1)
+    padding = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{delimiter}{padding}{text}{padding}{delimiter}"
+
+
+def spreadsheet_safe_cell(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    text = safe_human_text(value)
+    return f"'{text}" if text.startswith(("=", "+", "-", "@")) else text
+
+
 def pseudonymize_ip(value: str | None, key: bytes) -> tuple[str, str | None]:
     candidate = str(value or "").strip()
     if not candidate:
@@ -246,6 +296,8 @@ def pseudonymize_ip(value: str | None, key: bytes) -> tuple[str, str | None]:
         path_class = "lan_or_tailnet"
     else:
         path_class = "public"
+    if not key:
+        return path_class, None
     digest = hmac.new(key, address.packed, hashlib.sha256).hexdigest()
     return path_class, f"ip_{digest}"
 
@@ -256,7 +308,8 @@ def normalized_route_identity(value: object) -> tuple[str, str]:
     path = split.path if split.scheme or split.netloc else raw.split("?", 1)[0].split("#", 1)[0]
     route = re.sub(r"/[0-9a-fA-F]{24,64}(?=/|$)", "/:id", path)
     route = re.sub(r"/segments/\d+\.(?:m4s|mp4)(?=/|$)", "/segments/:segment", route)
-    return route[:512], hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
+    normalized = route[:512]
+    return normalized, hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def normalize_user_agent(value: str | None) -> dict[str, str]:

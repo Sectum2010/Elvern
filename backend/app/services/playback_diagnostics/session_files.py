@@ -14,10 +14,19 @@ from .crypto import DiagnosticsKeyStore
 from .fileio import FILE_MODE, atomic_write_json, ensure_private_directory, resolve_beneath
 from .journal import verify_journal
 from .privacy import basename_sha256, safe_source_basename, source_fingerprint
+from .schema import SessionMetadataV2
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _safe_datetime(value: object) -> datetime:
@@ -89,12 +98,11 @@ def create_session_metadata(
     os_version: str = "",
     hls_engine: str = "unknown",
     capabilities: dict[str, Any] | None = None,
+    write: bool = True,
 ) -> dict[str, Any]:
     session_id = str(context["playback_session_id"])
     created_at = context.get("created_at_utc") or _utc_now()
     relative_path = build_session_relative_path(session_id, created_at)
-    session_path = ensure_private_directory(resolve_beneath(root, relative_path))
-    ensure_private_directory(resolve_beneath(session_path, "raw"))
     basename = safe_source_basename(context.get("source_original_filename") or "unknown-media")
     raw_fingerprint = str(context.get("source_fingerprint") or basename)
     stable_fingerprint = (
@@ -104,7 +112,7 @@ def create_session_metadata(
         else source_fingerprint(raw_fingerprint)
     )
     metadata = {
-        "schema_version": "playback-diagnostics-session-v1",
+        "schema_version": "playback-diagnostics-session-v2",
         "diagnostics_event_schema": SCHEMA_VERSION,
         "playback_session_id": session_id,
         "owner_hash": owner_hash,
@@ -150,13 +158,17 @@ def create_session_metadata(
                 sort_keys=True,
             ).encode("utf-8")
         ).hexdigest(),
-        "state": "active",
+        "state": "registering",
         "created_at_utc": str(created_at),
         "updated_at_utc": _utc_now(),
         "session_relative_path": str(relative_path),
     }
-    atomic_write_json(resolve_beneath(session_path, "session.json"), metadata)
-    return metadata
+    validated = SessionMetadataV2.model_validate(metadata).model_dump(mode="json")
+    if write:
+        session_path = ensure_private_directory(resolve_beneath(root, relative_path))
+        ensure_private_directory(resolve_beneath(session_path, "raw"))
+        atomic_write_json(resolve_beneath(session_path, "session.json"), validated)
+    return validated
 
 
 def read_session_events(
@@ -198,16 +210,28 @@ def read_session_events(
     return events, journal_reports
 
 
-def write_manifest(
+def build_manifest(
     root: Path,
     session_relative_path: str,
     *,
     journal_reports: Iterable[dict[str, Any]],
+    content_overrides: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     session_path = resolve_beneath(root, session_relative_path)
+    overrides = dict(content_overrides or {})
     files: list[dict[str, Any]] = []
     for name in SESSION_VISIBLE_FILES:
         if name == "manifest.json":
+            continue
+        if name in overrides:
+            payload = overrides[name]
+            files.append(
+                {
+                    "relative_path": name,
+                    "size_bytes": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            )
             continue
         path = resolve_beneath(session_path, name)
         if not path.is_file() or path.is_symlink():
@@ -216,15 +240,32 @@ def write_manifest(
             {
                 "relative_path": name,
                 "size_bytes": path.stat().st_size,
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "sha256": _sha256_file(path),
             }
         )
     manifest = {
-        "schema_version": "playback-diagnostics-session-manifest-v1",
+        "schema_version": "playback-diagnostics-session-manifest-v2",
         "generated_at_utc": _utc_now(),
         "files": files,
         "journals": list(journal_reports),
     }
+    return manifest
+
+
+def write_manifest(
+    root: Path,
+    session_relative_path: str,
+    *,
+    journal_reports: Iterable[dict[str, Any]],
+    content_overrides: dict[str, bytes] | None = None,
+) -> dict[str, Any]:
+    manifest = build_manifest(
+        root,
+        session_relative_path,
+        journal_reports=journal_reports,
+        content_overrides=content_overrides,
+    )
+    session_path = resolve_beneath(root, session_relative_path)
     manifest_path = resolve_beneath(session_path, "manifest.json")
     atomic_write_json(manifest_path, manifest)
     os.chmod(manifest_path, FILE_MODE)

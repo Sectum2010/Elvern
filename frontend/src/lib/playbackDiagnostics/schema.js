@@ -39,8 +39,9 @@ export function createPlaybackDiagnosticEvent({
   payload = {},
   clock = {},
   context = {},
+  capturedClock = null,
 }) {
-  const now = captureClientClock();
+  const now = capturedClock || captureClientClock();
   const event = {
     schema_version: PLAYBACK_DIAGNOSTICS_SCHEMA_VERSION,
     event_id: createDiagnosticId("event"),

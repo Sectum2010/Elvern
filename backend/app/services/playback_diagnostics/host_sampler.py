@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import hashlib
+import ipaddress
 import os
 import shutil
 import subprocess
 import threading
 import time
-from collections import deque
+import uuid
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -20,6 +22,75 @@ from .constants import (
     PSS_SAMPLE_INTERVAL_MS,
     TAILSCALE_SAMPLE_INTERVAL_MS,
 )
+from .privacy import pseudonymize_ip
+
+
+MAX_SUBPROCESS_OUTPUT_BYTES = 1_000_000
+MAX_UNSUPPORTED_CAPABILITY_LINKS = 8_192
+MAX_CAPTURED_INCIDENT_LINKS = 4_096
+
+
+def _run_bounded_command(
+    argv: list[str],
+    *,
+    timeout: float,
+    max_output_bytes: int = MAX_SUBPROCESS_OUTPUT_BYTES,
+) -> tuple[bytes, bytes]:
+    """Run an argv command while draining but never retaining unbounded output."""
+
+    process = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+    )
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+    overflow = threading.Event()
+    capture_lock = threading.Lock()
+
+    def drain(name: str, stream) -> None:
+        try:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    break
+                with capture_lock:
+                    retained = sum(len(value) for value in captured.values())
+                    remaining = max(0, max_output_bytes - retained)
+                    captured[name].extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        overflow.set()
+        finally:
+            stream.close()
+
+    readers = [
+        threading.Thread(target=drain, args=(name, stream), daemon=True)
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
+        if stream is not None
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        return_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=1)
+        raise
+    finally:
+        for reader in readers:
+            reader.join(timeout=1)
+    if overflow.is_set():
+        raise subprocess.SubprocessError("diagnostics command output exceeded its bound")
+    stdout = bytes(captured["stdout"])
+    stderr = bytes(captured["stderr"])
+    if return_code != 0:
+        raise subprocess.CalledProcessError(
+            return_code,
+            argv,
+            output=stdout,
+            stderr=stderr,
+        )
+    return stdout, stderr
 
 
 def _read_text(path: Path, *, max_bytes: int = 1_000_000) -> str | None:
@@ -168,14 +239,20 @@ class HostDiagnosticsSampler:
         self,
         *,
         active_session_ids: Callable[[], Iterable[str]],
+        active_session_clients: Callable[[], dict[str, str]] = lambda: {},
         active_processes: Callable[[], Iterable[dict[str, object]]] = lambda: (),
         observe: Callable[..., None],
+        record_host_observation: Callable[..., None] = lambda *_args, **_kwargs: None,
+        identity_key: bytes = b"",
         diagnostics_root: Path,
         transcode_root: Path,
     ) -> None:
         self.active_session_ids = active_session_ids
+        self.active_session_clients = active_session_clients
         self.active_processes = active_processes
         self.observe = observe
+        self.record_host_observation = record_host_observation
+        self.identity_key = bytes(identity_key)
         self.diagnostics_root = diagnostics_root
         self.transcode_root = transcode_root
         self._stop = threading.Event()
@@ -187,9 +264,9 @@ class HostDiagnosticsSampler:
         self._last_pss = 0.0
         self._last_gpu = 0.0
         self._last_tailscale = 0.0
-        self._unsupported_emitted: set[tuple[str, str]] = set()
+        self._unsupported_emitted: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._incident_lock = threading.Lock()
-        self._captured_incidents: set[tuple[str, str]] = set()
+        self._captured_incidents: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._post_incidents: dict[tuple[str, str], float] = {}
         self._process_cpu_samples: dict[int, tuple[float, float]] = {}
         self._clock_ticks = int(os.sysconf("SC_CLK_TCK"))
@@ -215,21 +292,34 @@ class HostDiagnosticsSampler:
         incident_key = (playback_session_id, incident_id)
         with self._incident_lock:
             if incident_key in self._captured_incidents:
+                self._captured_incidents.move_to_end(incident_key)
                 return
-            self._captured_incidents.add(incident_key)
+            self._captured_incidents[incident_key] = None
+            while len(self._captured_incidents) > MAX_CAPTURED_INCIDENT_LINKS:
+                evicted_key, _ = self._captured_incidents.popitem(last=False)
+                self._post_incidents.pop(evicted_key, None)
             self._post_incidents[incident_key] = (
                 time.monotonic() + INCIDENT_POST_WINDOW_SECONDS
             )
         for sample in list(self._ring):
-            self.observe(
-                "host_incident_pre_sample",
-                playback_session_id=playback_session_id,
-                event_source="host",
-                observation_kind="measured_kernel",
-                incident_id=incident_id,
-                priority="high",
-                payload={**sample, "ring_complete": len(self._ring) == self._ring.maxlen},
+            self._persist_sample(
+                "host_incident_sample",
+                sample,
+                ((playback_session_id, incident_id, "pre"),),
+                extra_payload={"ring_complete": len(self._ring) == self._ring.maxlen},
             )
+
+    def forget_session(self, playback_session_id: str) -> None:
+        """Release sampler-only bookkeeping after a session is durably sealed."""
+
+        with self._incident_lock:
+            for key in tuple(self._captured_incidents):
+                if key[0] == playback_session_id:
+                    self._captured_incidents.pop(key, None)
+                    self._post_incidents.pop(key, None)
+        for key in tuple(self._unsupported_emitted):
+            if key[0] == playback_session_id:
+                self._unsupported_emitted.pop(key, None)
 
     def _run(self) -> None:
         interval = HOST_RING_SAMPLE_INTERVAL_MS / 1_000
@@ -239,7 +329,7 @@ class HostDiagnosticsSampler:
                 self._previous_cpu = None
                 continue
             try:
-                sample = self._sample()
+                sample = self._new_sample_record(self._sample())
             except Exception:  # noqa: BLE001 - sampling cannot affect playback.
                 continue
             self._ring.append(sample)
@@ -247,15 +337,11 @@ class HostDiagnosticsSampler:
             self._emit_incident_post_samples(sample, now)
             if now - self._last_aggregate >= HOST_AGGREGATE_INTERVAL_MS / 1_000:
                 self._last_aggregate = now
-                for session_id in session_ids:
-                    self.observe(
-                        "host_aggregate",
-                        playback_session_id=session_id,
-                        event_source="host",
-                        observation_kind="measured_kernel",
-                        sample_window_ms=HOST_AGGREGATE_INTERVAL_MS,
-                        payload=sample,
-                    )
+                self._persist_sample(
+                    "host_aggregate",
+                    sample,
+                    tuple((session_id, None, None) for session_id in session_ids),
+                )
                 self._sample_processes()
             if now - self._last_gpu >= GPU_SAMPLE_INTERVAL_MS / 1_000:
                 self._last_gpu = now
@@ -276,15 +362,39 @@ class HostDiagnosticsSampler:
                 if now <= deadline
             ]
         for (playback_session_id, incident_id), _deadline in active:
-            self.observe(
-                "host_incident_post_sample",
-                playback_session_id=playback_session_id,
-                event_source="host",
-                observation_kind="measured_kernel",
-                incident_id=incident_id,
-                priority="high",
-                payload=sample,
+            self._persist_sample(
+                "host_incident_sample",
+                sample,
+                ((playback_session_id, incident_id, "post"),),
             )
+
+    @staticmethod
+    def _new_sample_record(payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "sample_id": f"host_{uuid.uuid4().hex}",
+            "observed_wall_time_ns": time.time_ns(),
+            "observed_monotonic_time_ns": time.monotonic_ns(),
+            "payload": payload,
+        }
+
+    def _persist_sample(
+        self,
+        event_name: str,
+        sample: dict[str, Any],
+        links: tuple[tuple[str, str | None, str | None], ...],
+        *,
+        extra_payload: dict[str, Any] | None = None,
+    ) -> None:
+        payload = dict(sample.get("payload") or {})
+        payload.update(extra_payload or {})
+        self.record_host_observation(
+            event_name,
+            sample_id=str(sample["sample_id"]),
+            payload=payload,
+            session_links=links,
+            observed_wall_time_ns=int(sample["observed_wall_time_ns"]),
+            observed_monotonic_time_ns=int(sample["observed_monotonic_time_ns"]),
+        )
 
     def _sample(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -431,20 +541,18 @@ class HostDiagnosticsSampler:
             self._emit_unsupported(session_ids, "gpu", "nvidia_smi_unavailable")
             return
         try:
-            completed = subprocess.run(
+            stdout, _stderr = _run_bounded_command(
                 [
                     binary,
                     "--query-gpu=utilization.gpu,utilization.encoder,utilization.decoder,memory.used,temperature.gpu",
                     "--format=csv,noheader,nounits",
                 ],
-                check=True,
-                capture_output=True,
-                text=True,
                 timeout=2,
             )
-            first = completed.stdout.splitlines()[0].split(",")
+            first = stdout.decode("utf-8", errors="strict").splitlines()[0].split(",")
             values = [float(value.strip()) for value in first[:5]]
             payload = {
+                "sample_interval_ms": GPU_SAMPLE_INTERVAL_MS,
                 "gpu_utilization_percent": values[0],
                 "gpu_encoder_percent": values[1],
                 "gpu_decoder_percent": values[2],
@@ -454,15 +562,12 @@ class HostDiagnosticsSampler:
         except (OSError, ValueError, subprocess.SubprocessError):
             self._emit_unsupported(session_ids, "gpu", "nvidia_smi_query_failed")
             return
-        for session_id in session_ids:
-            self.observe(
-                "gpu_aggregate",
-                playback_session_id=session_id,
-                event_source="host",
-                observation_kind="measured_kernel",
-                sample_window_ms=GPU_SAMPLE_INTERVAL_MS,
-                payload=payload,
-            )
+        sample = self._new_sample_record(payload)
+        self._persist_sample(
+            "gpu_aggregate",
+            sample,
+            tuple((session_id, None, None) for session_id in session_ids),
+        )
 
     def _sample_tailscale(self, session_ids: tuple[str, ...]) -> None:
         binary = shutil.which("tailscale")
@@ -470,49 +575,91 @@ class HostDiagnosticsSampler:
             self._emit_unsupported(session_ids, "tailscale", "tailscale_cli_unavailable")
             return
         try:
-            completed = subprocess.run(
+            stdout, _stderr = _run_bounded_command(
                 [binary, "status", "--json"],
-                check=True,
-                capture_output=True,
-                text=True,
                 timeout=2,
             )
-            status = json.loads(completed.stdout)
+            status = json.loads(stdout.decode("utf-8", errors="strict"))
             peers = status.get("Peer") if isinstance(status.get("Peer"), dict) else {}
-            paths = []
-            for peer in peers.values():
-                if not isinstance(peer, dict) or not peer.get("Active"):
-                    continue
-                if peer.get("CurAddr"):
-                    paths.append("direct")
-                elif peer.get("PeerRelay"):
-                    paths.append("peer_relay")
-                elif peer.get("Relay"):
-                    paths.append("derp")
-            payload = {
-                "state": str(status.get("BackendState") or "unknown")[:64],
-                "tailscale_health": len(status.get("Health") or []),
-                "connection_path": paths[0] if paths else "unknown",
-            }
         except (OSError, ValueError, subprocess.SubprocessError):
             self._emit_unsupported(session_ids, "tailscale", "tailscale_status_failed")
             return
+        session_clients = self.active_session_clients()
         for session_id in session_ids:
+            client_address = session_clients.get(session_id)
+            connection_path, peer_pseudonym = self._classify_session_network_path(
+                client_address,
+                peers,
+            )
             self.observe(
                 "tailscale_status",
                 playback_session_id=session_id,
                 event_source="host",
                 observation_kind="measured_kernel",
                 sample_window_ms=TAILSCALE_SAMPLE_INTERVAL_MS,
-                payload=payload,
+                payload={
+                    "state": str(status.get("BackendState") or "unknown")[:64],
+                    "tailscale_health": len(status.get("Health") or []),
+                    "connection_path": connection_path,
+                    "peer_pseudonym": peer_pseudonym,
+                },
             )
+
+    def _classify_session_network_path(
+        self,
+        client_address: str | None,
+        peers: dict[str, Any],
+    ) -> tuple[str, str | None]:
+        if not client_address:
+            return "unknown", None
+        path_class, peer_pseudonym = pseudonymize_ip(client_address, self.identity_key)
+        try:
+            parsed = ipaddress.ip_address(client_address)
+        except ValueError:
+            return "unknown", None
+        if parsed.is_loopback:
+            return "loopback", peer_pseudonym
+        matched_peer = None
+        for peer in peers.values():
+            if not isinstance(peer, dict) or not peer.get("Active"):
+                continue
+            addresses = peer.get("TailscaleIPs")
+            if not isinstance(addresses, list):
+                addresses = peer.get("TailscaleIP")
+                addresses = [addresses] if isinstance(addresses, str) else []
+            if client_address in addresses:
+                matched_peer = peer
+                break
+        if matched_peer is not None:
+            if matched_peer.get("CurAddr"):
+                return "tailnet_direct", peer_pseudonym
+            if matched_peer.get("PeerRelay"):
+                return "peer_relay", peer_pseudonym
+            if matched_peer.get("Relay"):
+                return "derp", peer_pseudonym
+            return "unknown", peer_pseudonym
+        tailnet_address = (
+            parsed in ipaddress.ip_network("100.64.0.0/10")
+            if parsed.version == 4
+            else parsed in ipaddress.ip_network("fd7a:115c:a1e0::/48")
+        )
+        if tailnet_address:
+            return "unknown", peer_pseudonym
+        if parsed.is_private:
+            return "lan_private", peer_pseudonym
+        if path_class == "public":
+            return "public", peer_pseudonym
+        return "unknown", peer_pseudonym
 
     def _emit_unsupported(self, session_ids: tuple[str, ...], capability: str, reason: str) -> None:
         for session_id in session_ids:
             key = (session_id, capability)
             if key in self._unsupported_emitted:
+                self._unsupported_emitted.move_to_end(key)
                 continue
-            self._unsupported_emitted.add(key)
+            self._unsupported_emitted[key] = None
+            while len(self._unsupported_emitted) > MAX_UNSUPPORTED_CAPABILITY_LINKS:
+                self._unsupported_emitted.popitem(last=False)
             self.observe(
                 f"{capability}_capability",
                 playback_session_id=session_id,

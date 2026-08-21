@@ -64,18 +64,22 @@ def atomic_write_bytes(path: Path, payload: bytes) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
         os.chmod(path, FILE_MODE)
+        fsync_directory(path.parent)
     finally:
         temporary_path.unlink(missing_ok=True)
 
 
-def atomic_write_json(path: Path, payload: Any) -> None:
-    encoded = json.dumps(
+def encode_json_document(payload: Any) -> bytes:
+    return json.dumps(
         payload,
         ensure_ascii=False,
         indent=2,
         sort_keys=True,
     ).encode("utf-8") + b"\n"
-    atomic_write_bytes(path, encoded)
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    atomic_write_bytes(path, encode_json_document(payload))
 
 
 def open_private_append(path: Path):
@@ -89,3 +93,11 @@ def open_private_append(path: Path):
     )
     os.fchmod(descriptor, FILE_MODE)
     return os.fdopen(descriptor, "ab", buffering=0)
+
+
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(Path(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

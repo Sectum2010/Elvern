@@ -211,7 +211,9 @@ from .playback_diagnostics.ffmpeg_observer import (
     observe_segment_publication,
 )
 from .playback_diagnostics.manager_observer import (
-    observe_atc_evaluation,
+    bind_atc_decision,
+    observe_atc_action,
+    observe_atc_controller_evaluation,
     observe_route2_manager_event,
 )
 
@@ -10408,14 +10410,6 @@ class MobilePlaybackManager:
                 payload["adaptive_reason"] = adaptive_decision.reason
                 payload["adaptive_missing_metrics"] = adaptive_decision.missing_metrics
                 session = self._sessions.get(record.session_id)
-                if session is not None:
-                    observe_atc_evaluation(
-                        playback_session_id=session.session_id,
-                        epoch_id=record.epoch_id,
-                        worker_id=record.worker_id,
-                        adaptive_input=adaptive_input,
-                        adaptive_decision=adaptive_decision,
-                    )
                 epoch = (
                     session.browser_playback.epochs.get(record.epoch_id)
                     if session is not None and session.browser_playback.engine_mode == "route2"
@@ -12294,13 +12288,59 @@ class MobilePlaybackManager:
         self._apply_route2_reclaim_payload_to_record(record, payload)
         if not bool(payload.get("adaptive_resupply_needed")):
             return None
-        if not bool(getattr(self.settings, "route2_adaptive_resupply_enabled", False)):
-            return None
         blockers = [str(blocker) for blocker in payload.get("adaptive_resupply_blockers") or []]
-        if blockers:
-            return None
         target_threads = payload.get("adaptive_resupply_target_threads")
+        decision_id = observe_atc_controller_evaluation(
+            playback_session_id=session.session_id,
+            epoch_id=active_epoch.epoch_id,
+            worker_id=record.worker_id,
+            current_threads=int(record.assigned_threads or 0),
+            target_threads=target_threads if isinstance(target_threads, int) else None,
+            action="resupply",
+            confidence=None,
+            bottleneck_class=str(payload.get("adaptive_resupply_reason") or "unknown"),
+            reasons=[str(payload.get("adaptive_resupply_reason") or "resupply_needed")],
+            blockers=blockers,
+            input_snapshot={
+                "assigned_threads": int(record.assigned_threads or 0),
+                "state": str(payload.get("adaptive_resupply_state") or "unknown"),
+            },
+        )
+        if not bool(getattr(self.settings, "route2_adaptive_resupply_enabled", False)):
+            observe_atc_action(
+                playback_session_id=session.session_id,
+                epoch_id=active_epoch.epoch_id,
+                worker_id=record.worker_id,
+                decision_id=decision_id,
+                action="resupply",
+                applied=False,
+                reason="adaptive_resupply_disabled",
+                target_threads=target_threads if isinstance(target_threads, int) else None,
+            )
+            return None
+        if blockers:
+            observe_atc_action(
+                playback_session_id=session.session_id,
+                epoch_id=active_epoch.epoch_id,
+                worker_id=record.worker_id,
+                decision_id=decision_id,
+                action="resupply",
+                applied=False,
+                reason="controller_blocked",
+                target_threads=target_threads if isinstance(target_threads, int) else None,
+            )
+            return None
         if not isinstance(target_threads, int) or target_threads <= int(record.assigned_threads or 0):
+            observe_atc_action(
+                playback_session_id=session.session_id,
+                epoch_id=active_epoch.epoch_id,
+                worker_id=record.worker_id,
+                decision_id=decision_id,
+                action="resupply",
+                applied=False,
+                reason="invalid_or_nonincreasing_target",
+                target_threads=target_threads if isinstance(target_threads, int) else None,
+            )
             return None
         replacement_epoch = self._create_route2_resupply_replacement_epoch_locked(
             session,
@@ -12308,6 +12348,7 @@ class MobilePlaybackManager:
             target_threads=target_threads,
         )
         if replacement_epoch is not None:
+            bind_atc_decision(session.session_id, replacement_epoch.epoch_id, decision_id)
             browser_session.adaptive_resupply_state = "boost_replacement_warming"
             self._ensure_route2_epoch_workers_locked(session)
             self._dispatch_waiting_route2_workers_locked()
@@ -12316,6 +12357,16 @@ class MobilePlaybackManager:
                 replacement_record = self._route2_workers.get(replacement_epoch.active_worker_id)
                 if replacement_record is not None:
                     self._sync_route2_worker_record_locked(replacement_record, session, replacement_epoch)
+        observe_atc_action(
+            playback_session_id=session.session_id,
+            epoch_id=active_epoch.epoch_id,
+            worker_id=record.worker_id,
+            decision_id=decision_id,
+            action="resupply",
+            applied=replacement_epoch is not None,
+            reason="replacement_created" if replacement_epoch is not None else "replacement_not_created",
+            target_threads=target_threads,
+        )
         return replacement_epoch
 
     def _maybe_start_route2_downshift_locked(
@@ -12335,10 +12386,48 @@ class MobilePlaybackManager:
         decision = self._evaluate_route2_closed_loop_dry_run_locked(session, active_epoch, record)
         payload = self._route2_adaptive_downshift_payload_locked(session, active_epoch, record, decision)
         self._apply_route2_downshift_payload_to_record(record, payload)
-        if not bool(payload["downshift_safe_to_apply"]):
-            return None
         target_threads = payload["adaptive_downshift_target_threads"]
+        blockers = [str(blocker) for blocker in payload.get("adaptive_downshift_blockers") or []]
+        decision_id = observe_atc_controller_evaluation(
+            playback_session_id=session.session_id,
+            epoch_id=active_epoch.epoch_id,
+            worker_id=record.worker_id,
+            current_threads=int(record.assigned_threads or 0),
+            target_threads=target_threads if isinstance(target_threads, int) else None,
+            action="downshift",
+            confidence=float(decision.confidence),
+            bottleneck_class=str(decision.primary_bottleneck),
+            reasons=[str(reason) for reason in decision.reasons],
+            blockers=blockers,
+            input_snapshot={
+                "assigned_threads": int(record.assigned_threads or 0),
+                "role": str(decision.role),
+                "primary_bottleneck": str(decision.primary_bottleneck),
+            },
+        )
+        if not bool(payload["downshift_safe_to_apply"]):
+            observe_atc_action(
+                playback_session_id=session.session_id,
+                epoch_id=active_epoch.epoch_id,
+                worker_id=record.worker_id,
+                decision_id=decision_id,
+                action="downshift",
+                applied=False,
+                reason="controller_blocked",
+                target_threads=target_threads if isinstance(target_threads, int) else None,
+            )
+            return None
         if not isinstance(target_threads, int) or target_threads <= 0:
+            observe_atc_action(
+                playback_session_id=session.session_id,
+                epoch_id=active_epoch.epoch_id,
+                worker_id=record.worker_id,
+                decision_id=decision_id,
+                action="downshift",
+                applied=False,
+                reason="invalid_target",
+                target_threads=None,
+            )
             return None
         pending_reclaim = (
             self._route2_pending_reclaim_request_locked()
@@ -12418,6 +12507,7 @@ class MobilePlaybackManager:
             reclaim_consumer_reason=reclaim_consumer_reason,
         )
         if replacement_epoch is not None:
+            bind_atc_decision(session.session_id, replacement_epoch.epoch_id, decision_id)
             if pending_reclaim is not None:
                 session.browser_playback.adaptive_reclaim_downshift_replacement_epoch_id = replacement_epoch.epoch_id
                 session.browser_playback.adaptive_reclaim_downshift_replacement_worker_id = replacement_epoch.active_worker_id
@@ -12425,6 +12515,16 @@ class MobilePlaybackManager:
                 self._route2_pending_reclaim_request = None
             payload = self._route2_adaptive_downshift_payload_locked(session, active_epoch, record, decision)
             self._apply_route2_downshift_payload_to_record(record, payload)
+        observe_atc_action(
+            playback_session_id=session.session_id,
+            epoch_id=active_epoch.epoch_id,
+            worker_id=record.worker_id,
+            decision_id=decision_id,
+            action="downshift",
+            applied=replacement_epoch is not None,
+            reason="replacement_created" if replacement_epoch is not None else "replacement_not_created",
+            target_threads=target_threads,
+        )
         return replacement_epoch
 
     def _route2_epoch_needs_worker_locked(

@@ -25,6 +25,11 @@ from .services.desktop_helper_service import import_helper_release_artifacts
 from .services.log_identity_service import local_media_path_log_fingerprint, native_session_log_fingerprint
 from .services.playback_diagnostics import PlaybackDiagnosticsService
 from .services.playback_diagnostics.exports import OptionalParquetDependencyError
+from .services.playback_diagnostics.lease import DiagnosticsLeaseError
+from .services.playback_diagnostics.operator_store import (
+    DiagnosticsOperatorError,
+    PlaybackDiagnosticsReadOnlyStore,
+)
 from .services.status_service import get_system_status
 
 
@@ -192,6 +197,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "reconcile",
         help="Remove catalog rows for session folders deleted manually",
     )
+    diagnostics_finalize_parser = diagnostics_subparsers.add_parser(
+        "finalize",
+        help="Seal one interrupted-recoverable session while Elvern is stopped",
+    )
+    diagnostics_finalize_parser.add_argument("session_id")
 
     disable_totp_parser = subparsers.add_parser(
         "admin-disable-totp",
@@ -412,14 +422,14 @@ def _backup_create_cli_summary(payload: dict[str, object]) -> dict[str, object]:
 
 
 def _run_playback_diagnostics_cli(args, settings) -> int:
-    service = PlaybackDiagnosticsService(settings)
-    service.start()
+    store = PlaybackDiagnosticsReadOnlyStore(settings.playback_diagnostics_root)
+    service = None
     try:
         command = args.diagnostics_command
         if command == "status":
-            payload = service.status()
+            payload = store.status()
         elif command == "list":
-            sessions = service.list_sessions(
+            sessions = store.list_sessions(
                 date=args.date,
                 basename=args.basename,
                 source=args.source,
@@ -435,13 +445,17 @@ def _run_playback_diagnostics_cli(args, settings) -> int:
                 ]
             payload = {"sessions": sessions, "count": len(sessions)}
         elif command == "inspect":
-            payload = service.inspect_session(args.session_id)
+            payload = store.inspect_session(args.session_id)
         elif command == "verify":
-            payload = service.verify_session(args.session_id)
+            payload = store.verify_session(args.session_id)
         elif command == "export":
+            service = PlaybackDiagnosticsService(settings)
+            service.start_maintenance(writer_required=False)
+            events = store.read_events_for_export(args.session_id)
             export_path = service.export_session(
                 args.session_id,
                 format_name=args.export_format,
+                events=events,
             )
             payload = {
                 "playback_session_id": args.session_id,
@@ -449,7 +463,27 @@ def _run_playback_diagnostics_cli(args, settings) -> int:
                 "output_path": str(export_path),
             }
         elif command == "reconcile":
+            service = PlaybackDiagnosticsService(settings)
+            service.start_maintenance(writer_required=False)
             payload = service.reconcile()
+        elif command == "finalize":
+            service = PlaybackDiagnosticsService(settings)
+            service.start_maintenance(writer_required=True)
+            session = service.catalog.get_session(args.session_id)
+            if session is None:
+                raise KeyError("Playback diagnostics session not found")
+            if str(session.get("state") or "") != "interrupted_recoverable":
+                raise ValueError("Only interrupted-recoverable sessions may be finalized offline")
+            finalized = service.finalize_session(
+                args.session_id,
+                close_reason="operator_offline_finalize",
+                require_client_close_barrier=False,
+            )
+            payload = {
+                "playback_session_id": args.session_id,
+                "finalized": finalized,
+                "state": "sealed" if finalized else "interrupted_recoverable",
+            }
         else:
             raise ValueError("Unknown playback diagnostics command")
         print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
@@ -457,11 +491,12 @@ def _run_playback_diagnostics_cli(args, settings) -> int:
     except OptionalParquetDependencyError as exc:
         print(str(exc))
         return 2
-    except (KeyError, ValueError) as exc:
+    except (DiagnosticsLeaseError, DiagnosticsOperatorError, KeyError, ValueError) as exc:
         print(str(exc))
         return 1
     finally:
-        service.shutdown()
+        if service is not None:
+            service.shutdown()
 
 
 def main() -> None:

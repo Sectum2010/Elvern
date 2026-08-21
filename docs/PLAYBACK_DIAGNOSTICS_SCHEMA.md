@@ -2,7 +2,7 @@
 
 ## Versioned envelope
 
-The current event schema is `playback-diagnostics-event-v1`. Every raw event is
+The current event schema is `playback-diagnostics-event-v2`. Every raw event is
 validated against the following closed envelope; extra top-level fields are not
 persisted.
 
@@ -25,9 +25,44 @@ Nanosecond values are decimal strings because JavaScript `Number` cannot safely
 represent nanosecond integers. A missing field is `null`/absent, not zero.
 
 `event_sequence` is monotonic within the client recorder. `source_sequence` is
-monotonic within one registered source and drives idempotency and continuous ACK
-watermarks. `event_id` and `(source_id, source_sequence)` are both unique catalog
-keys. Duplicate and out-of-order events are counted.
+allocated atomically with the browser IndexedDB insert and is monotonic within
+one registered source. A capacity-rejected insert does not consume a sequence.
+The server-created `source_id` binds a journal to one playback session, source
+type, and (for browser sources) stable `client_instance_id`. `event_id` and
+`(source_id, source_sequence)` are both unique catalog keys. Duplicate and
+out-of-order events are counted, and a contiguous durable ACK advances only
+after journal fsync and catalog commit.
+
+## Version registry
+
+| Object | Current schema | Compatibility behavior |
+| --- | --- | --- |
+| Event | `playback-diagnostics-event-v2` | v1 is accepted only as a declared legacy event schema |
+| Journal | `elvern-diagnostics-journal-v2` | v2 binds session/source/type in authenticated chunk headers; v1 is read as legacy |
+| Catalog | `playback-diagnostics-catalog-v2` | records source ACK/final watermarks and lifecycle state |
+| Session metadata | `playback-diagnostics-session-v2` | validated before catalog registration or derived output |
+| Summary | `playback-diagnostics-summary-v2` | derived from sealed raw evidence |
+| Completeness | `playback-diagnostics-completeness-v2` | reports lifecycle/source/drop/capability evidence separately |
+| Manifest | `playback-diagnostics-session-manifest-v2` | generated last from visible files and journal verification reports |
+
+New records are never silently written under a legacy version.
+
+## Session lifecycle
+
+Durable states are `provisional`, `registering`, `active`,
+`interrupted_recoverable`, `closing`, `sealed`, and `corrupt`.
+
+- `provisional`/`registering`: metadata creation is in progress; a bounded set of
+  early backend observations may wait for registration.
+- `active`: registered sources may append.
+- `interrupted_recoverable`: a prior writer stopped before close; browser
+  IndexedDB replay may resume the same client source.
+- `closing`: a final source sequence is declared, but final source barriers or
+  backend observation/writer drains may still be pending.
+- `sealed`: all accepted source barriers are durable, derived files and the
+  final manifest are complete, and all later appends are rejected.
+- `corrupt`: strict recovery found a defect that must not be truncated or
+  reinterpreted automatically.
 
 ## Sources and certainty
 
@@ -142,13 +177,17 @@ agent, and full FFmpeg command values are prohibited.
 ## Clock fields and uncertainty
 
 Client/server clock exchange uses five samples at session bootstrap. The
-versioned estimator records offset, minimum selected RTT, uncertainty, and
-sample count. Event durations use monotonic clocks. `aligned_wall_time_ns` is a
-correlation estimate, not a claim of nanosecond cross-device accuracy.
+versioned estimator records offset, selected minimum RTT, uncertainty, sample
+count, and observed drift. RTT is measured with a monotonic client clock; wall
+time is only an alignment anchor. Event durations use monotonic clocks. Decimal
+nanosecond fields are a storage representation, not the measurement precision:
+browser timer resolution, scheduling delay, network asymmetry, background
+throttling, and suspension remain explicit uncertainty. `aligned_wall_time_ns`
+is a correlation estimate, not a claim of nanosecond cross-device accuracy.
 
 ## Direct-open derived schema
 
-Each finalized/interrupted session produces:
+Each durably sealed session produces:
 
 - `session.json`: pseudonymous identity, exact basename, media/build/platform
   metadata and capabilities.
@@ -158,11 +197,21 @@ Each finalized/interrupted session produces:
 - `timeline.csv`: aligned semantic/aggregate timeline.
 - `completeness.json`: source, sequence, drop, clock, capability, and writer
   quality evidence.
-- `manifest.json`: SHA-256 and size of direct-open files plus journal
-  verification reports.
+- `manifest.json`: generated last, with SHA-256 and size of every other visible
+  direct-open file plus journal verification reports.
 
-The derived files never replace raw evidence. A missing field or unsupported
-capability is listed and must not be interpreted as proof that no issue occurred.
+Manifest verification re-hashes every declared visible file and compares raw
+journals with the catalog. An `interrupted_recoverable` session is not presented
+as finalized and does not receive a final manifest until an explicit close or
+offline finalize succeeds.
+
+The derived files never replace raw evidence. Completeness reports expected and
+present sources, final and ACK watermarks, explicit missing ranges/counts,
+client/server/writer drops, clock coverage, capability availability, lifecycle
+state, and incident-window coverage separately. A high score is not inferred
+from one event per source; the legacy single telemetry-completeness score is
+`null`. Missing or unsupported evidence must not be interpreted as proof that no
+issue occurred.
 
 ## Current unsupported or platform-limited fields
 
@@ -178,3 +227,9 @@ query. Tailscale capture is limited to local backend state, bounded health count
 and coarse active path class. DCGM-only data, detailed peer counters, privileged
 packet evidence, and real native-app process evidence are not fabricated.
 
+Capability flags state only what the current runtime actually exposed. hls.js
+attempt detail is reported only when hls.js emitted it; native HLS does not
+fabricate loader/cache detail. `freeze`/`resume`, Long Animation Frames,
+Compute Pressure, memory, storage, Network Information, frame callback, and
+playback-quality evidence remain unavailable/unsupported when their APIs are not
+present. Headless browser coverage is not real-device Safari/iOS certification.

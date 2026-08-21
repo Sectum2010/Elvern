@@ -555,7 +555,7 @@ def load_settings() -> Settings:
         timezone_name=_resolve_timezone_name(),
         playback_diagnostics_enabled=_get_bool(
             "ELVERN_PLAYBACK_DIAGNOSTICS_ENABLED",
-            True,
+            False,
         ),
         playback_diagnostics_root=_get_path(
             "ELVERN_PLAYBACK_DIAGNOSTICS_ROOT",

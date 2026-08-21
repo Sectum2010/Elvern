@@ -13,20 +13,30 @@ export function estimateTimerResolution({ samples = 64, now = () => performance.
   return Math.min(...deltas) * 1_000;
 }
 
-export function estimateClockOffset(samples) {
+export function estimateClockOffset(samples, { timerResolutionUs = 0, previous = null } = {}) {
   const normalized = samples.map((sample) => {
     const clientSendNs = BigInt(Math.round(sample.clientSendWallMs * 1_000_000));
-    const clientReceiveNs = BigInt(Math.round(sample.clientReceiveWallMs * 1_000_000));
+    const monotonicElapsedNs = BigInt(Math.max(
+      0,
+      Math.round((sample.clientReceiveMonotonicUs - sample.clientSendMonotonicUs) * 1_000),
+    ));
+    const clientReceiveNs = clientSendNs + monotonicElapsedNs;
     const serverReceiveNs = BigInt(sample.serverReceiveWallNs);
     const serverSendNs = BigInt(sample.serverSendWallNs);
     const serverProcessingNs = serverSendNs > serverReceiveNs
       ? serverSendNs - serverReceiveNs
       : 0n;
-    const totalNs = clientReceiveNs > clientSendNs ? clientReceiveNs - clientSendNs : 0n;
-    const rttNs = totalNs > serverProcessingNs ? totalNs - serverProcessingNs : 0n;
+    const rttNs = monotonicElapsedNs > serverProcessingNs
+      ? monotonicElapsedNs - serverProcessingNs
+      : 0n;
     const clientMidpoint = (clientSendNs + clientReceiveNs) / 2n;
     const serverMidpoint = (serverReceiveNs + serverSendNs) / 2n;
-    return { offsetNs: serverMidpoint - clientMidpoint, rttNs };
+    return {
+      offsetNs: serverMidpoint - clientMidpoint,
+      rttNs,
+      clientSendWallMs: sample.clientSendWallMs,
+      clientSendMonotonicUs: sample.clientSendMonotonicUs,
+    };
   }).sort((left, right) => (left.rttNs < right.rttNs ? -1 : left.rttNs > right.rttNs ? 1 : 0));
   if (!normalized.length) {
     throw new TypeError("At least one clock sample is required");
@@ -38,20 +48,40 @@ export function estimateClockOffset(samples) {
   const offsetNs = offsets[Math.floor(offsets.length / 2)];
   const minimumRttNs = selected[0].rttNs;
   const spreadNs = offsets.at(-1) - offsets[0];
-  const uncertaintyNs = minimumRttNs / 2n > spreadNs / 2n
+  const timerResolutionNs = BigInt(Math.max(0, Math.round(Number(timerResolutionUs) * 1_000)));
+  const transportUncertainty = minimumRttNs / 2n > spreadNs / 2n
     ? minimumRttNs / 2n
     : spreadNs / 2n;
+  const uncertaintyNs = transportUncertainty + timerResolutionNs;
+  const anchor = selected[0];
+  let driftPpm = null;
+  if (previous?.clock_offset_ns != null && previous?.client_anchor_monotonic_us != null) {
+    const elapsedUs = Number(anchor.clientSendMonotonicUs) - Number(previous.client_anchor_monotonic_us);
+    if (elapsedUs > 0) {
+      driftPpm = Number(offsetNs - BigInt(previous.clock_offset_ns)) / (elapsedUs * 1_000) * 1_000_000;
+      if (!Number.isFinite(driftPpm)) driftPpm = null;
+    }
+  }
   return {
     clock_offset_ns: offsetNs.toString(),
     network_rtt_ns: minimumRttNs.toString(),
     clock_uncertainty_ns: uncertaintyNs.toString(),
+    selected_sample_rtt_ns: minimumRttNs.toString(),
+    offset_spread_ns: spreadNs.toString(),
+    client_timer_resolution_us: Number(timerResolutionUs) || null,
+    client_anchor_wall_ms: anchor.clientSendWallMs,
+    client_anchor_monotonic_us: anchor.clientSendMonotonicUs,
+    observed_drift_ppm: driftPpm,
     sample_count: normalized.length,
-    algorithm_version: "min-rtt-median-offset-v1",
+    algorithm_version: "monotonic-rtt-median-offset-v2",
   };
 }
 
 export async function synchronizeDiagnosticClock(exchange, {
   sampleCount = PLAYBACK_DIAGNOSTICS_CLOCK_EXCHANGE_SAMPLES,
+  timerResolutionUs = 0,
+  previous = null,
+  wallStepThresholdMs = 1_000,
 } = {}) {
   const samples = [];
   for (let index = 0; index < sampleCount; index += 1) {
@@ -62,12 +92,23 @@ export async function synchronizeDiagnosticClock(exchange, {
       clientSendWallMs,
       clientSendMonotonicUs,
     });
+    const clientReceiveMonotonicUs = performance.now() * 1_000;
+    const clientReceiveWallMs = Date.now();
+    const monotonicElapsedMs = (clientReceiveMonotonicUs - clientSendMonotonicUs) / 1_000;
+    const wallElapsedMs = clientReceiveWallMs - clientSendWallMs;
     samples.push({
       clientSendWallMs,
-      clientReceiveWallMs: Date.now(),
+      clientSendMonotonicUs,
+      clientReceiveMonotonicUs,
+      clientReceiveWallMs,
+      wallStepDetected: Math.abs(wallElapsedMs - monotonicElapsedMs) > wallStepThresholdMs,
       serverReceiveWallNs: response.server_receive_wall_time_ns,
       serverSendWallNs: response.server_send_wall_time_ns,
     });
   }
-  return estimateClockOffset(samples);
+  const estimate = estimateClockOffset(samples, { timerResolutionUs, previous });
+  return {
+    ...estimate,
+    clock_step_detected: samples.some((sample) => sample.wallStepDetected),
+  };
 }

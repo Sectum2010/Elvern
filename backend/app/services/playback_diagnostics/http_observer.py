@@ -123,8 +123,13 @@ class PlaybackDiagnosticsHttpMiddleware:
             await self.app(scope, receive, send)
             return
 
-        route, session_id, epoch_id, segment_index = classify_browser_playback_route(path)
         app = scope.get("app")
+        diagnostics = getattr(getattr(app, "state", None), "playback_diagnostics_service", None)
+        if not bool(getattr(diagnostics, "enabled", False)):
+            await self.app(scope, receive, send)
+            return
+
+        route, session_id, epoch_id, segment_index = classify_browser_playback_route(path)
         if session_id is None and epoch_id and app is not None:
             try:
                 manager = app.state.mobile_playback_manager

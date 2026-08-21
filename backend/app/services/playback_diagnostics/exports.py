@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .fileio import atomic_write_bytes, ensure_private_directory, resolve_beneath
+from .privacy import spreadsheet_safe_cell
 
 
 class OptionalParquetDependencyError(RuntimeError):
@@ -43,6 +44,7 @@ def export_events(
     session_id: str,
     events: list[dict[str, Any]],
     format_name: str,
+    capacity: Any | None = None,
 ) -> Path:
     normalized = format_name.strip().lower()
     if normalized not in {"ndjson", "csv", "parquet", "perfetto"}:
@@ -51,13 +53,31 @@ def export_events(
     destination = resolve_beneath(export_root, _safe_export_name(session_id, normalized))
     rows = [_flatten_event(event) for event in events]
 
+    def write_reserved(payload: bytes) -> Path:
+        old_size = destination.stat().st_size if destination.exists() else 0
+        reservation = capacity.reserve(len(payload), critical=False) if capacity is not None else None
+        try:
+            atomic_write_bytes(destination, payload)
+            if reservation is not None:
+                reservation.commit(0)
+                capacity.account_replacement(
+                    old_size=old_size,
+                    new_size=destination.stat().st_size,
+                )
+            return destination
+        except Exception:
+            if reservation is not None:
+                new_size = destination.stat().st_size if destination.is_file() else 0
+                reservation.commit(0)
+                capacity.account_replacement(old_size=old_size, new_size=new_size)
+            raise
+
     if normalized == "ndjson":
         payload = b"\n".join(
             json.dumps(event, ensure_ascii=False, sort_keys=True).encode("utf-8")
             for event in events
         ) + (b"\n" if events else b"")
-        atomic_write_bytes(destination, payload)
-        return destination
+        return write_reserved(payload)
 
     if normalized == "csv":
         import io
@@ -66,9 +86,11 @@ def export_events(
         buffer = io.StringIO(newline="")
         writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
-        atomic_write_bytes(destination, buffer.getvalue().encode("utf-8"))
-        return destination
+        writer.writerows(
+            {key: spreadsheet_safe_cell(value) for key, value in row.items()}
+            for row in rows
+        )
+        return write_reserved(buffer.getvalue().encode("utf-8"))
 
     if normalized == "perfetto":
         trace_events: list[dict[str, Any]] = []
@@ -86,8 +108,7 @@ def export_events(
                     "args": _flatten_event(event),
                 }
             )
-        atomic_write_bytes(
-            destination,
+        return write_reserved(
             json.dumps(
                 {
                     "traceEvents": trace_events,
@@ -99,9 +120,8 @@ def export_events(
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
-            ).encode("utf-8"),
+            ).encode("utf-8")
         )
-        return destination
 
     try:
         import pyarrow as pa
@@ -113,8 +133,24 @@ def export_events(
         ) from exc
     table = pa.Table.from_pylist(rows)
     temporary = destination.with_name(f".{destination.name}.tmp")
-    pq.write_table(table, temporary, compression="zstd")
-    temporary.chmod(0o600)
-    temporary.replace(destination)
-    destination.chmod(0o600)
-    return destination
+    old_size = destination.stat().st_size if destination.exists() else 0
+    source_bytes = sum(len(json.dumps(row, ensure_ascii=False)) for row in rows)
+    reservation = capacity.reserve(max(1_000_000, source_bytes * 16), critical=False) if capacity is not None else None
+    try:
+        pq.write_table(table, temporary, compression="zstd")
+        temporary.chmod(0o600)
+        if reservation is not None and temporary.stat().st_size > reservation.reserved_bytes:
+            raise RuntimeError("Parquet export exceeded its reserved diagnostics capacity")
+        temporary.replace(destination)
+        destination.chmod(0o600)
+        if reservation is not None:
+            reservation.commit(0)
+            capacity.account_replacement(old_size=old_size, new_size=destination.stat().st_size)
+        return destination
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        if reservation is not None:
+            new_size = destination.stat().st_size if destination.is_file() else 0
+            reservation.commit(0)
+            capacity.account_replacement(old_size=old_size, new_size=new_size)
+        raise

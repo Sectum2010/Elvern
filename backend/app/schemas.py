@@ -1114,6 +1114,7 @@ class MobilePlaybackHeartbeatRequest(BaseModel):
 
 class MobilePlaybackSessionResponse(BaseModel):
     session_id: str
+    playback_diagnostics_enabled: bool = False
     media_item_id: int = Field(ge=1)
     epoch: int = Field(ge=1)
     manifest_revision: str

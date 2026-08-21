@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 
 import { diagnosticUrlIdentity } from "../../lib/playbackDiagnostics/privacy";
 import { PlaybackDiagnosticRecorder } from "../../lib/playbackDiagnostics/recorder";
+import { captureClientClock, createDiagnosticId } from "../../lib/playbackDiagnostics/schema";
 
 export function usePlaybackDiagnosticRecorder({
   hlsEvents,
@@ -14,17 +15,27 @@ export function usePlaybackDiagnosticRecorder({
   videoElementKey,
 }) {
   const recorderRef = useRef(null);
+  const pendingActionsRef = useRef([]);
+  const playbackAttemptIdRef = useRef(createDiagnosticId("attempt"));
   const sessionId = mobileSession?.session_id || "";
+  const diagnosticsEnabled = mobileSession?.playback_diagnostics_enabled === true;
 
   useEffect(() => {
     const video = videoRef.current;
+    if (!diagnosticsEnabled) {
+      if (mobileSession?.playback_diagnostics_enabled === false) pendingActionsRef.current = [];
+      return undefined;
+    }
     if (!sessionId || !video) return undefined;
     let recorder;
+    const provisionalEvents = pendingActionsRef.current.splice(0);
     try {
       recorder = new PlaybackDiagnosticRecorder({
         playbackSessionId: sessionId,
         video,
         hlsEvents,
+        provisionalEvents,
+        playbackAttemptId: playbackAttemptIdRef.current,
         context: {
           device_class: deviceClass || "unknown",
           hls_engine: hlsEngineDiagnostics?.selectedEngine || mobileSession?.selected_hls_engine || "unknown",
@@ -34,7 +45,7 @@ export function usePlaybackDiagnosticRecorder({
           epoch_id: mobileSession?.active_epoch_id || null,
           attachment_revision: mobileSession?.attach_revision ?? null,
           stream_identity: streamSource?.url
-            ? diagnosticUrlIdentity(streamSource.url).url_hash
+            ? diagnosticUrlIdentity(streamSource.url).normalized_route
             : null,
         },
       });
@@ -51,7 +62,7 @@ export function usePlaybackDiagnosticRecorder({
       }
       if (recorderRef.current === recorder) recorderRef.current = null;
     };
-  }, [sessionId, videoElementKey]);
+  }, [diagnosticsEnabled, sessionId, videoElementKey]);
 
   useEffect(() => {
     try {
@@ -64,7 +75,7 @@ export function usePlaybackDiagnosticRecorder({
         epoch_id: mobileSession?.active_epoch_id || null,
         attachment_revision: mobileSession?.attach_revision ?? null,
         stream_identity: streamSource?.url
-          ? diagnosticUrlIdentity(streamSource.url).url_hash
+          ? diagnosticUrlIdentity(streamSource.url).normalized_route
           : null,
       });
     } catch {
@@ -114,7 +125,20 @@ export function usePlaybackDiagnosticRecorder({
     },
     recordDiagnosticAction(eventName, origin, payload) {
       try {
-        recorderRef.current?.recordAction(eventName, origin, payload);
+        if (recorderRef.current) {
+          recorderRef.current.recordAction(eventName, origin, payload);
+        } else if (mobileSession?.playback_diagnostics_enabled !== false) {
+          pendingActionsRef.current.push({
+            eventName,
+            options: {
+              priority: "high",
+              payload: { ...payload, action_origin: origin },
+              capturedClock: captureClientClock(),
+              playbackAttemptId: playbackAttemptIdRef.current,
+            },
+          });
+          if (pendingActionsRef.current.length > 16) pendingActionsRef.current.shift();
+        }
       } catch {
         // Diagnostics are never a playback control input.
       }

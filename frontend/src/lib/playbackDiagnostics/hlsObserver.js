@@ -1,4 +1,5 @@
 import { diagnosticUrlIdentity } from "./privacy";
+import { createDiagnosticId } from "./schema";
 
 function finite(value) {
   const number = Number(value);
@@ -18,26 +19,8 @@ function loaderStats(data) {
     first_byte_ms: requestStart != null && first != null ? Math.max(0, first - requestStart) : null,
     last_byte_ms: durationMs,
     bytes,
-    retries: finite(stats.retry),
+    retry_attempt: finite(stats.retry),
     client_throughput_bps: bytes != null && durationMs > 0 ? bytes * 8_000 / durationMs : null,
-  };
-}
-
-function fragmentPayload(eventName, data) {
-  const fragment = data?.frag || {};
-  const url = fragment.url || fragment.relurl || data?.url || "";
-  return {
-    hls_event: eventName,
-    hls_level: finite(fragment.level ?? data?.level),
-    segment_index: finite(fragment.sn),
-    segment_media_start_ms: finite(fragment.start) != null ? fragment.start * 1_000 : null,
-    segment_duration_ms: finite(fragment.duration) != null ? fragment.duration * 1_000 : null,
-    audio_stream_index: finite(fragment.audioTrackId ?? data?.id),
-    error_class: data?.type ? String(data.type).slice(0, 128) : null,
-    error_code: data?.details ? String(data.details).slice(0, 128) : null,
-    fatal: Boolean(data?.fatal),
-    ...loaderStats(data),
-    ...(url ? diagnosticUrlIdentity(url) : {}),
   };
 }
 
@@ -70,6 +53,70 @@ export class HlsJsDiagnosticObserver {
     this.events = events || {};
     this.record = record;
     this.handlers = [];
+    this.manifestRevision = 0;
+    this.logicalAttempts = new Map();
+    this.fragmentAttempts = new WeakMap();
+  }
+
+  logicalIdentity(eventName, data) {
+    const fragment = data?.frag || {};
+    const url = fragment.url || fragment.relurl || data?.url || "";
+    const route = url ? diagnosticUrlIdentity(url).normalized_route : "";
+    return [
+      eventName.startsWith("hls_manifest") ? "manifest" : (fragment.type || "fragment"),
+      this.manifestRevision,
+      fragment.level ?? data?.level ?? "",
+      fragment.sn ?? "",
+      fragment.cc ?? "",
+      route,
+    ].join(":");
+  }
+
+  attemptFor(eventName, data) {
+    const fragment = data?.frag;
+    const loading = eventName === "hls_fragment_loading" || eventName === "hls_level_loading";
+    if (fragment && !loading && this.fragmentAttempts.has(fragment)) {
+      return this.fragmentAttempts.get(fragment);
+    }
+    const logical = this.logicalIdentity(eventName, data);
+    let attempt = this.logicalAttempts.get(logical) || 0;
+    if (loading || attempt === 0) {
+      attempt += 1;
+      this.logicalAttempts.set(logical, attempt);
+    }
+    const identity = {
+      request_attempt_id: createDiagnosticId("hlsreq"),
+      request_attempt: attempt,
+      logical_request_identity: logical,
+    };
+    if (fragment) this.fragmentAttempts.set(fragment, identity);
+    if (this.logicalAttempts.size > 2_048) {
+      const oldest = this.logicalAttempts.keys().next().value;
+      this.logicalAttempts.delete(oldest);
+    }
+    return identity;
+  }
+
+  fragmentPayload(eventName, data) {
+    const fragment = data?.frag || {};
+    const url = fragment.url || fragment.relurl || data?.url || "";
+    const attempt = this.attemptFor(eventName, data);
+    return {
+      hls_event: eventName,
+      hls_level: finite(fragment.level ?? data?.level),
+      segment_index: finite(fragment.sn),
+      segment_media_start_ms: finite(fragment.start) != null ? fragment.start * 1_000 : null,
+      segment_duration_ms: finite(fragment.duration) != null ? fragment.duration * 1_000 : null,
+      audio_stream_index: finite(fragment.audioTrackId ?? data?.id),
+      error_class: data?.type ? String(data.type).slice(0, 128) : null,
+      error_code: data?.details ? String(data.details).slice(0, 128) : null,
+      fatal: Boolean(data?.fatal),
+      manifest_revision: this.manifestRevision,
+      loader_aborted: eventName === "hls_fragment_emergency_abort" || Boolean(data?.networkDetails?.aborted),
+      ...attempt,
+      ...loaderStats(data),
+      ...(url ? diagnosticUrlIdentity(url) : {}),
+    };
   }
 
   start() {
@@ -77,7 +124,8 @@ export class HlsJsDiagnosticObserver {
       const hlsEvent = this.events[constantName];
       if (!hlsEvent) return;
       const handler = (_event, data) => {
-        const payload = fragmentPayload(eventName, data);
+        if (eventName === "hls_manifest_loading") this.manifestRevision += 1;
+        const payload = this.fragmentPayload(eventName, data);
         this.record(eventName, {
           priority: payload.fatal || eventName.includes("error") ? "high" : "normal",
           severity: payload.fatal ? "error" : "info",
@@ -92,5 +140,7 @@ export class HlsJsDiagnosticObserver {
   stop() {
     this.handlers.forEach(({ hlsEvent, handler }) => this.hls.off(hlsEvent, handler));
     this.handlers = [];
+    this.logicalAttempts.clear();
+    this.fragmentAttempts = new WeakMap();
   }
 }

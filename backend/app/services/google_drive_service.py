@@ -617,16 +617,22 @@ def _iter_upstream_response(
                 if stream_validator and not stream_validator():
                     cancelled = True
                     break
+                if observer is not None:
+                    _notify_provider_observer(observer, "read_started")
                 chunk = upstream.read(effective_chunk_size)
+                if observer is not None:
+                    _notify_provider_observer(observer, "chunk", len(chunk))
                 if not chunk:
                     eof = True
                     break
-                if observer is not None:
-                    _notify_provider_observer(observer, "chunk", len(chunk))
                 if stream_validator and not stream_validator():
                     cancelled = True
                     break
+                if observer is not None:
+                    _notify_provider_observer(observer, "downstream_wait_started")
                 yield chunk
+                if observer is not None:
+                    _notify_provider_observer(observer, "downstream_resumed")
     except GeneratorExit:
         cancelled = True
         raise

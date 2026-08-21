@@ -17,9 +17,11 @@ playback-related behavior and operational measurements.
 - Source/path class and non-secret technical metadata.
 
 The raw record does not contain a username. A random subject ID is associated
-with the numeric account ID only in `identities/identity-map.enc`, encrypted by
-the independent diagnostics key. Account deletion removes that mapping without
-deleting already pseudonymized research sessions.
+with the numeric account ID only in `identities/identity-map.enc`. That mapping
+is encrypted with the active diagnostics journal-encryption key. A separate,
+stable random `identity-hmac-key.bin` is used only to derive owner/IP
+pseudonyms; it is never reused as the encryption key. Account deletion removes
+the mapping without deleting already pseudonymized research sessions.
 
 ## Exact basename policy
 
@@ -40,6 +42,13 @@ It may not store `/private/library/Films/` or the absolute source path. Basename
 validation strips both slash styles, rejects null bytes and `.`/`..`, and limits
 the UTF-8 representation to 4096 bytes.
 
+The exact basename is preserved in structured private JSON/raw evidence. It is
+not copied directly into a terminal, Markdown, or CSV control context. Local
+human-readable output escapes newline, carriage return, tab, terminal control
+bytes, and Markdown delimiter runs; CSV cells beginning with `=`, `+`, `-`, or
+`@` receive a formula-safe prefix. These display/export transformations do not
+rewrite the structured exact basename.
+
 ## Allowlisted data
 
 The shared privacy layer accepts only the versioned event envelope and explicit
@@ -47,7 +56,7 @@ payload vocabulary. Examples include:
 
 - playback timing, playhead, duration, buffer and frame metrics;
 - segment index/range, byte count, status and timing;
-- normalized Browser Playback route templates and one-way URL identity hashes;
+- normalized Browser Playback route templates and SHA-256 URL identity hashes;
 - provider throughput and existing request Range metadata;
 - FFmpeg command fingerprint and sanitized error class, never the command;
 - host aggregate counters, PSI, cgroup, filesystem, GPU and path class;
@@ -85,8 +94,9 @@ then validated and sanitized again before permanent server persistence.
 ## Network identity
 
 Raw IP addresses are not persisted. Server-side classification may retain
-`loopback`, `lan_or_tailnet`, or `public`, plus an HMAC pseudonym generated from
-address bytes and a local key. Tailscale observations retain a coarse path class
+`loopback`, `lan_or_tailnet`, or `public`, plus an HMAC-SHA-256 pseudonym
+generated from address bytes and the stable independent identity HMAC key.
+Tailscale observations retain a coarse path class
 such as `direct`, `peer_relay`, `derp`, or `unknown`, and bounded health/state
 counts. They do not retain auth keys, node keys, peer names, or packet payloads.
 
@@ -99,11 +109,12 @@ recorded as unavailable rather than inferred from private device data.
 
 ## Encryption and local access
 
-Raw journals and the identity map use AES-256-GCM with a dedicated random key.
-Compression occurs before encryption. The key is not reused from Elvern auth,
-OAuth, backup, cookies, or provider secrets. Direct-open session files are
-allowlisted plaintext for the local operator, mode `0600`, under `0700`
-directories.
+Raw journals and the identity map use AES-256-GCM with a random key from the
+diagnostics journal key store. Compression occurs before journal encryption.
+The independent identity HMAC key is not an encryption key. Neither key is
+derived from or reused from Elvern auth, OAuth, backup, cookies, or provider
+secrets. Direct-open session files are allowlisted plaintext for the local
+operator, mode `0600`, under `0700` directories.
 
 Local exports inherit the same allowlisted event content and are mode `0600`.
 The CLI never uploads them. Anyone with operating-system access to the
@@ -127,7 +138,9 @@ Focused tests prove:
 - normalized Browser Playback routes remain usable without permitting file
   paths;
 - raw user agent is not part of the event schema;
+- URL identities use full SHA-256 rather than a short or non-cryptographic hash;
+- terminal/Markdown controls and CSV formula prefixes are rendered safely while
+  the structured exact basename remains intact;
 - identity mapping is encrypted and is unlinked on account deletion;
 - ordinary backups and restore exclude diagnostics;
 - Git and Docker ignore rules explicitly cover the root.
-

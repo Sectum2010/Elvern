@@ -10,12 +10,14 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from .capacity import DiagnosticsCapacityGuard
 from .fileio import (
     FILE_MODE,
     UnsafeDiagnosticsPathError,
     assert_regular_nonsymlink,
     atomic_write_bytes,
     atomic_write_json,
+    encode_json_document,
     ensure_private_directory,
     resolve_beneath,
 )
@@ -36,29 +38,60 @@ class DiagnosticsKey:
 
 
 class DiagnosticsKeyStore:
-    def __init__(self, root: Path) -> None:
-        self.root = ensure_private_directory(Path(root))
+    def __init__(
+        self,
+        root: Path,
+        *,
+        read_only: bool = False,
+        capacity: DiagnosticsCapacityGuard | None = None,
+    ) -> None:
+        self.read_only = bool(read_only)
+        self.capacity = capacity
+        self.root = Path(root)
+        if self.read_only:
+            if self.root.is_symlink() or not self.root.is_dir():
+                raise UnsafeDiagnosticsPathError("Diagnostics key directory is unavailable")
+        else:
+            self.root = ensure_private_directory(self.root)
         self.active_key_path = resolve_beneath(self.root, "active-key.json")
 
     def load_or_create_active_key(self) -> DiagnosticsKey:
         if self.active_key_path.exists():
             return self._load_active_key()
+        if self.read_only:
+            raise FileNotFoundError("Diagnostics active key metadata is missing")
 
         key_id = secrets.token_hex(12)
         key_path = resolve_beneath(self.root, f"key-{key_id}.bin")
         material = secrets.token_bytes(KEY_BYTES)
         if key_path.exists():
             raise UnsafeDiagnosticsPathError("Refusing to replace an existing diagnostics key")
-        atomic_write_bytes(key_path, material)
-        atomic_write_json(
-            self.active_key_path,
-            {
-                "schema_version": "playback-diagnostics-key-v1",
-                "key_id": key_id,
-                "algorithm": "AES-256-GCM",
-                "key_file": key_path.name,
-            },
+        metadata = {
+            "schema_version": "playback-diagnostics-key-v1",
+            "key_id": key_id,
+            "algorithm": "AES-256-GCM",
+            "key_file": key_path.name,
+        }
+        encoded_metadata = encode_json_document(metadata)
+        reservation = (
+            self.capacity.reserve(len(material) + len(encoded_metadata))
+            if self.capacity is not None
+            else None
         )
+        try:
+            atomic_write_bytes(key_path, material)
+            atomic_write_json(self.active_key_path, metadata)
+            if reservation is not None:
+                reservation.commit(len(material) + len(encoded_metadata))
+        except Exception:
+            if reservation is not None:
+                actual = sum(
+                    path.stat().st_size
+                    for path in (key_path, self.active_key_path)
+                    if path.is_file() and not path.is_symlink()
+                )
+                reservation.commit(actual)
+            raise
         return DiagnosticsKey(key_id=key_id, material=material)
 
     def load_key(self, key_id: str) -> DiagnosticsKey:
@@ -70,7 +103,8 @@ class DiagnosticsKeyStore:
         material = key_path.read_bytes()
         if len(material) != KEY_BYTES:
             raise ValueError("Invalid diagnostics key material")
-        os.chmod(key_path, FILE_MODE)
+        if not self.read_only:
+            os.chmod(key_path, FILE_MODE)
         return DiagnosticsKey(key_id=normalized, material=material)
 
     def _load_active_key(self) -> DiagnosticsKey:

@@ -40,10 +40,16 @@ function benchmarkHtml() {
         IndexedDbDiagnosticSpool,
         MemoryDiagnosticSpool,
       } from "/src/lib/playbackDiagnostics/indexedDbSpool.js";
+      import { MediaElementDiagnosticObserver } from "/src/lib/playbackDiagnostics/mediaObserver.js";
       import { DiagnosticRingBuffer } from "/src/lib/playbackDiagnostics/ringBuffer.js";
       import { createPlaybackDiagnosticEvent } from "/src/lib/playbackDiagnostics/schema.js";
 
       const EVENT_COUNT = 1_800;
+      const SAMPLE_RING_ENTRIES = 240;
+      const FRAME_RING_ENTRIES = 7_200;
+      const FRAME_RATE = 120;
+      const SUSTAINED_PUSH_COUNT = 50_000;
+      const SERIALIZATION_CHUNK_ENTRIES = 128;
       const SESSION_ID = "session-synthetic-client-benchmark";
 
       function percentile(values, fraction) {
@@ -137,7 +143,11 @@ function benchmarkHtml() {
         const memoryEnqueueLatencies = [];
         for (const event of events) {
           const started = performance.now();
-          await memorySpool.enqueue(SESSION_ID, event);
+          const stored = await memorySpool.createAndEnqueue(
+            SESSION_ID,
+            (sequence) => ({ ...event, event_sequence: sequence, source_sequence: sequence }),
+          );
+          if (!stored.stored) throw new Error("Memory spool rejected the benchmark event");
           memoryEnqueueLatencies.push(performance.now() - started);
         }
         const memoryStats = await memorySpool.stats(SESSION_ID);
@@ -147,19 +157,39 @@ function benchmarkHtml() {
         const indexedDbOpenStarted = performance.now();
         await indexedDbSpool.open();
         const indexedDbOpenMs = performance.now() - indexedDbOpenStarted;
+        const clientInstanceId = await indexedDbSpool.getOrCreateClientInstanceId(SESSION_ID);
+        await indexedDbSpool.updateRecoveryState(SESSION_ID, {
+          client_instance_id: clientInstanceId,
+          source_id: "source-synthetic-client-benchmark",
+          close_state: "open",
+          last_durable_ack: 0,
+        });
         const indexedDbEnqueueLatencies = [];
         for (const event of events) {
           const started = performance.now();
-          await indexedDbSpool.enqueue(SESSION_ID, event);
+          const stored = await indexedDbSpool.createAndEnqueue(
+            SESSION_ID,
+            (sequence) => ({ ...event, event_sequence: sequence, source_sequence: sequence }),
+          );
+          if (!stored.stored) throw new Error("IndexedDB spool rejected the benchmark event");
           indexedDbEnqueueLatencies.push(performance.now() - started);
         }
         const indexedDbStats = await indexedDbSpool.stats(SESSION_ID);
+        indexedDbSpool.close();
+
+        const reloadOpenStarted = performance.now();
+        const resumedSpool = new IndexedDbDiagnosticSpool();
+        await resumedSpool.open();
+        const reloadOpenMs = performance.now() - reloadOpenStarted;
+        const recoveryAfterReload = await resumedSpool.getRecoveryState(SESSION_ID);
+        const clientInstanceAfterReload = await resumedSpool.getOrCreateClientInstanceId(SESSION_ID);
+        const statsAfterReload = await resumedSpool.stats(SESSION_ID);
 
         const readLatencies = [];
         let batch = null;
         for (let index = 0; index < 20; index += 1) {
           const started = performance.now();
-          batch = await indexedDbSpool.readBatch(SESSION_ID, {
+          batch = await resumedSpool.readBatch(SESSION_ID, {
             maxEvents: 256,
             maxBytes: 524_288,
           });
@@ -185,32 +215,80 @@ function benchmarkHtml() {
         }
 
         const ackStarted = performance.now();
-        const ack = await indexedDbSpool.acknowledge(SESSION_ID, batch.entries.at(-1).source_sequence);
+        const ack = await resumedSpool.acknowledge(SESSION_ID, batch.entries.at(-1).source_sequence);
         const ackMs = performance.now() - ackStarted;
+        const statsAfterAck = await resumedSpool.stats(SESSION_ID);
 
-        const sampleRing = new DiagnosticRingBuffer(240);
-        for (let index = 0; index < 240; index += 1) {
+        const sampleRing = new DiagnosticRingBuffer(SAMPLE_RING_ENTRIES);
+        for (let index = 0; index < SAMPLE_RING_ENTRIES; index += 1) {
           sampleRing.push({
-            monotonic_ms: index * 250,
+            sample_monotonic_ms: index * 250,
             playhead_ms: index * 250,
             buffered_ahead_ms: 45_000,
             ready_state: 4,
             network_state: 1,
           });
         }
-        const frameRing = new DiagnosticRingBuffer(7_200);
-        for (let index = 0; index < 7_200; index += 1) {
+        const frameRing = new DiagnosticRingBuffer(FRAME_RING_ENTRIES);
+        for (let index = 0; index < FRAME_RING_ENTRIES; index += 1) {
           frameRing.push({
-            media_time_ms: index * (1_000 / 60),
-            expected_display_time_ms: index * (1_000 / 60),
+            callback_monotonic_ms: index * (1_000 / FRAME_RATE),
+            media_time_ms: index * (1_000 / FRAME_RATE),
+            expected_display_time_ms: index * (1_000 / FRAME_RATE),
             presented_frames: index,
             processing_duration_ms: 1.2,
           });
         }
+
+        const initialPushLatencies = [];
+        const fullPushLatencies = [];
+        const pushRing = new DiagnosticRingBuffer(FRAME_RING_ENTRIES);
+        for (let index = 0; index < FRAME_RING_ENTRIES; index += 1) {
+          const started = performance.now();
+          pushRing.push({ callback_monotonic_ms: index, value: index });
+          initialPushLatencies.push(performance.now() - started);
+        }
+        for (let index = 0; index < SUSTAINED_PUSH_COUNT; index += 1) {
+          const started = performance.now();
+          pushRing.push({ callback_monotonic_ms: FRAME_RING_ENTRIES + index, value: index });
+          fullPushLatencies.push(performance.now() - started);
+        }
+
+        const incidentStarted = performance.now();
+        const incidentCursor = frameRing.createSnapshotCursor();
+        const incidentHandlerSynchronousMs = performance.now() - incidentStarted;
+        const serializationTaskLatencies = [];
+        const serializationChunkBytes = [];
+        while (!incidentCursor.done) {
+          const started = performance.now();
+          const chunk = incidentCursor.read(SERIALIZATION_CHUNK_ENTRIES);
+          const bytes = encoder.encode(JSON.stringify(chunk)).byteLength;
+          serializationTaskLatencies.push(performance.now() - started);
+          serializationChunkBytes.push(bytes);
+        }
+
+        const pushSource = DiagnosticRingBuffer.prototype.push.toString();
+        const incidentSource = MediaElementDiagnosticObserver.prototype.persistIncidentPreWindow.toString();
+        const structuralAssertions = {
+          no_front_splice: !pushSource.includes(".splice(") && !pushSource.includes(".shift("),
+          incident_uses_incremental_scheduler: !incidentSource.includes(".snapshot("),
+          frame_ring_bounded: frameRing.length === FRAME_RING_ENTRIES,
+          max_serialization_chunk_entries: SERIALIZATION_CHUNK_ENTRIES,
+          max_serialization_chunk_bytes: Math.max(...serializationChunkBytes),
+        };
+        if (!structuralAssertions.no_front_splice) {
+          throw new Error("Ring push regressed to front splice/shift");
+        }
+        if (!structuralAssertions.incident_uses_incremental_scheduler) {
+          throw new Error("Incident handling regressed to synchronous full-ring snapshot");
+        }
+        if (!structuralAssertions.frame_ring_bounded) {
+          throw new Error("The 60-second 120-fps frame ring is not bounded");
+        }
         const sampleRingBytes = encoder.encode(JSON.stringify(sampleRing.snapshot())).byteLength;
         const frameRingBytes = encoder.encode(JSON.stringify(frameRing.snapshot())).byteLength;
 
-        indexedDbSpool.close();
+        resumedSpool.close();
         await deleteBenchmarkDatabase();
         globalThis.gc?.();
         const heapAfter = performance.memory?.usedJSHeapSize ?? null;
@@ -237,6 +315,14 @@ function benchmarkHtml() {
             ack_ms: ackMs,
             acked_events: ack.deletedEvents,
             queue_before_ack: indexedDbStats,
+            queue_after_ack: statsAfterAck,
+            reload_resume: {
+              reopen_ms: reloadOpenMs,
+              queue_after_reload: statsAfterReload,
+              recovery_state_preserved: recoveryAfterReload?.source_id
+                === "source-synthetic-client-benchmark",
+              client_instance_preserved: clientInstanceAfterReload === clientInstanceId,
+            },
           },
           loopback_batch_upload: {
             ...summarized(uploadLatencies),
@@ -244,11 +330,23 @@ function benchmarkHtml() {
             batch_bytes: batch.totalBytes,
           },
           ring_buffers: {
-            sample_entries: 240,
+            modeled_window_seconds: 60,
+            sample_entries: SAMPLE_RING_ENTRIES,
             sample_bytes: sampleRingBytes,
-            frame_entries: 7_200,
+            frame_rate: FRAME_RATE,
+            frame_entries: FRAME_RING_ENTRIES,
             frame_bytes: frameRingBytes,
             total_bytes: sampleRingBytes + frameRingBytes,
+            initial_push: summarized(initialPushLatencies),
+            occupied_push: summarized(fullPushLatencies),
+            incident_handler_synchronous_ms: incidentHandlerSynchronousMs,
+            incremental_serialization_tasks: summarized(serializationTaskLatencies),
+            longest_recorder_main_thread_task_ms: Math.max(
+              incidentHandlerSynchronousMs,
+              ...serializationTaskLatencies,
+              ...fullPushLatencies,
+            ),
+            structural_assertions: structuralAssertions,
           },
           gc_pressure: {
             forced_gc_available: typeof globalThis.gc === "function",
@@ -331,6 +429,14 @@ try {
     ),
     indexeddb_enqueue_p95_ms: report.indexeddb.enqueue.p95_ms,
     loopback_upload_p95_ms: report.loopback_batch_upload.p95_ms,
+    occupied_ring_push_p50_ms: report.ring_buffers.occupied_push.p50_ms,
+    occupied_ring_push_p95_ms: report.ring_buffers.occupied_push.p95_ms,
+    occupied_ring_push_max_ms: report.ring_buffers.occupied_push.max_ms,
+    incident_handler_synchronous_ms: report.ring_buffers.incident_handler_synchronous_ms,
+    longest_recorder_main_thread_task_ms:
+      report.ring_buffers.longest_recorder_main_thread_task_ms,
+    incremental_serialization_p95_ms:
+      report.ring_buffers.incremental_serialization_tasks.p95_ms,
   };
   await fs.mkdir(path.dirname(OUTPUT_PATH), { recursive: true });
   await fs.writeFile(OUTPUT_PATH, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });

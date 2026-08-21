@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import os
 import stat
+import struct
 from collections import namedtuple
 from pathlib import Path
 
 import pytest
 
+from backend.app import config as config_module
 from backend.app.services.playback_diagnostics.capacity import DiagnosticsCapacityGuard
 from backend.app.services.playback_diagnostics.catalog import DiagnosticsCatalog
 from backend.app.services.playback_diagnostics.constants import (
@@ -17,23 +19,33 @@ from backend.app.services.playback_diagnostics.constants import (
     JOURNAL_MAGIC,
     SCHEMA_VERSION,
 )
-from backend.app.services.playback_diagnostics.crypto import DiagnosticsKeyStore
+from backend.app.services.playback_diagnostics.crypto import DiagnosticsKey, DiagnosticsKeyStore
 from backend.app.services.playback_diagnostics.fileio import (
     UnsafeDiagnosticsPathError,
     atomic_write_bytes,
     ensure_private_directory,
     resolve_beneath,
 )
-from backend.app.services.playback_diagnostics.identity import DiagnosticIdentityStore
+from backend.app.services.playback_diagnostics.identity import (
+    DiagnosticIdentityStore,
+    load_or_create_identity_key,
+)
 from backend.app.services.playback_diagnostics.journal import EncryptedJournal, verify_journal
 from backend.app.services.playback_diagnostics.privacy import (
     DiagnosticsPrivacyError,
     basename_sha256,
+    markdown_inline_code,
     safe_source_basename,
+    safe_human_text,
     sanitize_event,
     sanitize_payload,
+    spreadsheet_safe_cell,
 )
-from backend.app.services.playback_diagnostics.schema import PlaybackDiagnosticEvent
+from backend.app.services.playback_diagnostics.schema import (
+    PlaybackDiagnosticEvent,
+    SessionMetadataV2,
+)
+from backend.app.services.playback_diagnostics.summaries import build_summary
 
 
 DiskUsage = namedtuple("DiskUsage", "total used free")
@@ -61,14 +73,35 @@ def _key_store(tmp_path: Path):
     return store, store.load_or_create_active_key()
 
 
-def test_diagnostics_config_defaults_are_enabled_without_retention(test_settings):
-    assert test_settings.playback_diagnostics_enabled is True
+def test_diagnostics_config_defaults_are_disabled_without_retention(test_settings):
+    assert test_settings.playback_diagnostics_enabled is False
     assert test_settings.playback_diagnostics_max_bytes == DIAGNOSTICS_HARD_CAP_BYTES
     assert test_settings.playback_diagnostics_root == test_settings.data_dir / "playback_diagnostics"
     assert not hasattr(test_settings, "playback_diagnostics_retention_days")
     assert not hasattr(test_settings, "playback_diagnostics_ttl")
     assert DIAGNOSTICS_NORMAL_BUDGET_BYTES == 79_500_000_000
     assert DIAGNOSTICS_EMERGENCY_RESERVE_BYTES == 500_000_000
+
+
+def test_diagnostics_installation_switch_parses_explicit_values_and_example_is_off(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELVERN_PLAYBACK_DIAGNOSTICS_ENABLED", "true")
+    assert config_module._get_bool("ELVERN_PLAYBACK_DIAGNOSTICS_ENABLED", False) is True
+
+    monkeypatch.setenv("ELVERN_PLAYBACK_DIAGNOSTICS_ENABLED", "false")
+    assert config_module._get_bool("ELVERN_PLAYBACK_DIAGNOSTICS_ENABLED", True) is False
+
+    project_root = Path(__file__).resolve().parents[2]
+    example = (project_root / "deploy" / "env" / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    setting_line = next(
+        line
+        for line in example.splitlines()
+        if line.startswith("ELVERN_PLAYBACK_DIAGNOSTICS_ENABLED=")
+    )
+    assert setting_line.partition("=")[2].strip().strip('"') == "false"
 
 
 def test_capacity_guard_uses_reserve_only_for_critical_and_never_deletes(tmp_path):
@@ -112,6 +145,7 @@ def test_capacity_guard_resumes_after_manual_deletion(tmp_path):
     )
     assert guard.permit(1)[0] is False
     record.unlink()
+    guard.reconcile_usage()
     allowed, snapshot = guard.permit(100)
     assert allowed is True
     assert snapshot.state == "normal"
@@ -155,6 +189,65 @@ def test_identity_mapping_is_encrypted_and_can_be_unlinked(tmp_path):
     assert identities.resolve_subject_for_local_join(42) is None
 
 
+def test_owner_hash_is_stable_when_the_active_journal_key_changes(tmp_path):
+    store, first_key = _key_store(tmp_path)
+    identity_key = load_or_create_identity_key(tmp_path / "identities")
+    first = DiagnosticIdentityStore(
+        tmp_path / "identities",
+        store,
+        first_key,
+        identity_key,
+    )
+    replacement_key = DiagnosticsKey(key_id="replacement-key", material=b"r" * 32)
+    replacement = DiagnosticIdentityStore(
+        tmp_path / "identities",
+        store,
+        replacement_key,
+        identity_key,
+    )
+
+    assert first.owner_hash(42) == replacement.owner_hash(42)
+
+
+def test_session_metadata_is_closed_and_rejects_non_finite_values():
+    metadata = {
+        "schema_version": "playback-diagnostics-session-v2",
+        "diagnostics_event_schema": "playback-diagnostics-event-v2",
+        "playback_session_id": "session-synthetic-00000001",
+        "owner_hash": f"owner_{'a' * 64}",
+        "subject_id": "subject_synthetic00000001",
+        "media_item_id": 7,
+        "source_original_filename": "Synthetic.mkv",
+        "source_filename_sha256": "b" * 64,
+        "source_fingerprint": "c" * 64,
+        "source_kind": "local",
+        "profile": "balanced",
+        "playback_mode": "lite",
+        "stream_mode": "route2",
+        "platform": "linux",
+        "device_class": "desktop",
+        "browser_family": "firefox",
+        "browser_version": "152",
+        "os_family": "linux",
+        "os_version": "synthetic",
+        "hls_engine": "hls.js",
+        "capabilities": {},
+        "elvern_commit": "d" * 40,
+        "ffmpeg_version": "synthetic",
+        "config_fingerprint": "e" * 64,
+        "state": "active",
+        "created_at_utc": "2026-08-20T00:00:00+00:00",
+        "updated_at_utc": "2026-08-20T00:00:00+00:00",
+        "session_relative_path": "sessions/2026/08/20/session-synthetic-00000001",
+    }
+    assert SessionMetadataV2.model_validate(metadata).media_item_id == 7
+
+    with pytest.raises(ValueError):
+        SessionMetadataV2.model_validate({**metadata, "unexpected": "rejected"})
+    with pytest.raises(ValueError):
+        SessionMetadataV2.model_validate({**metadata, "duration_ms": float("nan")})
+
+
 def test_encrypted_journal_round_trip_hash_chain_and_unique_nonce(tmp_path):
     store, key = _key_store(tmp_path)
     journal = EncryptedJournal(
@@ -189,8 +282,9 @@ def test_journal_recovers_truncated_tail_and_quarantines_it(tmp_path):
     )
     journal.append([_event(1)])
     original_size = journal.path.stat().st_size
+    truncated_tail = struct.pack(">Q", 100) + b"partial"
     with journal.path.open("ab") as handle:
-        handle.write(b"partial-record")
+        handle.write(truncated_tail)
     verification, _ = verify_journal(
         journal.path,
         store,
@@ -198,7 +292,7 @@ def test_journal_recovers_truncated_tail_and_quarantines_it(tmp_path):
         quarantine_root=tmp_path / "quarantine",
     )
     assert verification.valid is True
-    assert verification.recovered_bytes == len(b"partial-record")
+    assert verification.recovered_bytes == len(truncated_tail)
     assert verification.quarantined_path is not None
     assert journal.path.stat().st_size == original_size
 
@@ -226,9 +320,31 @@ def test_privacy_preserves_exact_basename_but_rejects_paths_urls_and_secrets():
         {"reason": "Authorization: Bearer secret-value-123456"},
         {"reason": "https://example.test/movie?token=secret"},
         {"reason": "/srv/private/media/movie.mkv"},
+        {"reason": r"C:\private\media\movie.mkv"},
+        {"reason": r"\\server\share\movie.mkv"},
+        {"reason": "resource_key=private-drive-key"},
+        {"reason": "Cookie: session=private-cookie"},
     ):
         with pytest.raises(DiagnosticsPrivacyError):
             sanitize_payload(payload)
+
+    with pytest.raises(DiagnosticsPrivacyError):
+        safe_source_basename("bad\x00name.mkv")
+
+
+def test_exact_basename_remains_private_while_human_rendering_is_injection_safe():
+    basename = "=Title`\nnext\rline\t\x1b[31m.mkv"
+    assert safe_source_basename(basename) == basename
+    rendered = safe_human_text(basename)
+    assert "\n" not in rendered
+    assert "\r" not in rendered
+    assert "\t" not in rendered
+    assert "\x1b" not in rendered
+    assert "\\n" in rendered
+    assert "\\u001b" in rendered
+    assert markdown_inline_code(basename).count("`") >= 4
+    for prefix in ("=", "+", "-", "@"):
+        assert spreadsheet_safe_cell(f"{prefix}formula") == f"'{prefix}formula"
 
 
 def test_privacy_allows_only_normalized_browser_playback_routes():
@@ -261,6 +377,78 @@ def test_event_allowlist_drops_unknown_fields_and_requires_decimal_ns():
     raw["aligned_wall_time_ns"] = 1.5
     with pytest.raises(DiagnosticsPrivacyError):
         sanitize_event(raw)
+
+
+def test_required_frontend_emitted_field_families_survive_server_sanitization():
+    intended = {
+        "requested": "lite",
+        "minimum_buffer_ms": 750,
+        "type": "request_video_frame_callback",
+        "media_element_time_ms": 1_250,
+        "duplicate_count": 2,
+        "out_of_order_count": 1,
+        "buffered_range_count": 3,
+        "seekable_range_count": 2,
+        "played_range_count": 1,
+        "chunk_sequence": 4,
+        "final": True,
+        "serialized_bytes": 512,
+        "samples": [{"media_element_time_ms": 1_200, "buffered_range_count": 3}],
+    }
+
+    assert sanitize_payload(intended) == intended
+
+
+def test_summary_uses_explicit_gaps_and_never_invents_a_completeness_score():
+    metadata = {
+        "state": "sealed",
+        "capabilities": {},
+        "source_original_filename": "Synthetic.mkv",
+    }
+    events = [
+        {"event_name": "stall_candidate", "event_source": "client", "payload": {}},
+        {"event_name": "stall_confirmed", "event_source": "client", "payload": {}},
+        {"event_name": "recovery_waiting", "event_source": "client", "payload": {}},
+        {"event_name": "recovery_action_applied", "event_source": "server", "payload": {}},
+        {"event_name": "first_video_frame_inferred", "event_source": "client", "payload": {}},
+    ]
+    source_stats = [
+        {
+            "source_id": "client-source",
+            "ack_watermark": 1,
+            "max_seen_sequence": 100,
+            "final_source_sequence": 100,
+            "missing_ranges": [[2, 3], [7, 7]],
+            "missing_sequence_count": 3,
+        },
+        {
+            "source_id": "server-source",
+            "ack_watermark": 1,
+            "max_seen_sequence": 1,
+            "final_source_sequence": 1,
+            "missing_ranges": [],
+            "missing_sequence_count": 0,
+        },
+    ]
+
+    summary, completeness = build_summary(
+        metadata,
+        events,
+        source_stats=source_stats,
+        writer_metrics={"events_dropped": 0},
+        capacity_state="normal",
+    )
+
+    quality = summary["diagnostics_quality"]
+    assert quality["telemetry_completeness_score"] is None
+    assert quality["completeness_assessment"] == "incomplete"
+    assert quality["sequence_gap_count"] == 3
+    assert quality["missing_sequence_ranges"] == {"client-source": [[2, 3], [7, 7]]}
+    assert summary["qoe"]["stall_count"] == 1
+    assert summary["qoe"]["recovery_action_count"] == 1
+    assert summary["qoe"]["first_presented_frame_observed"] is False
+    assert summary["qoe"]["inferred_first_frame_observed"] is True
+    assert completeness["sequence_gap_count"] == 3
 
 
 def test_event_envelope_rejects_paths_urls_secrets_and_unsafe_identifiers():

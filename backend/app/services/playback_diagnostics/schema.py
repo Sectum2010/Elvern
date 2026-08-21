@@ -6,7 +6,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .constants import EVENT_SOURCES, OBSERVATION_KINDS, SCHEMA_VERSION
+from .constants import (
+    EVENT_SOURCES,
+    OBSERVATION_KINDS,
+    SCHEMA_VERSION,
+    SESSION_STATES,
+    SUPPORTED_EVENT_SCHEMA_VERSIONS,
+)
 
 
 DecimalTimestamp = str
@@ -15,11 +21,11 @@ EventSeverity = Literal["debug", "info", "warning", "error", "critical"]
 
 
 class DiagnosticsModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class PlaybackDiagnosticEvent(DiagnosticsModel):
-    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+    schema_version: str = SCHEMA_VERSION
     event_id: str = Field(min_length=8, max_length=128)
     event_name: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9_.:-]+$")
     event_source: str = Field(min_length=1, max_length=32)
@@ -78,6 +84,13 @@ class PlaybackDiagnosticEvent(DiagnosticsModel):
     capability_available: bool | None = None
     unavailable_reason: str | None = Field(default=None, max_length=256)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("schema_version")
+    @classmethod
+    def validate_schema_version(cls, value: str) -> str:
+        if value not in SUPPORTED_EVENT_SCHEMA_VERSIONS:
+            raise ValueError("Unsupported diagnostics event schema")
+        return value
 
     @field_validator("event_source")
     @classmethod
@@ -175,13 +188,86 @@ class PlaybackDiagnosticsCloseRequest(DiagnosticsModel):
     diagnostics_session_id: str = Field(min_length=8, max_length=128)
     source_id: str = Field(min_length=8, max_length=128)
     reason: str = Field(default="client_closed", max_length=128)
-    final_source_sequence: int | None = Field(default=None, ge=0)
+    final_source_sequence: int = Field(ge=0)
 
 
 class PlaybackDiagnosticsCloseResponse(DiagnosticsModel):
     accepted: bool
     ack_watermark: int
     finalized: bool
+    state: Literal["closing", "sealed"]
+
+
+class SessionMetadataV2(DiagnosticsModel):
+    schema_version: Literal["playback-diagnostics-session-v2"]
+    diagnostics_event_schema: str
+    playback_session_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    owner_hash: str = Field(min_length=16, max_length=128, pattern=r"^owner_[a-f0-9]+$")
+    subject_id: str = Field(min_length=16, max_length=128, pattern=r"^subject_[A-Za-z0-9_-]+$")
+    media_item_id: int = Field(ge=0)
+    source_original_filename: str = Field(min_length=1, max_length=4096)
+    source_filename_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_kind: str = Field(max_length=32)
+    source_size_bytes: int | None = Field(default=None, ge=0)
+    duration_ms: float | None = Field(default=None, ge=0)
+    container: str | None = Field(default=None, max_length=64)
+    video_codec: str | None = Field(default=None, max_length=64)
+    audio_codec: str | None = Field(default=None, max_length=64)
+    width: int | None = Field(default=None, ge=0)
+    height: int | None = Field(default=None, ge=0)
+    pixel_format: str | None = Field(default=None, max_length=64)
+    bit_depth: int | None = Field(default=None, ge=0, le=128)
+    hdr: bool | None = None
+    dolby_vision: bool | None = None
+    audio_channels: int | None = Field(default=None, ge=0, le=128)
+    selected_audio_stream_index: int | None = Field(default=None, ge=0)
+    profile: str = Field(max_length=64)
+    playback_mode: str = Field(max_length=32)
+    stream_mode: str = Field(max_length=32)
+    platform: str = Field(max_length=64)
+    device_class: str = Field(max_length=32)
+    browser_family: str = Field(max_length=64)
+    browser_version: str = Field(max_length=64)
+    os_family: str = Field(max_length=64)
+    os_version: str = Field(max_length=64)
+    hls_engine: str = Field(max_length=64)
+    capabilities: dict[str, bool | int | float | str | None] = Field(default_factory=dict)
+    elvern_commit: str = Field(max_length=64)
+    ffmpeg_version: str = Field(max_length=256)
+    config_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    state: str
+    created_at_utc: str = Field(max_length=64)
+    updated_at_utc: str = Field(max_length=64)
+    session_relative_path: str = Field(min_length=1, max_length=512)
+
+    @field_validator("diagnostics_event_schema")
+    @classmethod
+    def validate_event_schema(cls, value: str) -> str:
+        if value not in SUPPORTED_EVENT_SCHEMA_VERSIONS:
+            raise ValueError("Unsupported diagnostics event schema")
+        return value
+
+    @field_validator("state")
+    @classmethod
+    def validate_state(cls, value: str) -> str:
+        if value not in SESSION_STATES:
+            raise ValueError("Unsupported diagnostics session state")
+        return value
+
+    @field_validator("source_original_filename")
+    @classmethod
+    def validate_basename(cls, value: str) -> str:
+        if "\x00" in value or "/" in value or "\\" in value or value in {".", ".."}:
+            raise ValueError("Invalid diagnostics source basename")
+        return value
+
+    @field_validator("session_relative_path")
+    @classmethod
+    def validate_relative_path(cls, value: str) -> str:
+        if value.startswith(("/", "\\")) or ".." in value.replace("\\", "/").split("/"):
+            raise ValueError("Invalid diagnostics session relative path")
+        return value
 
 
 def build_server_event(

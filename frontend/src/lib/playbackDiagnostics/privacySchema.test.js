@@ -5,6 +5,7 @@ import {
   classifyBrowserPlatform,
   diagnosticUrlIdentity,
   sanitizeClientDiagnosticPayload,
+  sha256DiagnosticPath,
 } from "./privacy.js";
 import {
   createPlaybackDiagnosticEvent,
@@ -27,6 +28,26 @@ test("client diagnostics payload is allowlisted before local persistence", () =>
   });
 });
 
+test("all required emitted field families survive the client payload contract", () => {
+  const intended = {
+    requested: "lite",
+    minimum_buffer_ms: 750,
+    type: "request_video_frame_callback",
+    media_element_time_ms: 1_250,
+    duplicate_count: 2,
+    out_of_order_count: 1,
+    buffered_range_count: 3,
+    seekable_range_count: 2,
+    played_range_count: 1,
+    chunk_sequence: 4,
+    final: true,
+    serialized_bytes: 512,
+    samples: [{ media_element_time_ms: 1_200, buffered_range_count: 3 }],
+  };
+
+  assert.deepEqual(sanitizeClientDiagnosticPayload(intended), intended);
+});
+
 test("client diagnostics rejects secret-like strings, full URLs, and absolute paths", () => {
   for (const reason of [
     "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
@@ -40,7 +61,7 @@ test("client diagnostics rejects secret-like strings, full URLs, and absolute pa
   }
 });
 
-test("URL identity keeps only normalized route plus a stable hash", () => {
+test("URL identity keeps only a normalized route and hashes that query-free route", async () => {
   const raw = "https://elvern.invalid/api/browser-playback/epochs/abcdef0123456789abcdef01/segments/42.m4s?token=secret#x";
   const identity = diagnosticUrlIdentity(raw);
 
@@ -48,10 +69,18 @@ test("URL identity keeps only normalized route plus a stable hash", () => {
     identity.normalized_route,
     "/api/browser-playback/epochs/:id/segments/:segment",
   );
-  assert.equal(identity.url_hash.length, 16);
   assert.equal(JSON.stringify(identity).includes("secret"), false);
   assert.equal(JSON.stringify(identity).includes("elvern.invalid"), false);
   assert.deepEqual(sanitizeClientDiagnosticPayload(identity), identity);
+  const digest = await sha256DiagnosticPath(raw, {
+    subtle: {
+      digest: async (_algorithm, bytes) => {
+        assert.equal(new TextDecoder().decode(bytes), identity.normalized_route);
+        return new Uint8Array(32).fill(0xab).buffer;
+      },
+    },
+  });
+  assert.equal(digest, "ab".repeat(32));
 });
 
 test("client diagnostics accepts only normalized Browser Playback routes", () => {

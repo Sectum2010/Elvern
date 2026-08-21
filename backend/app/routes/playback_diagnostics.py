@@ -100,7 +100,7 @@ def close_playback_diagnostics(
     user=CurrentUser,
 ) -> PlaybackDiagnosticsCloseResponse:
     try:
-        watermark, finalized = _service(request).close(
+        watermark, finalized, close_state = _service(request).close(
             playback_session_id=payload.diagnostics_session_id,
             source_id=payload.source_id,
             user_id=int(user.id),
@@ -111,6 +111,7 @@ def close_playback_diagnostics(
             accepted=True,
             ack_watermark=watermark,
             finalized=finalized,
+            state=close_state,
         )
     except Exception as exc:  # noqa: BLE001
         _raise_diagnostics_error(exc)

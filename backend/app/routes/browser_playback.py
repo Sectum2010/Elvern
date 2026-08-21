@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 
-from ..auth import CurrentUser
+from ..auth import CurrentUser, resolve_client_ip
 from ..schemas import (
     BrowserPlaybackClientDeviceClass,
     MobilePlaybackAudioTrackRequest,
@@ -65,6 +65,7 @@ def _observe_browser_session_created(
             context,
             user_id=user_id,
             client_user_agent=request.headers.get("user-agent"),
+            client_ip=resolve_client_ip(request),
         )
     except Exception:  # noqa: BLE001 - diagnostics cannot alter session creation.
         return
@@ -86,8 +87,13 @@ def _coerce_session_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Browser playback request failed")
 
 
-def _rewrite_browser_session_payload(payload: dict[str, object]) -> dict[str, object]:
+def _rewrite_browser_session_payload(
+    payload: dict[str, object],
+    *,
+    diagnostics_enabled: bool = False,
+) -> dict[str, object]:
     normalized = dict(payload)
+    normalized["playback_diagnostics_enabled"] = bool(diagnostics_enabled)
     for key in (
         "manifest_url",
         "active_manifest_url",
@@ -104,6 +110,16 @@ def _rewrite_browser_session_payload(payload: dict[str, object]) -> dict[str, ob
             normalized[key] = value.replace("/api/mobile-playback/", "/api/browser-playback/")
     observe_eta_snapshot(normalized)
     return normalized
+
+
+def _browser_session_response(request: Request, payload: dict[str, object]) -> MobilePlaybackSessionResponse:
+    diagnostics = getattr(request.app.state, "playback_diagnostics_service", None)
+    return MobilePlaybackSessionResponse(
+        **_rewrite_browser_session_payload(
+            payload,
+            diagnostics_enabled=bool(getattr(diagnostics, "enabled", False)),
+        )
+    )
 
 
 def _observe_browser_event(
@@ -169,7 +185,7 @@ def create_browser_playback_session(
         session_id=str(response["session_id"]),
         user_id=int(user.id),
     )
-    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+    return _browser_session_response(request, response)
 
 
 @router.get("/api/browser-playback/sessions/{session_id}", response_model=MobilePlaybackSessionResponse)
@@ -187,7 +203,7 @@ def get_browser_playback_session(
         )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
-    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+    return _browser_session_response(request, response)
 
 
 @router.get("/api/browser-playback/active", response_model=MobilePlaybackSessionResponse | None)
@@ -205,7 +221,7 @@ def get_active_browser_playback_session(
         raise _coerce_session_error(exc) from exc
     if response is None:
         return None
-    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+    return _browser_session_response(request, response)
 
 
 @router.get("/api/browser-playback/items/{item_id}/active", response_model=MobilePlaybackSessionResponse | None)
@@ -225,7 +241,7 @@ def get_active_browser_playback_session_for_item(
         raise _coerce_session_error(exc) from exc
     if response is None:
         return None
-    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+    return _browser_session_response(request, response)
 
 
 @router.post("/api/browser-playback/sessions/{session_id}/seek", response_model=MobilePlaybackSessionResponse)
@@ -247,7 +263,7 @@ def seek_browser_playback_session(
         )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
-    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+    return _browser_session_response(request, response)
 
 
 @router.post("/api/browser-playback/sessions/{session_id}/audio", response_model=MobilePlaybackSessionResponse)
@@ -269,7 +285,7 @@ def select_browser_playback_audio_track(
         )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
-    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+    return _browser_session_response(request, response)
 
 
 @router.post("/api/browser-playback/sessions/{session_id}/audio/commit", response_model=MobilePlaybackSessionResponse)
@@ -287,7 +303,7 @@ def commit_browser_playback_audio_track_candidate(
         )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
-    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+    return _browser_session_response(request, response)
 
 
 @router.post("/api/browser-playback/sessions/{session_id}/audio/cancel", response_model=MobilePlaybackSessionResponse)
@@ -305,7 +321,7 @@ def cancel_browser_playback_audio_track_candidate(
         )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
-    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+    return _browser_session_response(request, response)
 
 
 @router.post(
@@ -391,7 +407,7 @@ def heartbeat_browser_playback_session(
         )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
-    return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
+    return _browser_session_response(request, response)
 
 
 @router.post("/api/browser-playback/sessions/{session_id}/stop", response_model=MobilePlaybackStopResponse)

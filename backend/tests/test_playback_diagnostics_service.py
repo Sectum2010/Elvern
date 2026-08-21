@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import stat
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from backend.app.services.playback_diagnostics import service as diagnostics_service_module
 from backend.app.services.playback_diagnostics.http_observer import (
     PlaybackDiagnosticsBodyLimitMiddleware,
     PlaybackDiagnosticsHttpMiddleware,
@@ -18,14 +22,19 @@ from backend.app.services.playback_diagnostics.runtime import (
     observe_runtime_event,
     set_active_diagnostics_service,
 )
+from backend.app.services.playback_diagnostics.operator_store import (
+    PlaybackDiagnosticsReadOnlyStore,
+)
 from backend.app.services.playback_diagnostics.schema import (
     PlaybackDiagnosticEvent,
     PlaybackDiagnosticsBootstrapRequest,
 )
+from backend.app.services.playback_diagnostics.session_files import read_session_events
 from backend.app.services.playback_diagnostics.service import (
     PlaybackDiagnosticsOwnershipError,
     PlaybackDiagnosticsService,
 )
+from backend.app.services.playback_diagnostics.writer import DiagnosticsWriterError
 
 
 SESSION_ID = "session-synthetic-00000001"
@@ -86,6 +95,7 @@ def _event(sequence: int) -> PlaybackDiagnosticEvent:
 def _service(test_settings, tmp_path: Path) -> PlaybackDiagnosticsService:
     settings = replace(
         test_settings,
+        playback_diagnostics_enabled=True,
         playback_diagnostics_root=tmp_path / "playback_diagnostics",
         playback_diagnostics_min_free_bytes=1,
     )
@@ -113,9 +123,116 @@ def _bootstrap(service: PlaybackDiagnosticsService):
     )
 
 
+def test_diagnostics_root_rejects_both_directions_of_protected_path_overlap(
+    test_settings,
+    tmp_path,
+):
+    media_root = tmp_path / "protected-media"
+    inside = PlaybackDiagnosticsService(
+        replace(
+            test_settings,
+            playback_diagnostics_enabled=True,
+            media_root=media_root,
+            playback_diagnostics_root=media_root / "diagnostics",
+        )
+    )
+    with pytest.raises(ValueError, match="inside protected"):
+        inside._validate_diagnostics_root()
+
+    diagnostics_root = tmp_path / "diagnostics-parent"
+    contains = PlaybackDiagnosticsService(
+        replace(
+            test_settings,
+            playback_diagnostics_enabled=True,
+            media_root=diagnostics_root / "media",
+            playback_diagnostics_root=diagnostics_root,
+        )
+    )
+    with pytest.raises(ValueError, match="contains protected"):
+        contains._validate_diagnostics_root()
+
+
+def test_diagnostics_root_rejects_application_source_and_fixed_backup_roots(
+    test_settings,
+):
+    project_root = Path(__file__).resolve().parents[2]
+    protected_roots = (
+        project_root / "backend" / "app" / "diagnostics",
+        project_root / "frontend" / "src" / "diagnostics",
+        project_root / "backend" / "data" / "backups",
+    )
+
+    for diagnostics_root in protected_roots:
+        service = PlaybackDiagnosticsService(
+            replace(
+                test_settings,
+                playback_diagnostics_enabled=True,
+                playback_diagnostics_root=diagnostics_root,
+            )
+        )
+        with pytest.raises(ValueError, match="protected application data"):
+            service._validate_diagnostics_root()
+
+
 def _drain(service: PlaybackDiagnosticsService) -> None:
     service._observation_queue.join()
     assert service.writer.flush(timeout=5)
+
+
+def test_disabled_service_start_creates_no_diagnostics_artifacts(test_settings, tmp_path):
+    root = tmp_path / "disabled-diagnostics"
+    service = PlaybackDiagnosticsService(
+        replace(
+            test_settings,
+            playback_diagnostics_enabled=False,
+            playback_diagnostics_root=root,
+        )
+    )
+
+    service.start()
+    try:
+        assert root.exists() is False
+        assert service.catalog is None
+        assert service.key_store is None
+        assert service.writer is None
+        assert service.host_sampler is None
+        assert service._observation_thread is None
+    finally:
+        service.shutdown()
+
+
+def test_provisional_observation_is_flushed_after_session_registration(
+    test_settings,
+    tmp_path,
+):
+    service = _service(test_settings, tmp_path)
+    try:
+        service.observe_event(
+            "provider_request_started",
+            playback_session_id=SESSION_ID,
+            event_source="provider",
+            payload={"range_count": 1},
+        )
+        service._observation_queue.join()
+        assert SESSION_ID in service._provisional_observations
+
+        service.observe_playback_session_created(
+            DiagnosticPlaybackManager().context,
+            user_id=7,
+            client_user_agent="SyntheticBrowser/1.0",
+        )
+        _drain(service)
+
+        session = service.catalog.get_session(SESSION_ID)
+        events, _reports = read_session_events(
+            service.root,
+            str(session["session_relative_path"]),
+            service.key_store,
+        )
+        assert any(event["event_name"] == "provider_request_started" for event in events)
+        assert SESSION_ID not in service._provisional_observations
+    finally:
+        service.shutdown()
 
 
 def test_service_bootstrap_ingest_idempotency_ownership_and_direct_open_files(
@@ -162,10 +279,31 @@ def test_service_bootstrap_ingest_idempotency_ownership_and_direct_open_files(
         )
         _drain(service)
         assert service.catalog.ack_watermark(bootstrap.source_id) == 2
-        assert service.finalize_session(SESSION_ID) is True
-
         session = service.catalog.get_session(SESSION_ID)
         session_root = service.root / str(session["session_relative_path"])
+        raw_events, _reports = read_session_events(
+            service.root,
+            str(session["session_relative_path"]),
+            service.key_store,
+        )
+        client_sequence_twos = [
+            event
+            for event in raw_events
+            if event.get("event_source") == "client" and event.get("source_sequence") == 2
+        ]
+        assert len(client_sequence_twos) == 1
+        watermark, finalized, close_state = service.close(
+            playback_session_id=SESSION_ID,
+            source_id=bootstrap.source_id,
+            user_id=7,
+            reason="synthetic_test_complete",
+            final_source_sequence=2,
+        )
+        assert watermark == 2
+        assert finalized is True
+        assert close_state == "sealed"
+
+        session = service.catalog.get_session(SESSION_ID)
         for name in (
             "session.json",
             "summary.md",
@@ -180,15 +318,34 @@ def test_service_bootstrap_ingest_idempotency_ownership_and_direct_open_files(
         assert stat.S_IMODE(session_root.stat().st_mode) == 0o700
         summary = json.loads((session_root / "summary.json").read_text(encoding="utf-8"))
         assert summary["identity"]["source_original_filename"] == "Synthetic_Test_Clip_001.mkv"
+        manifest = json.loads((session_root / "manifest.json").read_text(encoding="utf-8"))
+        manifest_files = {
+            row["relative_path"]: row
+            for row in manifest["files"]
+        }
+        final_session_bytes = (session_root / "session.json").read_bytes()
+        assert manifest_files["session.json"]["sha256"] == hashlib.sha256(
+            final_session_bytes
+        ).hexdigest()
+        assert manifest_files["session.json"]["size_bytes"] == len(final_session_bytes)
+        operator = PlaybackDiagnosticsReadOnlyStore(service.root)
+        assert operator.verify_session(SESSION_ID)["valid"] is True
         exported = service.export_session(SESSION_ID, format_name="ndjson")
         assert exported.is_file()
         assert stat.S_IMODE(exported.stat().st_mode) == 0o600
         assert "unknown_private_state" not in exported.read_text(encoding="utf-8")
+        (session_root / "summary.md").write_text("tampered\n", encoding="utf-8")
+        verification = operator.verify_session(SESSION_ID)
+        assert verification["valid"] is False
+        assert any("summary.md" in error for error in verification["errors"])
     finally:
         service.shutdown()
 
 
-def test_startup_recovery_finalizes_interrupted_session(test_settings, tmp_path):
+def test_startup_recovery_marks_session_interrupted_recoverable_without_sealing(
+    test_settings,
+    tmp_path,
+):
     first = _service(test_settings, tmp_path)
     bootstrap = _bootstrap(first)
     first.ingest(
@@ -205,17 +362,167 @@ def test_startup_recovery_finalizes_interrupted_session(test_settings, tmp_path)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             session = second.catalog.get_session(SESSION_ID)
-            if session and session["state"] == "interrupted":
+            if session and session["state"] == "interrupted_recoverable":
                 break
             time.sleep(0.02)
-        assert session["state"] == "interrupted"
+        assert session["state"] == "interrupted_recoverable"
         session_root = second.root / str(session["session_relative_path"])
         metadata = json.loads((session_root / "session.json").read_text(encoding="utf-8"))
-        assert metadata["state"] == "interrupted"
-        assert (session_root / "summary.md").is_file()
-        assert (session_root / "manifest.json").is_file()
+        assert metadata["state"] == "interrupted_recoverable"
+        assert not (session_root / "summary.md").exists()
+        assert not (session_root / "manifest.json").exists()
     finally:
         second.shutdown()
+
+
+def test_close_waits_for_missing_sequence_then_concurrent_retry_seals_once(
+    test_settings,
+    tmp_path,
+):
+    service = _service(test_settings, tmp_path)
+    try:
+        bootstrap = _bootstrap(service)
+        service.observe_event(
+            "synthetic_pre_close_observation",
+            playback_session_id=SESSION_ID,
+            payload={"state": "active"},
+        )
+        first = service.ingest(
+            diagnostics_session_id=SESSION_ID,
+            source_id=bootstrap.source_id,
+            events=[_event(2)],
+            user_id=7,
+        )
+        assert first.accepted == 1
+        assert first.ack_watermark == 0
+
+        watermark, finalized, state = service.close(
+            playback_session_id=SESSION_ID,
+            source_id=bootstrap.source_id,
+            user_id=7,
+            reason="synthetic_gap",
+            final_source_sequence=2,
+        )
+        assert (watermark, finalized, state) == (0, False, "closing")
+        assert service.catalog.get_session(SESSION_ID)["state"] == "closing"
+
+        replay = service.ingest(
+            diagnostics_session_id=SESSION_ID,
+            source_id=bootstrap.source_id,
+            events=[_event(1)],
+            user_id=7,
+        )
+        assert replay.accepted == 1
+        assert replay.ack_watermark == 2
+
+        barrier = threading.Barrier(3)
+
+        def close_again():
+            barrier.wait()
+            return service.close(
+                playback_session_id=SESSION_ID,
+                source_id=bootstrap.source_id,
+                user_id=7,
+                reason="synthetic_retry",
+                final_source_sequence=2,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(close_again) for _ in range(2)]
+            barrier.wait()
+            results = [future.result(timeout=10) for future in futures]
+
+        assert results == [(2, True, "sealed"), (2, True, "sealed")]
+        assert service.catalog.get_session(SESSION_ID)["state"] == "sealed"
+        sealed_session = service.catalog.get_session(SESSION_ID)
+        events, _reports = read_session_events(
+            service.root,
+            str(sealed_session["session_relative_path"]),
+            service.key_store,
+        )
+        names = [event["event_name"] for event in events]
+        assert names.count("synthetic_pre_close_observation") == 1
+        assert names.count("session_close") == 1
+        assert names.count("session_finalized") == 1
+
+        with pytest.raises(DiagnosticsWriterError, match="sealing or sealed"):
+            service.ingest(
+                diagnostics_session_id=SESSION_ID,
+                source_id=bootstrap.source_id,
+                events=[_event(3)],
+                user_id=7,
+            )
+        assert service.close(
+            playback_session_id=SESSION_ID,
+            source_id=bootstrap.source_id,
+            user_id=7,
+            reason="duplicate_close",
+            final_source_sequence=2,
+        ) == (2, True, "sealed")
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("failure_name", ["session.json", "manifest.json"])
+def test_final_artifact_failure_never_seals_and_close_retry_finishes_valid_manifest(
+    test_settings,
+    tmp_path,
+    monkeypatch,
+    failure_name,
+):
+    service = _service(test_settings, tmp_path)
+    try:
+        bootstrap = _bootstrap(service)
+        receipt = service.ingest(
+            diagnostics_session_id=SESSION_ID,
+            source_id=bootstrap.source_id,
+            events=[_event(1)],
+            user_id=7,
+        )
+        assert receipt.ack_watermark == 1
+        session = service.catalog.get_session(SESSION_ID)
+        session_root = service.root / str(session["session_relative_path"])
+        real_atomic_write = diagnostics_service_module.atomic_write_bytes
+        failed = False
+
+        def fail_once(path, payload):
+            nonlocal failed
+            if not failed and Path(path).name == failure_name:
+                failed = True
+                raise OSError(f"synthetic {failure_name} failure")
+            return real_atomic_write(path, payload)
+
+        monkeypatch.setattr(diagnostics_service_module, "atomic_write_bytes", fail_once)
+        first_close = service.close(
+            playback_session_id=SESSION_ID,
+            source_id=bootstrap.source_id,
+            user_id=7,
+            reason="synthetic_final_artifact_failure",
+            final_source_sequence=1,
+        )
+        assert first_close == (1, False, "closing")
+        assert service.catalog.get_session(SESSION_ID)["state"] == "closing"
+        assert not (session_root / "manifest.json").exists()
+
+        monkeypatch.setattr(
+            diagnostics_service_module,
+            "atomic_write_bytes",
+            real_atomic_write,
+        )
+        retry_close = service.close(
+            playback_session_id=SESSION_ID,
+            source_id=bootstrap.source_id,
+            user_id=7,
+            reason="synthetic_final_artifact_retry",
+            final_source_sequence=1,
+        )
+        assert retry_close == (1, True, "sealed")
+        assert service.catalog.get_session(SESSION_ID)["state"] == "sealed"
+        assert PlaybackDiagnosticsReadOnlyStore(service.root).verify_session(SESSION_ID)[
+            "valid"
+        ] is True
+    finally:
+        service.shutdown()
 
 
 def test_ingest_rejects_a_single_event_above_the_event_contract_limit(test_settings, tmp_path):

@@ -8,19 +8,23 @@ directory. It does not start Elvern, read media, or contact an external service.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import resource
 import statistics
 import sys
+import threading
 import time
 import tracemalloc
 import zlib
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -45,8 +49,10 @@ from backend.app.services.playback_diagnostics.fileio import (
     resolve_beneath,
 )
 from backend.app.services.playback_diagnostics.journal import verify_journal
+from backend.app.services.playback_diagnostics.journal import EncryptedJournal
 from backend.app.services.playback_diagnostics.privacy import sanitize_event
 from backend.app.services.playback_diagnostics.schema import PlaybackDiagnosticEvent
+from backend.app.services.playback_diagnostics.service import PlaybackDiagnosticsService
 from backend.app.services.playback_diagnostics.session_files import (
     read_session_events,
     write_manifest,
@@ -61,6 +67,7 @@ from backend.app.services.playback_diagnostics.writer import (
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "tmp" / "playback-diagnostics-benchmark"
 SYNTHETIC_MINUTES = 30
 BATCH_SIZE = 256
+SCALE_SESSION_COUNT = 2_000
 
 
 def _utc_now() -> str:
@@ -116,6 +123,7 @@ def _event(
     name: str,
     payload: dict[str, Any],
     incident_id: str | None = None,
+    playback_session_id: str = "session-synthetic-benchmark-0001",
 ) -> dict[str, Any]:
     now_ns = 1_800_000_000_000_000_000 + sequence * 1_000_000
     return {
@@ -125,7 +133,7 @@ def _event(
         "event_source": source,
         "severity": "info",
         "priority": "high" if incident_id else "normal",
-        "playback_session_id": "session-synthetic-benchmark-0001",
+        "playback_session_id": playback_session_id,
         "playback_attempt_id": "attempt-synthetic-benchmark-0001",
         "attachment_id": "attachment-synthetic-benchmark-0001",
         "epoch_id": "epoch-synthetic-benchmark-0001",
@@ -260,14 +268,20 @@ def _build_events(*, incident: bool) -> list[dict[str, Any]]:
     return events
 
 
-def _metadata(relative_path: str) -> dict[str, Any]:
+def _metadata(
+    relative_path: str,
+    *,
+    playback_session_id: str = "session-synthetic-benchmark-0001",
+    state: str = "active",
+    media_item_id: int = 1,
+) -> dict[str, Any]:
     return {
-        "schema_version": "playback-diagnostics-session-v1",
+        "schema_version": "playback-diagnostics-session-v2",
         "diagnostics_event_schema": SCHEMA_VERSION,
-        "playback_session_id": "session-synthetic-benchmark-0001",
-        "owner_hash": "owner-synthetic-benchmark",
-        "subject_id": "subject-synthetic-benchmark",
-        "media_item_id": 1,
+        "playback_session_id": playback_session_id,
+        "owner_hash": f"owner_{'d' * 64}",
+        "subject_id": "subject_synthetic_benchmark",
+        "media_item_id": media_item_id,
         "source_original_filename": "Synthetic Benchmark Movie.mkv",
         "source_filename_sha256": "a" * 64,
         "source_fingerprint": "b" * 64,
@@ -299,7 +313,7 @@ def _metadata(relative_path: str) -> dict[str, Any]:
         "elvern_commit": "synthetic",
         "ffmpeg_version": "synthetic",
         "config_fingerprint": "c" * 64,
-        "state": "active",
+        "state": state,
         "created_at_utc": "2026-08-20T00:00:00+00:00",
         "updated_at_utc": "2026-08-20T00:00:00+00:00",
         "session_relative_path": relative_path,
@@ -312,7 +326,6 @@ def _run_writer_scenario(output_root: Path, *, incident: bool) -> dict[str, Any]
     key_store = DiagnosticsKeyStore(root / "keys")
     active_key = key_store.load_or_create_active_key()
     catalog = DiagnosticsCatalog(root)
-    capacity = DiagnosticsCapacityGuard(root, minimum_free_bytes=1)
     baseline_bytes = directory_size_bytes(root)
     relative_path = "sessions/2026/08/20/session-synthetic-benchmark-0001"
     session_path = ensure_private_directory(resolve_beneath(root, relative_path))
@@ -335,6 +348,17 @@ def _run_writer_scenario(output_root: Path, *, incident: bool) -> dict[str, Any]
             source_type=source,
         )
 
+    capacity = DiagnosticsCapacityGuard(root, minimum_free_bytes=1)
+    reservation_accounting: list[dict[str, int]] = []
+    original_finish_reservation = capacity._finish_reservation
+
+    def capture_reservation(reserved_bytes: int, actual_bytes: int) -> None:
+        reservation_accounting.append(
+            {"reserved_bytes": int(reserved_bytes), "actual_bytes": int(actual_bytes)}
+        )
+        original_finish_reservation(reserved_bytes, actual_bytes)
+
+    capacity._finish_reservation = capture_reservation  # type: ignore[method-assign]
     writer = DiagnosticsWriter(
         root,
         catalog=catalog,
@@ -342,6 +366,15 @@ def _run_writer_scenario(output_root: Path, *, incident: bool) -> dict[str, Any]
         key_store=key_store,
         active_key=active_key,
     )
+    status_write_count = 0
+    original_status_writer = capacity.write_current_status
+
+    def count_status_write(**extra: object):
+        nonlocal status_write_count
+        status_write_count += 1
+        return original_status_writer(**extra)
+
+    capacity.write_current_status = count_status_write  # type: ignore[method-assign]
     validation_latencies: list[float] = []
     for event in events[: min(1_000, len(events))]:
         started = time.perf_counter_ns()
@@ -382,6 +415,8 @@ def _run_writer_scenario(output_root: Path, *, incident: bool) -> dict[str, Any]
     _current, peak_tracemalloc = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    writer_ledger_bytes = capacity.usage_bytes
+    physical_bytes_after_writer = directory_size_bytes(root)
 
     stored_events, journal_reports = read_session_events(root, relative_path, key_store)
     source_stats = catalog.source_stats(metadata["playback_session_id"])
@@ -395,6 +430,7 @@ def _run_writer_scenario(output_root: Path, *, incident: bool) -> dict[str, Any]
         capacity_state=capacity.refresh().state,
     )
     write_manifest(root, relative_path, journal_reports=journal_reports)
+    capacity.reconcile_usage()
     final_bytes = directory_size_bytes(root)
     session_directory_bytes = directory_size_bytes(session_path)
     per_session_growth = max(1, final_bytes - baseline_bytes)
@@ -410,6 +446,15 @@ def _run_writer_scenario(output_root: Path, *, incident: bool) -> dict[str, Any]
         "request_path_enqueue": _summary(enqueue_latencies),
         "writer": {
             **writer.metrics(),
+            "submitted_batch_count": len(enqueue_latencies),
+            "status_write_count": status_write_count,
+            "status_writes_coalesced": status_write_count < len(enqueue_latencies),
+            "reservation_count": len(reservation_accounting),
+            "reservation_underestimates": [
+                item
+                for item in reservation_accounting
+                if item["actual_bytes"] > item["reserved_bytes"]
+            ],
             "wall_seconds": wall_seconds,
             "process_cpu_seconds": process_cpu_seconds,
             "cpu_to_wall_ratio": process_cpu_seconds / wall_seconds if wall_seconds else None,
@@ -428,6 +473,13 @@ def _run_writer_scenario(output_root: Path, *, incident: bool) -> dict[str, Any]
             // per_session_growth,
             "estimated_sessions_at_80gb_hard_cap": DIAGNOSTICS_HARD_CAP_BYTES
             // per_session_growth,
+            "capacity_ledger_usage_bytes": capacity.usage_bytes,
+            "capacity_reserved_bytes_after_flush": capacity.reserved_bytes,
+            "physical_root_bytes": final_bytes,
+            "capacity_ledger_matches_physical": capacity.usage_bytes == final_bytes,
+            "writer_ledger_usage_bytes": writer_ledger_bytes,
+            "physical_bytes_after_writer": physical_bytes_after_writer,
+            "writer_ledger_matches_physical": writer_ledger_bytes == physical_bytes_after_writer,
         },
         "journal_verification": journal_reports,
         "limitations": [
@@ -487,6 +539,245 @@ def _component_microbench(output_root: Path) -> dict[str, Any]:
     }
 
 
+def _concurrent_capacity_benchmark(output_root: Path) -> dict[str, Any]:
+    root = ensure_private_directory(output_root / "concurrent-capacity" / "diagnostics")
+    guard = DiagnosticsCapacityGuard(
+        root,
+        hard_cap_bytes=10_000,
+        emergency_reserve_bytes=1_000,
+        minimum_free_bytes=0,
+    )
+    start_barrier = threading.Barrier(3)
+    finish_barrier = threading.Barrier(3)
+    results: list[str] = []
+    results_lock = threading.Lock()
+
+    def reserve() -> None:
+        reservation = None
+        start_barrier.wait()
+        try:
+            reservation = guard.reserve(6_000)
+            outcome = "reserved"
+        except Exception as exc:  # noqa: BLE001 - benchmark records the rejected contender.
+            outcome = exc.__class__.__name__
+        with results_lock:
+            results.append(outcome)
+        finish_barrier.wait()
+        if reservation is not None:
+            reservation.release()
+
+    threads = [threading.Thread(target=reserve, daemon=True) for _index in range(2)]
+    for thread in threads:
+        thread.start()
+    start_barrier.wait()
+    finish_barrier.wait()
+    for thread in threads:
+        thread.join(timeout=5)
+    reserved_count = results.count("reserved")
+    rejected_count = results.count("DiagnosticsCapacityError")
+    if reserved_count != 1 or rejected_count != 1:
+        raise RuntimeError("Concurrent capacity reservations oversubscribed the hard cap")
+    return {
+        "requested_bytes_per_contender": 6_000,
+        "normal_budget_bytes": guard.normal_budget_bytes,
+        "contenders": 2,
+        "reserved_count": reserved_count,
+        "rejected_count": rejected_count,
+        "oversubscription_prevented": True,
+        "reserved_bytes_after_release": guard.reserved_bytes,
+    }
+
+
+def _catalog_rebuild_benchmark(output_root: Path) -> dict[str, Any]:
+    root = ensure_private_directory(output_root / "catalog-rebuild" / "diagnostics")
+    key_store = DiagnosticsKeyStore(root / "keys")
+    active_key = key_store.load_or_create_active_key()
+    catalog = DiagnosticsCatalog(root)
+    session_id = "session-synthetic-rebuild-0001"
+    source_id = "client-synthetic-rebuild-0001"
+    relative_path = f"sessions/2026/08/20/{session_id}"
+    session_path = ensure_private_directory(resolve_beneath(root, relative_path))
+    raw_path = ensure_private_directory(resolve_beneath(session_path, "raw"))
+    metadata = _metadata(relative_path, playback_session_id=session_id)
+    atomic_write_json(resolve_beneath(session_path, "session.json"), metadata)
+    catalog.upsert_session(metadata)
+    catalog.register_source(
+        playback_session_id=session_id,
+        source_id=source_id,
+        source_type="client",
+    )
+    source_token = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:20]
+    journal = EncryptedJournal(
+        resolve_beneath(raw_path, f"client-{source_token}-000001.elvd"),
+        playback_session_id=session_id,
+        source_type="client",
+        source_id=source_id,
+        key_store=key_store,
+        active_key=active_key,
+        quarantine_root=resolve_beneath(root, "quarantine"),
+    )
+    first_event = _event(
+        1,
+        source="client",
+        source_sequence=1,
+        name="media_aggregate",
+        payload=_base_payload(1),
+        playback_session_id=session_id,
+    )
+    journal.append((first_event,))
+
+    capacity = DiagnosticsCapacityGuard(root, minimum_free_bytes=1)
+    writer = DiagnosticsWriter(
+        root,
+        catalog=catalog,
+        capacity=capacity,
+        key_store=key_store,
+        active_key=active_key,
+    )
+    writer._unindexed_sources.add((session_id, source_id))
+    second_event = _event(
+        2,
+        source="client",
+        source_sequence=2,
+        name="media_aggregate",
+        payload=_base_payload(2),
+        playback_session_id=session_id,
+    )
+    writer.start()
+    started = time.perf_counter()
+    try:
+        receipt = writer.write_and_wait(
+            DiagnosticsWriteBatch(
+                playback_session_id=session_id,
+                source_id=source_id,
+                source_type="client",
+                session_relative_path=relative_path,
+                events=(second_event,),
+                enqueued_monotonic_ns=time.monotonic_ns(),
+            ),
+            timeout=30,
+        )
+    finally:
+        writer.shutdown(timeout=10)
+    elapsed_ms = (time.perf_counter() - started) * 1_000
+    stored_events, journal_reports = read_session_events(root, relative_path, key_store)
+    ack_watermark = catalog.ack_watermark(source_id)
+    if ack_watermark != 2 or len(stored_events) != 2:
+        raise RuntimeError("Unindexed diagnostics journal was not rebuilt exactly once")
+    return {
+        "elapsed_ms": elapsed_ms,
+        "journal_event_count": len(stored_events),
+        "catalog_ack_watermark": ack_watermark,
+        "write_receipt_ack_watermark": receipt.ack_watermark,
+        "raw_event_ids_unique": len({event["event_id"] for event in stored_events}) == 2,
+        "journal_verification": journal_reports,
+    }
+
+
+def _startup_scale_recovery_benchmark(output_root: Path) -> dict[str, Any]:
+    root = ensure_private_directory(output_root / "startup-scale" / "diagnostics")
+    key_store = DiagnosticsKeyStore(root / "keys")
+    active_key = key_store.load_or_create_active_key()
+    catalog = DiagnosticsCatalog(root)
+
+    for index in range(SCALE_SESSION_COUNT):
+        session_id = f"session-scale-sealed-{index:06d}"
+        relative_path = f"sessions/2026/08/19/{session_id}"
+        session_path = ensure_private_directory(resolve_beneath(root, relative_path))
+        raw_path = ensure_private_directory(resolve_beneath(session_path, "raw"))
+        metadata = _metadata(
+            relative_path,
+            playback_session_id=session_id,
+            state="sealed",
+            media_item_id=index,
+        )
+        atomic_write_json(resolve_beneath(session_path, "session.json"), metadata)
+        marker_path = resolve_beneath(raw_path, "sealed-history-000001.elvd")
+        marker_path.write_bytes(b"sealed-history-must-not-be-decrypted")
+        marker_path.chmod(0o600)
+        catalog.upsert_session(metadata)
+
+    open_session_id = "session-scale-open-000001"
+    open_source_id = "client-scale-open-000001"
+    open_relative_path = f"sessions/2026/08/20/{open_session_id}"
+    open_session_path = ensure_private_directory(resolve_beneath(root, open_relative_path))
+    open_raw_path = ensure_private_directory(resolve_beneath(open_session_path, "raw"))
+    open_metadata = _metadata(
+        open_relative_path,
+        playback_session_id=open_session_id,
+        state="active",
+        media_item_id=SCALE_SESSION_COUNT + 1,
+    )
+    atomic_write_json(resolve_beneath(open_session_path, "session.json"), open_metadata)
+    catalog.upsert_session(open_metadata)
+    open_journal_path = resolve_beneath(open_raw_path, "client-open-000001.elvd")
+    open_journal = EncryptedJournal(
+        open_journal_path,
+        playback_session_id=open_session_id,
+        source_type="client",
+        source_id=open_source_id,
+        key_store=key_store,
+        active_key=active_key,
+        quarantine_root=resolve_beneath(root, "quarantine"),
+    )
+    open_journal.append((
+        _event(
+            1,
+            source="client",
+            source_sequence=1,
+            name="media_aggregate",
+            payload=_base_payload(1),
+            playback_session_id=open_session_id,
+        ),
+    ))
+
+    capacity_started = time.perf_counter()
+    capacity = DiagnosticsCapacityGuard(root, minimum_free_bytes=1)
+    startup_scan_ms = (time.perf_counter() - capacity_started) * 1_000
+    settings = SimpleNamespace(
+        playback_diagnostics_enabled=True,
+        playback_diagnostics_root=root,
+    )
+    service = PlaybackDiagnosticsService(settings)
+    service.catalog = catalog
+    service.key_store = key_store
+    service.capacity = capacity
+    verification_paths: list[str] = []
+
+    def count_verification(path: Path, *args, **kwargs):
+        verification_paths.append(str(path))
+        return verify_journal(path, *args, **kwargs)
+
+    recovery_started = time.perf_counter()
+    with patch(
+        "backend.app.services.playback_diagnostics.service.verify_journal",
+        side_effect=count_verification,
+    ):
+        service._recover_open_sessions()
+    recovery_ms = (time.perf_counter() - recovery_started) * 1_000
+    recovered_session = catalog.get_session(open_session_id)
+    sealed_session = catalog.get_session("session-scale-sealed-000000")
+    if verification_paths != [str(open_journal_path)]:
+        raise RuntimeError("Normal startup decrypted sealed historical diagnostics journals")
+    recovered_state = str((recovered_session or {}).get("state") or "")
+    sealed_state = str((sealed_session or {}).get("state") or "")
+    if recovered_state != "interrupted_recoverable" or sealed_state != "sealed":
+        raise RuntimeError("Open-only startup recovery changed an unexpected session state")
+    return {
+        "synthetic_sealed_session_count": SCALE_SESSION_COUNT,
+        "synthetic_journal_file_count": SCALE_SESSION_COUNT + 1,
+        "startup_capacity_reconciliation_ms": startup_scan_ms,
+        "open_session_recovery_ms": recovery_ms,
+        "journals_decrypted_during_recovery": len(verification_paths),
+        "only_open_journal_decrypted": verification_paths == [str(open_journal_path)],
+        "open_session_state": recovered_state,
+        "sealed_history_state_preserved": sealed_state == "sealed",
+        "recovered_open_source_ack_watermark": catalog.ack_watermark(open_source_id),
+        "capacity_usage_bytes": capacity.usage_bytes,
+        "physical_root_bytes": directory_size_bytes(root),
+    }
+
+
 def _write_markdown(path: Path, report: dict[str, Any]) -> None:
     client = report.get("client") or {}
     scenarios = report["server_scenarios"]
@@ -533,6 +824,14 @@ def _write_markdown(path: Path, report: dict[str, Any]) -> None:
         )
     lines.extend(
         [
+            "## Scale And Recovery",
+            "",
+            f"- Sealed synthetic sessions: `{report['startup_scale']['synthetic_sealed_session_count']}`.",
+            f"- Journals decrypted during normal open-only recovery: `{report['startup_scale']['journals_decrypted_during_recovery']}`.",
+            f"- Only the open journal was decrypted: `{report['startup_scale']['only_open_journal_decrypted']}`.",
+            f"- Unindexed journal rebuild watermark: `{report['catalog_rebuild']['catalog_ack_watermark']}`.",
+            f"- Concurrent reservation oversubscription prevented: `{report['concurrent_capacity']['oversubscription_prevented']}`.",
+            "",
             "## Interpretation",
             "",
             "- Request-path work is validation, sanitization, and non-blocking queue insertion; journal compression, encryption, catalog writes, and fsync occur in the dedicated writer.",
@@ -556,7 +855,13 @@ def main() -> int:
     args = parser.parse_args()
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    for child in (output_root / "no_incident", output_root / "incident"):
+    for child in (
+        output_root / "no_incident",
+        output_root / "incident",
+        output_root / "concurrent-capacity",
+        output_root / "catalog-rebuild",
+        output_root / "startup-scale",
+    ):
         if child.exists():
             import shutil
 
@@ -566,11 +871,14 @@ def main() -> int:
     if args.client_report.is_file():
         client = json.loads(args.client_report.read_text(encoding="utf-8"))
     report = {
-        "schema_version": "playback-diagnostics-benchmark-v1",
+        "schema_version": "playback-diagnostics-benchmark-v2",
         "measured_at_utc": _utc_now(),
         "synthetic": True,
         "client": client,
         "server_components": _component_microbench(output_root),
+        "concurrent_capacity": _concurrent_capacity_benchmark(output_root),
+        "catalog_rebuild": _catalog_rebuild_benchmark(output_root),
+        "startup_scale": _startup_scale_recovery_benchmark(output_root),
         "server_scenarios": [
             _run_writer_scenario(output_root, incident=False),
             _run_writer_scenario(output_root, incident=True),

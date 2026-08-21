@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import threading
+from collections import OrderedDict
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
+from ..mobile_playback_models import SEGMENT_DURATION_SECONDS
+from .ffmpeg_observer import route2_frontier_ms
 from .runtime import observe_runtime_event
 
 
@@ -27,6 +31,44 @@ _DETAIL_KEYS = {
     "client_is_playing",
     "reason",
 }
+_decision_lock = threading.RLock()
+_decisions_by_epoch: OrderedDict[tuple[str, str], str] = OrderedDict()
+_MAX_DECISION_LINKS = 4_096
+
+
+def bind_atc_decision(
+    playback_session_id: str,
+    epoch_id: str | None,
+    decision_id: str | None,
+) -> None:
+    if not playback_session_id or not epoch_id or not decision_id:
+        return
+    with _decision_lock:
+        key = (playback_session_id, epoch_id)
+        _decisions_by_epoch[key] = decision_id
+        _decisions_by_epoch.move_to_end(key)
+        while len(_decisions_by_epoch) > _MAX_DECISION_LINKS:
+            _decisions_by_epoch.popitem(last=False)
+
+
+def _linked_atc_decision(playback_session_id: str, epoch_id: str | None) -> str | None:
+    if not epoch_id:
+        return None
+    with _decision_lock:
+        key = (playback_session_id, epoch_id)
+        decision_id = _decisions_by_epoch.get(key)
+        if decision_id is not None:
+            _decisions_by_epoch.move_to_end(key)
+        return decision_id
+
+
+def forget_manager_session(playback_session_id: str) -> None:
+    """Release completed-session ATC links from the bounded diagnostics ledger."""
+
+    with _decision_lock:
+        for key in tuple(_decisions_by_epoch):
+            if key[0] == playback_session_id:
+                _decisions_by_epoch.pop(key, None)
 
 
 def _safe_scalar(value: Any) -> Any:
@@ -62,10 +104,10 @@ def observe_route2_manager_event(
             payload.update(
                 {
                     "state": str(getattr(epoch, "state", "unknown")),
-                    "frontier_ms": round(
-                        max(0, int(getattr(epoch, "contiguous_published_through_segment", -1)) + 1)
-                        * 4_000,
+                    "frontier_ms": route2_frontier_ms(
+                        getattr(epoch, "contiguous_published_through_segment", None),
                     ),
+                    "segment_duration_ms": SEGMENT_DURATION_SECONDS * 1_000,
                 }
             )
         for key in _DETAIL_KEYS:
@@ -80,11 +122,9 @@ def observe_route2_manager_event(
             ).hexdigest()
         decision_id = None
         if source == "atc":
-            request_id = details.get("adaptive_resupply_request_id") or details.get("reclaim_request_id")
-            decision_id = (
-                f"decision_{hashlib.sha256(str(request_id).encode()).hexdigest()[:24]}"
-                if request_id
-                else f"decision_{secrets.token_urlsafe(18)}"
+            decision_id = str(details.get("diagnostic_decision_id") or "") or _linked_atc_decision(
+                str(session.session_id),
+                str(getattr(epoch, "epoch_id", "") or "") or None,
             )
         observe_runtime_event(
             f"route2_{event_name}",
@@ -109,7 +149,7 @@ def observe_atc_evaluation(
     worker_id: str | None,
     adaptive_input: Any,
     adaptive_decision: Any,
-) -> None:
+) -> str | None:
     try:
         decision_id = f"decision_{secrets.token_urlsafe(18)}"
         raw_input = asdict(adaptive_input) if is_dataclass(adaptive_input) else {}
@@ -163,5 +203,95 @@ def observe_atc_evaluation(
             },
             **common,
         )
+        return decision_id
     except Exception:  # noqa: BLE001 - classification result is untouched.
+        return None
+
+
+def observe_atc_controller_evaluation(
+    *,
+    playback_session_id: str,
+    epoch_id: str | None,
+    worker_id: str | None,
+    current_threads: int,
+    target_threads: int | None,
+    action: str,
+    confidence: float | None,
+    bottleneck_class: str,
+    reasons: list[str],
+    blockers: list[str],
+    input_snapshot: dict[str, Any],
+) -> str | None:
+    """Record one evaluation at an existing controller boundary."""
+
+    try:
+        decision_id = f"decision_{secrets.token_urlsafe(18)}"
+        common = {
+            "playback_session_id": playback_session_id,
+            "event_source": "atc",
+            "observation_kind": "measured_server",
+            "decision_id": decision_id,
+            "epoch_id": epoch_id,
+            "worker_id": worker_id,
+        }
+        observe_runtime_event(
+            "atc_evaluation_started",
+            payload={"algorithm_version": "route2-closed-loop-current"},
+            **common,
+        )
+        observe_runtime_event(
+            "atc_inputs_captured",
+            payload={"input_snapshot": input_snapshot},
+            **common,
+        )
+        observe_runtime_event(
+            "atc_decision_produced",
+            priority="high",
+            payload={
+                "current_threads": current_threads,
+                "target_threads": target_threads,
+                "decision_action": action,
+                "bottleneck_class": bottleneck_class,
+                "confidence": confidence,
+                "reasons": reasons,
+                "blockers": blockers,
+                "blocked": bool(blockers),
+            },
+            **common,
+        )
+        bind_atc_decision(playback_session_id, epoch_id, decision_id)
+        return decision_id
+    except Exception:  # noqa: BLE001 - diagnostics cannot alter the controller.
+        return None
+
+
+def observe_atc_action(
+    *,
+    playback_session_id: str,
+    epoch_id: str | None,
+    worker_id: str | None,
+    decision_id: str | None,
+    action: str,
+    applied: bool,
+    reason: str,
+    target_threads: int | None,
+) -> None:
+    try:
+        observe_runtime_event(
+            "atc_action_applied" if applied else "atc_action_not_applied",
+            playback_session_id=playback_session_id,
+            event_source="atc",
+            observation_kind="measured_server",
+            priority="high" if applied else "normal",
+            decision_id=decision_id,
+            epoch_id=epoch_id,
+            worker_id=worker_id,
+            payload={
+                "decision_action": action,
+                "applied": applied,
+                "reason": reason,
+                "target_threads": target_threads,
+            },
+        )
+    except Exception:  # noqa: BLE001 - diagnostics cannot alter the controller.
         return

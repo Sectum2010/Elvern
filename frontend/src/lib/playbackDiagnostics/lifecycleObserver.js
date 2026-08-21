@@ -14,27 +14,35 @@ export class PlaybackLifecycleDiagnosticObserver {
     this.listeners = [];
     this.lastClientObservedAt = Date.now();
     this.hiddenAt = null;
+    this.hiddenMonotonicAt = null;
+    this.frozen = false;
   }
 
   start() {
     this.listen(this.documentRef, "visibilitychange", () => {
       const hidden = this.documentRef.visibilityState === "hidden";
       const now = Date.now();
+      const monotonicNow = this.windowRef?.performance?.now?.() ?? now;
       if (hidden) {
         this.hiddenAt = now;
+        this.hiddenMonotonicAt = monotonicNow;
+        this.record("page_hidden_started", {
+          payload: { page_state: "hidden", visible: false },
+        });
       } else {
-        const suspensionLowerBoundNs = this.hiddenAt
-          ? String(Math.max(0, now - this.hiddenAt) * 1_000_000)
+        const hiddenDurationMs = this.hiddenMonotonicAt != null
+          ? Math.max(0, monotonicNow - this.hiddenMonotonicAt)
           : null;
-        this.record("background_suspension_suspected", {
-          observationKind: "inferred",
+        this.record("page_hidden_ended", {
           payload: {
             last_client_observed_time: this.lastClientObservedAt,
-            suspension_lower_bound_ns: suspensionLowerBoundNs,
-            suspension_upper_bound_ns: suspensionLowerBoundNs,
+            hidden_duration_ms: hiddenDurationMs,
             page_state: "visible",
+            visible: true,
           },
         });
+        this.hiddenAt = null;
+        this.hiddenMonotonicAt = null;
         this.recalibrateClock();
       }
       this.lastClientObservedAt = now;
@@ -71,14 +79,37 @@ export class PlaybackLifecycleDiagnosticObserver {
       this.documentRef.fullscreenElement ? "fullscreen_entered" : "fullscreen_exited",
       { payload: { active: Boolean(this.documentRef.fullscreenElement), action_origin: "browser" } },
     ));
-    this.listen(this.documentRef, "freeze", () => this.record("page_freeze", {
-      observationKind: "measured_client",
-      payload: { page_state: "freeze" },
-    }));
-    this.listen(this.documentRef, "resume", () => {
-      this.record("page_resume", { payload: { page_state: "resume" } });
-      this.recalibrateClock();
-    });
+    const freezeResumeSupported = Boolean(
+      this.documentRef && ("onfreeze" in this.documentRef || "wasDiscarded" in this.documentRef)
+    );
+    if (freezeResumeSupported) {
+      this.listen(this.documentRef, "freeze", () => {
+        this.frozen = true;
+        this.record("page_freeze", {
+          observationKind: "measured_client",
+          payload: { page_state: "freeze" },
+        });
+      });
+      this.listen(this.documentRef, "resume", () => {
+        this.frozen = false;
+        this.record("page_resume", {
+          observationKind: "measured_client",
+          payload: { page_state: "resume" },
+        });
+        this.recalibrateClock();
+      });
+    } else {
+      this.record("client_capability_unavailable", {
+        observationKind: "unsupported",
+        capabilityAvailable: false,
+        unavailableReason: "freeze_resume_not_detected",
+        payload: {
+          type: "freeze_resume_events",
+          available: false,
+          unavailable_reason: "freeze_resume_not_detected",
+        },
+      });
+    }
     this.listen(this.windowRef?.screen?.orientation, "change", () => this.recordOrientation());
     this.record("page_lifecycle_started", {
       payload: {

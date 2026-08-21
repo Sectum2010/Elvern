@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import math
 import os
@@ -10,7 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .fileio import FILE_MODE, atomic_write_bytes, atomic_write_json, resolve_beneath
+from .fileio import FILE_MODE, atomic_write_bytes, encode_json_document, resolve_beneath
+from .privacy import markdown_inline_code, spreadsheet_safe_cell
 
 
 def _utc_now() -> str:
@@ -74,9 +76,8 @@ def build_summary(
     sources = Counter(str(event.get("event_source") or "unknown") for event in events)
     session_created_ns = _first_event_ns(events, "session_created")
     play_intent_ns = _first_event_ns(events, "play_intent")
-    first_frame_ns = _first_event_ns(events, "first_frame")
-    if first_frame_ns is None:
-        first_frame_ns = _first_event_ns(events, "playing")
+    first_frame_ns = _first_event_ns(events, "first_video_frame_presented")
+    inferred_first_frame_ns = _first_event_ns(events, "first_video_frame_inferred")
     startup_delay_ms = None
     if first_frame_ns is not None and (play_intent_ns or session_created_ns) is not None:
         startup_delay_ms = max(
@@ -92,10 +93,12 @@ def build_summary(
         [event for event in events if event.get("event_name") in {"playhead_progress_resumed", "recovery_completed"}],
         "actual_duration_ms",
     )
-    sequence_gaps = sum(
-        max(0, int(source.get("max_seen_sequence") or 0) - int(source.get("ack_watermark") or 0))
+    sequence_gaps = sum(int(source.get("missing_sequence_count") or 0) for source in source_stats)
+    missing_ranges = {
+        str(source.get("source_id") or "unknown"): list(source.get("missing_ranges") or [])
         for source in source_stats
-    )
+        if source.get("missing_ranges")
+    }
     unsupported = sorted(
         {
             str(event.get("unavailable_reason"))
@@ -109,23 +112,48 @@ def build_summary(
         if event.get("clock_uncertainty_ns") is not None
         and str(event["clock_uncertainty_ns"]).lstrip("-").isdigit()
     ]
-    expected_sources = {"client", "server", "host"}
+    expected_sources = {"client", "server"}
     present_sources = set(sources)
-    completeness_score = round(
-        min(1.0, len(present_sources & expected_sources) / len(expected_sources)) * 100,
-        1,
+    required_sources_present = expected_sources.issubset(present_sources)
+    all_sources_final = bool(source_stats) and all(
+        source.get("final_source_sequence") is not None for source in source_stats
+    )
+    all_sources_acked = all(
+        int(source.get("ack_watermark") or 0)
+        >= int(source.get("final_source_sequence") or source.get("max_seen_sequence") or 0)
+        for source in source_stats
+    )
+    dropped_event_count = int(writer_metrics.get("events_dropped") or 0)
+    lifecycle_state = str(metadata.get("state") or "unknown")
+    completeness_assessment = (
+        "complete"
+        if lifecycle_state == "sealed"
+        and required_sources_present
+        and all_sources_final
+        and all_sources_acked
+        and sequence_gaps == 0
+        and dropped_event_count == 0
+        else "incomplete"
     )
     clock_quality_score = 0.0
     if clock_uncertainties:
         median_uncertainty_ms = statistics.median(clock_uncertainties) / 1_000_000
         clock_quality_score = round(max(0.0, 100.0 - min(100.0, median_uncertainty_ms)), 1)
     capabilities = metadata.get("capabilities") if isinstance(metadata.get("capabilities"), dict) else {}
-    supported_count = sum(value is True for value in capabilities.values())
-    known_count = sum(isinstance(value, bool) for value in capabilities.values())
+    supported_capability_states = {"api_detected", "server_collected", "detected_not_collected"}
+    known_capability_states = supported_capability_states | {"api_absent", "not_applicable"}
+    supported_count = sum(
+        value is True or value in supported_capability_states
+        for value in capabilities.values()
+    )
+    known_count = sum(
+        isinstance(value, bool) or value in known_capability_states
+        for value in capabilities.values()
+    )
     platform_capability_score = round((supported_count / known_count) * 100, 1) if known_count else 0.0
 
     summary = {
-        "schema_version": "playback-diagnostics-summary-v1",
+        "schema_version": "playback-diagnostics-summary-v2",
         "generated_at_utc": _utc_now(),
         "identity": {
             "source_original_filename": metadata.get("source_original_filename"),
@@ -162,11 +190,13 @@ def build_summary(
         },
         "qoe": {
             "startup_delay_ms": round(startup_delay_ms, 3) if startup_delay_ms is not None else None,
+            "first_presented_frame_observed": first_frame_ns is not None,
+            "inferred_first_frame_observed": inferred_first_frame_ns is not None,
             "stall_count": names["stall_confirmed"],
             "total_stalled_ms": round(sum(stall_durations), 3),
             "longest_stall_ms": round(max(stall_durations), 3) if stall_durations else None,
-            "recovery_count": names["recovery_started"],
-            "recovery_success_count": names["playhead_progress_resumed"],
+            "recovery_action_count": names["recovery_action_applied"],
+            "passive_progress_resume_count": names["playhead_progress_resumed"],
             "recovery_duration_ms": _percentiles(recovery_durations),
             "seek_count": names["seek_intent"],
             "pause_count": names["pause_started"],
@@ -177,23 +207,50 @@ def build_summary(
             "buffered_ahead_ms": _percentiles(_finite_numbers(events, "buffered_ahead_ms")),
             "minimum_buffer_ms": min(_finite_numbers(events, "buffered_ahead_ms"), default=None),
             "client_throughput_bps": _percentiles(_finite_numbers(events, "client_throughput_bps")),
-            "dropped_frame_ratio": _percentiles(_finite_numbers(events, "dropped_frame_ratio")),
+            "window_dropped_frame_ratio": _percentiles(
+                _finite_numbers(events, "window_dropped_frame_ratio")
+            ),
+            "dropped_frame_delta": {
+                "dropped": int(sum(_finite_numbers(events, "delta_dropped_frames"))),
+                "total": int(sum(_finite_numbers(events, "delta_total_frames"))),
+            },
             "long_task_ms": _percentiles(_finite_numbers(events, "long_task_ms")),
             "capabilities": capabilities,
         },
         "server": {
-            "provider_throughput_bps": _percentiles(_finite_numbers(events, "provider_throughput_bps")),
+            "upstream_active_read_throughput_bps": _percentiles(
+                _finite_numbers(events, "upstream_active_read_throughput_bps")
+            ),
+            "end_to_end_delivery_rate_bps": _percentiles(
+                _finite_numbers(events, "end_to_end_delivery_rate_bps")
+            ),
+            "consumer_backpressure_ms": _percentiles(
+                _finite_numbers(events, "consumer_backpressure_ms")
+            ),
             "host_cpu_percent": _percentiles(_finite_numbers(events, "cpu_percent")),
             "host_memory_available_bytes": _percentiles(_finite_numbers(events, "memory_available_bytes")),
             "atc_evaluations": names["atc_evaluation_started"],
             "atc_actions": names["atc_action_applied"],
+            "eta_predictions": names["eta_prediction"],
+            "eta_resolutions": names["eta_resolved"],
+            "eta_superseded": names["eta_prediction_superseded"],
         },
         "diagnostics_quality": {
-            "telemetry_completeness_score": completeness_score,
+            "telemetry_completeness_score": None,
+            "completeness_assessment": completeness_assessment,
+            "lifecycle_state": lifecycle_state,
+            "expected_event_sources": sorted(expected_sources),
+            "required_sources_present": required_sources_present,
+            "all_sources_final_declared": all_sources_final,
+            "all_source_watermarks_complete": all_sources_acked,
+            "missing_sequence_ranges": missing_ranges,
+            "clock_calibration_sample_count": names["clock_synchronized"],
+            "host_evidence_state": "observed" if "host" in present_sources else "not_observed",
+            "incident_window_complete_count": names["post_recovery_observation"],
             "clock_quality_score": clock_quality_score,
             "platform_capability_score": platform_capability_score,
             "unsupported_fields": unsupported,
-            "dropped_event_count": int(writer_metrics.get("events_dropped") or 0),
+            "dropped_event_count": dropped_event_count,
             "sequence_gap_count": sequence_gaps,
             "duplicate_event_count": sum(int(source.get("duplicate_count") or 0) for source in source_stats),
             "out_of_order_event_count": sum(int(source.get("out_of_order_count") or 0) for source in source_stats),
@@ -203,7 +260,7 @@ def build_summary(
         },
     }
     completeness = {
-        "schema_version": "playback-diagnostics-completeness-v1",
+        "schema_version": "playback-diagnostics-completeness-v2",
         "generated_at_utc": summary["generated_at_utc"],
         **summary["diagnostics_quality"],
         "source_stats": source_stats,
@@ -212,12 +269,14 @@ def build_summary(
     return summary, completeness
 
 
-def write_timeline_csv(path: Path, events: list[dict[str, Any]]) -> None:
+def build_timeline_csv(events: list[dict[str, Any]]) -> bytes:
     rows: list[list[Any]] = []
     for event in events:
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         rows.append(
             [
+                spreadsheet_safe_cell(value)
+                for value in (
                 event.get("aligned_wall_time_ns"),
                 event.get("event_name"),
                 event.get("event_source"),
@@ -235,10 +294,9 @@ def write_timeline_csv(path: Path, events: list[dict[str, Any]]) -> None:
                 payload.get("cpu_percent"),
                 payload.get("memory_available_bytes"),
                 payload.get("state"),
+                )
             ]
         )
-    import io
-
     buffer = io.StringIO(newline="")
     writer = csv.writer(buffer)
     writer.writerow(
@@ -263,20 +321,21 @@ def write_timeline_csv(path: Path, events: list[dict[str, Any]]) -> None:
         ]
     )
     writer.writerows(rows)
-    atomic_write_bytes(path, buffer.getvalue().encode("utf-8"))
+    return buffer.getvalue().encode("utf-8")
 
 
-def write_summary_files(
-    root: Path,
-    session_relative_path: str,
-    *,
+def write_timeline_csv(path: Path, events: list[dict[str, Any]]) -> None:
+    atomic_write_bytes(path, build_timeline_csv(events))
+
+
+def build_summary_artifacts(
     metadata: dict[str, Any],
     events: list[dict[str, Any]],
+    *,
     source_stats: list[dict[str, Any]],
     writer_metrics: dict[str, Any],
     capacity_state: str,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    session_path = resolve_beneath(root, session_relative_path)
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
     summary, completeness = build_summary(
         metadata,
         events,
@@ -284,9 +343,7 @@ def write_summary_files(
         writer_metrics=writer_metrics,
         capacity_state=capacity_state,
     )
-    atomic_write_json(resolve_beneath(session_path, "summary.json"), summary)
-    atomic_write_json(resolve_beneath(session_path, "completeness.json"), completeness)
-    write_timeline_csv(resolve_beneath(session_path, "timeline.csv"), events)
+
 
     identity = summary["identity"]
     qoe = summary["qoe"]
@@ -297,26 +354,30 @@ def write_summary_files(
             "# Playback Diagnostic Session",
             "",
             "## Identity",
-            f"- Movie file: `{identity['source_original_filename']}`",
-            f"- Media item: `{identity['media_item_id']}`",
-            f"- Session: `{identity['playback_session_id']}`",
-            f"- Source: `{identity['source_kind']}`",
-            f"- Mode: `{identity['playback_mode']}`",
-            f"- Platform: `{identity['platform']}` / `{identity['browser_family']}` / `{identity['hls_engine']}`",
+            f"- Movie file: {markdown_inline_code(identity['source_original_filename'])}",
+            f"- Media item: {markdown_inline_code(identity['media_item_id'])}",
+            f"- Session: {markdown_inline_code(identity['playback_session_id'])}",
+            f"- Source: {markdown_inline_code(identity['source_kind'])}",
+            f"- Mode: {markdown_inline_code(identity['playback_mode'])}",
+            "- Platform: "
+            f"{markdown_inline_code(identity['platform'])} / "
+            f"{markdown_inline_code(identity['browser_family'])} / "
+            f"{markdown_inline_code(identity['hls_engine'])}",
             "",
             "## QoE",
             f"- Startup delay: `{qoe['startup_delay_ms']}` ms",
             f"- Stalls: `{qoe['stall_count']}`",
             f"- Total stalled: `{qoe['total_stalled_ms']}` ms",
             f"- Longest stall: `{qoe['longest_stall_ms']}` ms",
-            f"- Recoveries: `{qoe['recovery_count']}` (successful `{qoe['recovery_success_count']}`)",
+            f"- Recovery actions: `{qoe['recovery_action_count']}`",
+            f"- Passive progress resumes: `{qoe['passive_progress_resume_count']}`",
             f"- Completed: `{qoe['completed']}`; quit: `{qoe['quit']}`",
             "",
             "## Host, Source, FFmpeg, and ATC",
             "See `summary.json` and `timeline.csv` for measured distributions and correlated events.",
             "",
             "## Diagnostics Quality",
-            f"- Completeness: `{quality['telemetry_completeness_score']}`",
+            f"- Completeness assessment: `{quality['completeness_assessment']}`",
             f"- Clock quality: `{quality['clock_quality_score']}`",
             f"- Platform capability: `{quality['platform_capability_score']}`",
             f"- Dropped events: `{quality['dropped_event_count']}`",
@@ -330,7 +391,35 @@ def write_summary_files(
             "",
         ]
     )
-    summary_md_path = resolve_beneath(session_path, "summary.md")
-    atomic_write_bytes(summary_md_path, markdown.encode("utf-8"))
-    os.chmod(summary_md_path, FILE_MODE)
+    artifacts = {
+        "summary.json": encode_json_document(summary),
+        "completeness.json": encode_json_document(completeness),
+        "timeline.csv": build_timeline_csv(events),
+        "summary.md": markdown.encode("utf-8"),
+    }
+    return summary, completeness, artifacts
+
+
+def write_summary_files(
+    root: Path,
+    session_relative_path: str,
+    *,
+    metadata: dict[str, Any],
+    events: list[dict[str, Any]],
+    source_stats: list[dict[str, Any]],
+    writer_metrics: dict[str, Any],
+    capacity_state: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    session_path = resolve_beneath(root, session_relative_path)
+    summary, completeness, artifacts = build_summary_artifacts(
+        metadata,
+        events,
+        source_stats=source_stats,
+        writer_metrics=writer_metrics,
+        capacity_state=capacity_state,
+    )
+    for name, payload in artifacts.items():
+        output_path = resolve_beneath(session_path, name)
+        atomic_write_bytes(output_path, payload)
+        os.chmod(output_path, FILE_MODE)
     return summary, completeness

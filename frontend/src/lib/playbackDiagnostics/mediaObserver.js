@@ -2,26 +2,22 @@ import {
   PLAYBACK_DIAGNOSTICS_AGGREGATE_MS,
   PLAYBACK_DIAGNOSTICS_CLIENT_SAMPLE_MS,
   PLAYBACK_DIAGNOSTICS_INCIDENT_CHUNK_TARGET_BYTES,
-  PLAYBACK_DIAGNOSTICS_INCIDENT_POST_SECONDS,
   PLAYBACK_DIAGNOSTICS_INCIDENT_FRAME_CHUNK,
   PLAYBACK_DIAGNOSTICS_INCIDENT_MAX_RANGES,
+  PLAYBACK_DIAGNOSTICS_INCIDENT_POST_SECONDS,
   PLAYBACK_DIAGNOSTICS_INCIDENT_PRE_SECONDS,
   PLAYBACK_DIAGNOSTICS_INCIDENT_SAMPLE_CHUNK,
+  PLAYBACK_DIAGNOSTICS_INCIDENT_TASK_BUDGET_MS,
   PLAYBACK_DIAGNOSTICS_MEDIA_EVENTS,
+  PLAYBACK_DIAGNOSTICS_STALL_CONFIRM_MS,
 } from "./constants";
 import { diagnosticUrlIdentity } from "./privacy";
 import { DiagnosticRingBuffer } from "./ringBuffer";
 import { createDiagnosticId } from "./schema";
 
 const ACTION_ORIGIN_MEDIA_EVENTS = new Set([
-  "play",
-  "pause",
-  "seeking",
-  "seeked",
-  "ratechange",
-  "volumechange",
+  "play", "pause", "seeking", "seeked", "ratechange", "volumechange",
 ]);
-
 const MEDIA_SEMANTIC_EVENTS = Object.freeze({
   play: "play_requested",
   pause: "pause_started",
@@ -29,15 +25,23 @@ const MEDIA_SEMANTIC_EVENTS = Object.freeze({
   seeked: "seek_completed",
   ratechange: "playback_rate_changed",
 });
-
 const PICTURE_IN_PICTURE_EVENTS = Object.freeze({
   enterpictureinpicture: "picture_in_picture_entered",
   leavepictureinpicture: "picture_in_picture_exited",
 });
+const FRAME_RING_MAX_ENTRIES = PLAYBACK_DIAGNOSTICS_INCIDENT_PRE_SECONDS * 240;
+const SAMPLE_RING_MAX_ENTRIES = Math.ceil(
+  PLAYBACK_DIAGNOSTICS_INCIDENT_PRE_SECONDS * 1_000
+  / PLAYBACK_DIAGNOSTICS_CLIENT_SAMPLE_MS,
+) + 8;
 
 function finite(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function monotonicNow(windowRef = globalThis.window) {
+  return windowRef?.performance?.now?.() ?? globalThis.performance?.now?.() ?? Date.now();
 }
 
 export function readDiagnosticTimeRanges(ranges) {
@@ -93,10 +97,6 @@ export function readMediaDiagnosticSnapshot(video, previous = null, nowMs = perf
   const elapsedMs = previous ? Math.max(0, nowMs - previous.sample_monotonic_ms) : 0;
   const playheadDeltaMs = previous ? currentTimeMs - previous.current_time_ms : 0;
   const buffer = summarizeRanges(bufferedRanges, currentTimeMs);
-  const bufferSlope = previous && elapsedMs > 0
-    ? (buffer.buffered_ahead_ms - previous.buffered_ahead_ms) / elapsedMs
-    : null;
-  const playheadSlope = previous && elapsedMs > 0 ? playheadDeltaMs / elapsedMs : null;
   return {
     sample_monotonic_ms: nowMs,
     current_time_ms: currentTimeMs,
@@ -115,8 +115,10 @@ export function readMediaDiagnosticSnapshot(video, previous = null, nowMs = perf
     seekable_ranges: readDiagnosticTimeRanges(video?.seekable),
     played_ranges: readDiagnosticTimeRanges(video?.played),
     ...buffer,
-    buffer_slope: bufferSlope,
-    playhead_advancement_rate: playheadSlope,
+    buffer_slope: previous && elapsedMs > 0
+      ? (buffer.buffered_ahead_ms - previous.buffered_ahead_ms) / elapsedMs
+      : null,
+    playhead_advancement_rate: previous && elapsedMs > 0 ? playheadDeltaMs / elapsedMs : null,
     ...diagnosticUrlIdentity(video?.currentSrc || video?.src || ""),
   };
 }
@@ -147,26 +149,6 @@ function encodedBytes(value) {
   return encoded.length * 2;
 }
 
-function chunks(values, size, maxBytes) {
-  const result = [];
-  let current = [];
-  let currentBytes = 0;
-  values.forEach((value) => {
-    const valueBytes = encodedBytes(value);
-    if (current.length && (current.length >= size || currentBytes + valueBytes > maxBytes)) {
-      result.push(current);
-      current = [];
-      currentBytes = 0;
-    }
-    current.push(value);
-    currentBytes += valueBytes;
-  });
-  if (current.length) {
-    result.push(current);
-  }
-  return result;
-}
-
 function boundedIncidentSample(sample) {
   const result = { ...sample };
   let truncated = false;
@@ -178,8 +160,10 @@ function boundedIncidentSample(sample) {
       truncated = true;
     }
   });
-  if (Array.isArray(sample?.buffer_hole_sizes_ms)
-      && sample.buffer_hole_sizes_ms.length > PLAYBACK_DIAGNOSTICS_INCIDENT_MAX_RANGES) {
+  if (
+    Array.isArray(sample?.buffer_hole_sizes_ms)
+    && sample.buffer_hole_sizes_ms.length > PLAYBACK_DIAGNOSTICS_INCIDENT_MAX_RANGES
+  ) {
     result.buffer_hole_sizes_ms = sample.buffer_hole_sizes_ms.slice(
       0,
       PLAYBACK_DIAGNOSTICS_INCIDENT_MAX_RANGES,
@@ -191,28 +175,39 @@ function boundedIncidentSample(sample) {
 }
 
 export class MediaElementDiagnosticObserver {
-  constructor({ video, record, actionOrigin = () => "unknown", windowRef = globalThis.window }) {
+  constructor({
+    video,
+    record,
+    actionOrigin = () => "unknown",
+    windowRef = globalThis.window,
+    documentRef = globalThis.document,
+  }) {
     this.video = video;
     this.record = record;
     this.actionOrigin = actionOrigin;
     this.windowRef = windowRef;
-    const sampleRingEntries = Math.ceil(
-      PLAYBACK_DIAGNOSTICS_INCIDENT_PRE_SECONDS * 1_000
-      / PLAYBACK_DIAGNOSTICS_CLIENT_SAMPLE_MS,
-    );
-    const frameRingEntries = PLAYBACK_DIAGNOSTICS_INCIDENT_PRE_SECONDS * 120;
-    this.sampleRing = new DiagnosticRingBuffer(sampleRingEntries);
-    this.frameRing = new DiagnosticRingBuffer(frameRingEntries);
+    this.documentRef = documentRef;
+    const windowMs = PLAYBACK_DIAGNOSTICS_INCIDENT_PRE_SECONDS * 1_000;
+    this.sampleRing = new DiagnosticRingBuffer(SAMPLE_RING_MAX_ENTRIES, { windowMs });
+    this.frameRing = new DiagnosticRingBuffer(FRAME_RING_MAX_ENTRIES, {
+      windowMs,
+      timestamp: (sample) => finite(sample?.callback_monotonic_ms),
+    });
     this.aggregateSamples = [];
     this.frameAggregateSamples = [];
     this.previousSample = null;
+    this.previousFrameQuality = null;
     this.sampleTimer = null;
     this.aggregateTimer = null;
     this.frameRequest = null;
-    this.activeIncident = null;
+    this.activeCandidate = null;
     this.stallTimer = null;
-    this.postRecoveryTimers = new Set();
+    this.postIncidentTimers = new Map();
+    this.lastConfirmedIncident = null;
+    this.snapshotJobs = new Set();
     this.firstFrameSeen = false;
+    this.firstFrameFallbackSeen = false;
+    this.frameCallbackSupported = typeof video?.requestVideoFrameCallback === "function";
     this.hasStartedPlayback = false;
     this.handlers = new Map();
   }
@@ -241,15 +236,15 @@ export class MediaElementDiagnosticObserver {
   }
 
   stop() {
-    this.handlers.forEach((handler, eventName) => {
-      this.video.removeEventListener(eventName, handler);
-    });
+    this.handlers.forEach((handler, eventName) => this.video.removeEventListener(eventName, handler));
     this.handlers.clear();
     if (this.sampleTimer != null) this.windowRef.clearInterval(this.sampleTimer);
     if (this.aggregateTimer != null) this.windowRef.clearInterval(this.aggregateTimer);
     if (this.stallTimer != null) this.windowRef.clearTimeout(this.stallTimer);
-    this.postRecoveryTimers.forEach((timer) => this.windowRef.clearTimeout(timer));
-    this.postRecoveryTimers.clear();
+    this.postIncidentTimers.forEach((timer) => this.windowRef.clearTimeout(timer));
+    this.postIncidentTimers.clear();
+    this.snapshotJobs.forEach((job) => job.cancel());
+    this.snapshotJobs.clear();
     if (this.frameRequest != null && typeof this.video.cancelVideoFrameCallback === "function") {
       this.video.cancelVideoFrameCallback(this.frameRequest);
     }
@@ -261,39 +256,46 @@ export class MediaElementDiagnosticObserver {
   }
 
   sample() {
-    const snapshot = readMediaDiagnosticSnapshot(this.video, this.previousSample);
+    const snapshot = readMediaDiagnosticSnapshot(
+      this.video,
+      this.previousSample,
+      monotonicNow(this.windowRef),
+    );
     this.previousSample = snapshot;
     this.sampleRing.push(snapshot);
     this.aggregateSamples.push(snapshot);
-    if (this.activeIncident && performance.now() <= this.activeIncident.post_until_ms) {
-      this.record("client_incident_sample", {
-        priority: "high",
-        incidentId: this.activeIncident.incident_id,
-        payload: snapshot,
-      });
-    }
-    if (this.activeIncident) this.maybeEndStall("sample", snapshot);
+    if (this.activeCandidate) this.maybeRecoverCandidate("sample", snapshot);
   }
 
   flushAggregate() {
-    if (!this.aggregateSamples.length) return;
-    const samples = this.aggregateSamples.splice(0);
-    this.record("media_aggregate", {
-      payload: aggregateSamples(samples),
-      sampleWindowMs: PLAYBACK_DIAGNOSTICS_AGGREGATE_MS,
-    });
+    if (this.aggregateSamples.length) {
+      const samples = this.aggregateSamples.splice(0);
+      const aggregate = aggregateSamples(samples);
+      this.record("media_aggregate", {
+        payload: aggregate,
+        sampleWindowMs: PLAYBACK_DIAGNOSTICS_AGGREGATE_MS,
+      });
+      this.postIncidentTimers.forEach((_timer, incidentId) => {
+        this.record("client_incident_post_aggregate", {
+          incidentId,
+          payload: aggregate,
+          sampleWindowMs: PLAYBACK_DIAGNOSTICS_AGGREGATE_MS,
+        });
+      });
+    }
     this.flushFrameAggregate();
   }
 
   handleMediaEvent(eventName, event) {
-    const snapshot = readMediaDiagnosticSnapshot(this.video, this.previousSample);
+    const snapshot = readMediaDiagnosticSnapshot(
+      this.video,
+      this.previousSample,
+      monotonicNow(this.windowRef),
+    );
     const actionOrigin = ACTION_ORIGIN_MEDIA_EVENTS.has(eventName)
       ? this.actionOrigin(eventName, event)
       : "browser";
-    const payload = {
-      ...snapshot,
-      action_origin: actionOrigin,
-    };
+    const payload = { ...snapshot, action_origin: actionOrigin };
     if (eventName === "error") {
       payload.error_code = finite(this.video?.error?.code);
       payload.error_class = this.video?.error?.name || "MediaError";
@@ -329,111 +331,147 @@ export class MediaElementDiagnosticObserver {
         durationMs: snapshot.duration_ms,
       });
       this.hasStartedPlayback = true;
+      if (!this.frameCallbackSupported && !this.firstFrameFallbackSeen) {
+        this.firstFrameFallbackSeen = true;
+        this.firstFrameSeen = true;
+        this.record("first_video_frame_inferred", {
+          priority: "high",
+          observationKind: "inferred",
+          measurementMethod: "html_media_playing_proxy",
+          measurementUncertainty: "Playing does not prove compositor presentation time.",
+          payload: snapshot,
+        });
+      }
     }
     if (PICTURE_IN_PICTURE_EVENTS[eventName]) {
       this.record(PICTURE_IN_PICTURE_EVENTS[eventName], {
         priority: "high",
-        payload: {
-          active: eventName === "enterpictureinpicture",
-          action_origin: "browser",
-        },
+        payload: { active: eventName === "enterpictureinpicture", action_origin: "browser" },
       });
     }
     if (["waiting", "stalled"].includes(eventName)) this.beginStallCandidate(eventName, snapshot);
-    if (["playing", "timeupdate", "ended"].includes(eventName)) this.maybeEndStall(eventName, snapshot);
-    if (eventName === "playing" && !this.firstFrameSeen) {
-      this.firstFrameSeen = true;
-      this.record("first_frame", { priority: "high", payload: snapshot });
+    if (["playing", "ended", "pause", "seeking"].includes(eventName)) {
+      this.maybeRecoverCandidate(eventName, snapshot);
     }
     if (eventName === "ended") {
       this.record("completed", { priority: "critical", payload: { action_origin: "browser" } });
     }
   }
 
+  eligibleForStall(snapshot) {
+    return this.firstFrameSeen
+      && !snapshot.paused
+      && !snapshot.seeking
+      && !snapshot.ended
+      && this.documentRef?.visibilityState !== "hidden";
+  }
+
   beginStallCandidate(reason, snapshot) {
-    if (this.activeIncident) return;
+    if (this.activeCandidate || !this.eligibleForStall(snapshot)) {
+      this.record("stall_candidate_ignored", {
+        observationKind: "inferred",
+        payload: {
+          reason: !this.firstFrameSeen ? "startup_waiting" : (
+            snapshot.seeking ? "seeking" : (snapshot.paused ? "paused" : "background_or_existing")
+          ),
+          stall_reason: reason,
+        },
+      });
+      return;
+    }
     const incidentId = createDiagnosticId("incident");
-    this.activeIncident = {
+    const now = monotonicNow(this.windowRef);
+    const recurrence = this.lastConfirmedIncident
+      && now - this.lastConfirmedIncident.ended_at_ms
+        <= PLAYBACK_DIAGNOSTICS_INCIDENT_POST_SECONDS * 1_000
+      ? this.lastConfirmedIncident.incident_id
+      : null;
+    this.activeCandidate = {
       incident_id: incidentId,
-      started_at_ms: performance.now(),
-      post_until_ms: Number.POSITIVE_INFINITY,
+      started_at_ms: now,
+      start_playhead_ms: snapshot.current_time_ms,
       reason,
-      recovered: false,
+      confirmed: false,
+      recurrence_group_id: recurrence || incidentId,
+      previous_incident_id: recurrence,
     };
     this.record("stall_candidate", {
       incidentId,
       priority: "high",
-      observationKind: "measured_client",
       payload: {
         candidate_time_ns: String(Math.round(Date.now() * 1_000_000)),
         stall_reason: reason,
         ...snapshot,
         ring_complete: this.sampleRing.complete,
         frame_ring_complete: this.frameRing.complete,
+        previous_incident_id: recurrence,
+        recurrence_group_id: recurrence || incidentId,
       },
     });
     this.persistIncidentPreWindow(incidentId);
-    this.stallTimer = this.windowRef.setTimeout(() => {
-      if (!this.activeIncident || this.activeIncident.incident_id !== incidentId) return;
-      this.record("stall_confirmed", {
-        incidentId,
-        priority: "critical",
-        payload: { stall_reason: reason, ...readMediaDiagnosticSnapshot(this.video, this.previousSample) },
-      });
-      this.record("recovery_started", {
-        incidentId,
-        priority: "high",
-        observationKind: "inferred",
-        payload: { recovery_action: "awaiting_existing_playback_recovery" },
-      });
-    }, 500);
+    this.stallTimer = this.windowRef.setTimeout(
+      () => this.confirmStall(incidentId),
+      PLAYBACK_DIAGNOSTICS_STALL_CONFIRM_MS,
+    );
   }
 
-  persistIncidentPreWindow(incidentId) {
-    const sampleChunks = chunks(
-      this.sampleRing.snapshot().map(boundedIncidentSample),
-      PLAYBACK_DIAGNOSTICS_INCIDENT_SAMPLE_CHUNK,
-      PLAYBACK_DIAGNOSTICS_INCIDENT_CHUNK_TARGET_BYTES,
+  confirmStall(incidentId) {
+    const candidate = this.activeCandidate;
+    if (!candidate || candidate.incident_id !== incidentId || candidate.confirmed) return;
+    const snapshot = readMediaDiagnosticSnapshot(
+      this.video,
+      this.previousSample,
+      monotonicNow(this.windowRef),
     );
-    sampleChunks.forEach((samples, index) => {
-      this.record("client_incident_pre_samples", {
-        incidentId,
-        priority: "high",
-        payload: {
-          samples,
-          current: index + 1,
-          count: sampleChunks.length,
-          ring_complete: this.sampleRing.complete,
-        },
-      });
+    const playheadProgress = snapshot.current_time_ms - candidate.start_playhead_ms;
+    const relevantEvidence = snapshot.ready_state < 3 || snapshot.buffered_ahead_ms < 250;
+    if (!this.eligibleForStall(snapshot) || playheadProgress >= 100 || !relevantEvidence) {
+      this.finishCandidate("candidate_recovered_before_threshold", snapshot);
+      return;
+    }
+    candidate.confirmed = true;
+    this.record("stall_confirmed", {
+      incidentId,
+      priority: "critical",
+      payload: {
+        stall_reason: candidate.reason,
+        recurrence_group_id: candidate.recurrence_group_id,
+        previous_incident_id: candidate.previous_incident_id,
+        ...snapshot,
+      },
     });
-    const frameChunks = chunks(
-      this.frameRing.snapshot(),
-      PLAYBACK_DIAGNOSTICS_INCIDENT_FRAME_CHUNK,
-      PLAYBACK_DIAGNOSTICS_INCIDENT_CHUNK_TARGET_BYTES,
-    );
-    frameChunks.forEach((frameSamples, index) => {
-      this.record("client_incident_pre_frames", {
-        incidentId,
-        priority: "high",
-        payload: {
-          frame_samples: frameSamples,
-          current: index + 1,
-          count: frameChunks.length,
-          frame_ring_complete: this.frameRing.complete,
-        },
-      });
+    this.record("recovery_waiting", {
+      incidentId,
+      priority: "high",
+      observationKind: "measured_client",
+      payload: { reason: "observer_has_no_control_action" },
     });
   }
 
-  maybeEndStall(reason, snapshot) {
-    if (!this.activeIncident || this.activeIncident.recovered) return;
-    const incident = this.activeIncident;
-    if (reason !== "ended" && (this.video.paused || snapshot.playhead_advancement_rate === 0)) return;
-    incident.recovered = true;
+  maybeRecoverCandidate(reason, snapshot) {
+    const candidate = this.activeCandidate;
+    if (!candidate) return;
+    const progressed = snapshot.current_time_ms - candidate.start_playhead_ms >= 100;
+    const intentionallyStopped = snapshot.paused || snapshot.seeking || reason === "ended";
+    if (!progressed && !intentionallyStopped && reason !== "playing") return;
+    this.finishCandidate(reason, snapshot);
+  }
+
+  finishCandidate(reason, snapshot) {
+    const incident = this.activeCandidate;
+    if (!incident) return;
     if (this.stallTimer != null) this.windowRef.clearTimeout(this.stallTimer);
     this.stallTimer = null;
-    const durationMs = Math.max(0, performance.now() - incident.started_at_ms);
+    this.activeCandidate = null;
+    const durationMs = Math.max(0, monotonicNow(this.windowRef) - incident.started_at_ms);
+    if (!incident.confirmed) {
+      this.record("stall_candidate_recovered", {
+        incidentId: incident.incident_id,
+        priority: "high",
+        payload: { actual_duration_ms: durationMs, reason, stall_reason: incident.reason },
+      });
+      return;
+    }
     this.record("playhead_progress_resumed", {
       incidentId: incident.incident_id,
       priority: "high",
@@ -444,24 +482,131 @@ export class MediaElementDiagnosticObserver {
       priority: "critical",
       payload: { stall_duration_ms: durationMs, reason },
     });
-    incident.post_until_ms = performance.now() + PLAYBACK_DIAGNOSTICS_INCIDENT_POST_SECONDS * 1_000;
-    const postRecoveryTimer = this.windowRef.setTimeout(() => {
-      this.postRecoveryTimers.delete(postRecoveryTimer);
-      if (this.activeIncident?.incident_id !== incident.incident_id) return;
+    const endedAt = monotonicNow(this.windowRef);
+    this.lastConfirmedIncident = { incident_id: incident.incident_id, ended_at_ms: endedAt };
+    const timer = this.windowRef.setTimeout(() => {
+      this.postIncidentTimers.delete(incident.incident_id);
       this.record("post_recovery_observation", {
         incidentId: incident.incident_id,
         payload: { actual_duration_ms: PLAYBACK_DIAGNOSTICS_INCIDENT_POST_SECONDS * 1_000 },
       });
-      this.activeIncident = null;
     }, PLAYBACK_DIAGNOSTICS_INCIDENT_POST_SECONDS * 1_000);
-    this.postRecoveryTimers.add(postRecoveryTimer);
+    this.postIncidentTimers.set(incident.incident_id, timer);
+    if (this.postIncidentTimers.size > 4) {
+      const oldestId = this.postIncidentTimers.keys().next().value;
+      this.windowRef.clearTimeout(this.postIncidentTimers.get(oldestId));
+      this.postIncidentTimers.delete(oldestId);
+    }
+    void snapshot;
+  }
+
+  persistIncidentPreWindow(incidentId) {
+    this.scheduleSnapshot({
+      incidentId,
+      ring: this.sampleRing,
+      eventName: "client_incident_pre_samples",
+      payloadKey: "samples",
+      chunkEntries: PLAYBACK_DIAGNOSTICS_INCIDENT_SAMPLE_CHUNK,
+      completeKey: "ring_complete",
+      complete: this.sampleRing.complete,
+      transform: boundedIncidentSample,
+    });
+    this.scheduleSnapshot({
+      incidentId,
+      ring: this.frameRing,
+      eventName: "client_incident_pre_frames",
+      payloadKey: "frame_samples",
+      chunkEntries: PLAYBACK_DIAGNOSTICS_INCIDENT_FRAME_CHUNK,
+      completeKey: "frame_ring_complete",
+      complete: this.frameRing.complete,
+      transform: (value) => value,
+    });
+  }
+
+  scheduleSnapshot({
+    incidentId,
+    ring,
+    eventName,
+    payloadKey,
+    chunkEntries,
+    completeKey,
+    complete,
+    transform,
+  }) {
+    const cursor = ring.createSnapshotCursor();
+    let handle = null;
+    let chunkIndex = 0;
+    let cancelled = false;
+    const cancelSchedule = () => {
+      if (handle == null) return;
+      if (this.windowRef?.cancelIdleCallback) this.windowRef.cancelIdleCallback(handle);
+      else this.windowRef?.clearTimeout?.(handle);
+      handle = null;
+    };
+    const job = {
+      cancel: () => {
+        cancelled = true;
+        cancelSchedule();
+        cursor.cancel();
+      },
+    };
+    const schedule = () => {
+      if (cancelled) return;
+      if (this.windowRef?.requestIdleCallback) {
+        handle = this.windowRef.requestIdleCallback(run, { timeout: 50 });
+      } else {
+        handle = this.windowRef?.setTimeout?.(run, 0);
+      }
+    };
+    const run = () => {
+      handle = null;
+      if (cancelled) return;
+      const startedAt = monotonicNow(this.windowRef);
+      const values = [];
+      let bytes = 0;
+      while (!cursor.done && values.length < chunkEntries) {
+        const candidate = cursor.read(1).map(transform)[0];
+        if (candidate === undefined) continue;
+        const candidateBytes = encodedBytes(candidate);
+        if (values.length && bytes + candidateBytes > PLAYBACK_DIAGNOSTICS_INCIDENT_CHUNK_TARGET_BYTES) {
+          break;
+        }
+        values.push(candidate);
+        bytes += candidateBytes;
+        if (monotonicNow(this.windowRef) - startedAt >= PLAYBACK_DIAGNOSTICS_INCIDENT_TASK_BUDGET_MS) {
+          break;
+        }
+      }
+      if (values.length) {
+        chunkIndex += 1;
+        this.record(eventName, {
+          incidentId,
+          priority: "high",
+          payload: {
+            [payloadKey]: values,
+            chunk_sequence: chunkIndex,
+            final: cursor.done,
+            [completeKey]: complete,
+            serialized_bytes: bytes,
+          },
+        });
+      }
+      if (cursor.done) {
+        this.snapshotJobs.delete(job);
+        return;
+      }
+      schedule();
+    };
+    this.snapshotJobs.add(job);
+    schedule();
   }
 
   startFrameLoop() {
-    if (typeof this.video.requestVideoFrameCallback !== "function") return;
+    if (!this.frameCallbackSupported) return;
     let previous = null;
     const callback = (now, metadata) => {
       const sample = {
+        callback_monotonic_ms: finite(now),
         presentation_time_ms: finite(metadata?.presentationTime),
         expected_display_time_ms: finite(metadata?.expectedDisplayTime),
         media_element_time_ms: finite(metadata?.mediaTime) != null ? metadata.mediaTime * 1_000 : null,
@@ -479,7 +624,12 @@ export class MediaElementDiagnosticObserver {
       this.frameAggregateSamples.push(sample);
       if (!this.firstFrameSeen) {
         this.firstFrameSeen = true;
-        this.record("first_frame", { priority: "high", payload: sample });
+        this.record("first_video_frame_presented", {
+          priority: "high",
+          observationKind: "measured_client",
+          measurementMethod: "request_video_frame_callback",
+          payload: sample,
+        });
       }
       this.frameRequest = this.video.requestVideoFrameCallback(callback);
     };
@@ -493,9 +643,24 @@ export class MediaElementDiagnosticObserver {
       ? this.video.getVideoPlaybackQuality()
       : null;
     const latest = frames.at(-1);
-    const cadence = frames.map((frame) => finite(frame.frame_cadence_ms)).filter((value) => value != null);
-    const dropped = finite(quality?.droppedVideoFrames);
-    const total = finite(quality?.totalVideoFrames);
+    const cadence = frames
+      .map((frame) => finite(frame.frame_cadence_ms))
+      .filter((value) => value != null);
+    const cumulativeDropped = finite(quality?.droppedVideoFrames);
+    const cumulativeTotal = finite(quality?.totalVideoFrames);
+    const previous = this.previousFrameQuality;
+    const reset = previous != null && (
+      cumulativeDropped < previous.dropped || cumulativeTotal < previous.total
+    );
+    const deltaDropped = previous != null && !reset && cumulativeDropped != null
+      ? cumulativeDropped - previous.dropped
+      : null;
+    const deltaTotal = previous != null && !reset && cumulativeTotal != null
+      ? cumulativeTotal - previous.total
+      : null;
+    if (cumulativeDropped != null && cumulativeTotal != null) {
+      this.previousFrameQuality = { dropped: cumulativeDropped, total: cumulativeTotal };
+    }
     this.record("frame_aggregate", {
       payload: {
         ...latest,
@@ -503,10 +668,15 @@ export class MediaElementDiagnosticObserver {
         frame_cadence_ms: cadence.length
           ? cadence.reduce((sum, value) => sum + value, 0) / cadence.length
           : null,
-        total_frames: total,
-        dropped_frames: dropped,
+        cumulative_total_frames: cumulativeTotal,
+        cumulative_dropped_frames: cumulativeDropped,
+        delta_total_frames: deltaTotal,
+        delta_dropped_frames: deltaDropped,
+        window_dropped_frame_ratio: deltaTotal > 0 && deltaDropped != null
+          ? deltaDropped / deltaTotal
+          : null,
+        frame_counter_reset: reset,
         corrupted_frames: finite(quality?.corruptedVideoFrames),
-        dropped_frame_ratio: total > 0 && dropped != null ? dropped / total : null,
       },
       sampleWindowMs: PLAYBACK_DIAGNOSTICS_AGGREGATE_MS,
     });

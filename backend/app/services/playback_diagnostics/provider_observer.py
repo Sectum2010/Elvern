@@ -34,6 +34,11 @@ class ProviderRequestObserver:
         self.retry_count = max(0, int(retry_count))
         self.started_ns = time.monotonic_ns()
         self.first_byte_ns: int | None = None
+        self._read_started_ns: int | None = None
+        self._consumer_wait_started_ns: int | None = None
+        self.active_read_ns = 0
+        self.upstream_wait_ns = 0
+        self.consumer_backpressure_ns = 0
         self.actual_bytes = 0
         self.expected_bytes: int | None = None
         self.status: int | None = None
@@ -73,10 +78,36 @@ class ProviderRequestObserver:
         except Exception:  # noqa: BLE001 - observer cannot alter provider behavior.
             return
 
-    def chunk(self, size: int) -> None:
+    def read_started(self) -> None:
+        """Mark the existing upstream read boundary without changing its timing."""
+
         try:
             now = time.monotonic_ns()
-            if self.first_byte_ns is None:
+            if self._consumer_wait_started_ns is not None:
+                self.consumer_backpressure_ns += max(0, now - self._consumer_wait_started_ns)
+                self._consumer_wait_started_ns = None
+            self._read_started_ns = now
+        except Exception:  # noqa: BLE001
+            return
+
+    def chunk(self, size: int) -> None:
+        """Record one completed upstream read.
+
+        ``chunk`` remains the public hook used by the provider iterator. When a
+        read boundary was supplied, it measures only the time spent inside
+        ``upstream.read``; otherwise it safely records bytes without inventing a
+        read duration.
+        """
+
+        try:
+            now = time.monotonic_ns()
+            if self._read_started_ns is not None:
+                read_duration = max(0, now - self._read_started_ns)
+                self.active_read_ns += read_duration
+                self.upstream_wait_ns += read_duration
+                self._read_started_ns = None
+            normalized_size = max(0, int(size))
+            if self.first_byte_ns is None and normalized_size > 0:
                 self.first_byte_ns = now
                 self._emit(
                     "provider_first_byte",
@@ -85,7 +116,25 @@ class ProviderRequestObserver:
                         "time_to_first_byte_ms": self._elapsed_ms(now),
                     },
                 )
-            self.actual_bytes += max(0, int(size))
+            self.actual_bytes += normalized_size
+        except Exception:  # noqa: BLE001
+            return
+
+    def downstream_wait_started(self) -> None:
+        """Mark when a yielded chunk begins waiting on its downstream consumer."""
+
+        try:
+            self._consumer_wait_started_ns = time.monotonic_ns()
+        except Exception:  # noqa: BLE001
+            return
+
+    def downstream_resumed(self) -> None:
+        try:
+            if self._consumer_wait_started_ns is None:
+                return
+            now = time.monotonic_ns()
+            self.consumer_backpressure_ns += max(0, now - self._consumer_wait_started_ns)
+            self._consumer_wait_started_ns = None
         except Exception:  # noqa: BLE001
             return
 
@@ -93,8 +142,17 @@ class ProviderRequestObserver:
         if self.finished:
             return
         self.finished = True
+        self.downstream_resumed()
         elapsed_ms = self._elapsed_ms()
-        throughput = (
+        active_read_ms = self.active_read_ns / 1_000_000
+        consumer_backpressure_ms = self.consumer_backpressure_ns / 1_000_000
+        upstream_wait_ms = self.upstream_wait_ns / 1_000_000
+        active_read_throughput = (
+            (self.actual_bytes * 8 * 1_000) / active_read_ms
+            if active_read_ms > 0 and self.actual_bytes > 0
+            else None
+        )
+        end_to_end_delivery_rate = (
             (self.actual_bytes * 8 * 1_000) / elapsed_ms
             if elapsed_ms > 0 and self.actual_bytes > 0
             else None
@@ -106,7 +164,11 @@ class ProviderRequestObserver:
                 "http_status": self.status,
                 "expected_bytes": self.expected_bytes,
                 "actual_bytes": self.actual_bytes,
-                "provider_throughput_bps": throughput,
+                "active_upstream_read_ms": active_read_ms,
+                "upstream_wait_ms": upstream_wait_ms,
+                "consumer_backpressure_ms": consumer_backpressure_ms,
+                "upstream_active_read_throughput_bps": active_read_throughput,
+                "end_to_end_delivery_rate_bps": end_to_end_delivery_rate,
                 "request_duration_ms": elapsed_ms,
                 "cancelled": bool(cancelled),
                 "complete": bool(eof),
