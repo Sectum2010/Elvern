@@ -119,6 +119,7 @@ def build_cloud_stream_response(
     range_header: str | None,
     stream_validator,
     validated_chunk_size: int | None = None,
+    diagnostic_playback_session_id: str | None = None,
     get_access_token_by_account_id: Callable[..., str],
 ):
     try:
@@ -163,6 +164,7 @@ def build_cloud_stream_response(
         range_header=range_header,
         validated_chunk_size=validated_chunk_size,
         stream_validator=stream_validator,
+        diagnostic_playback_session_id=diagnostic_playback_session_id,
     )
 
 

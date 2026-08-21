@@ -23,6 +23,8 @@ from .services.backup_service import (
 )
 from .services.desktop_helper_service import import_helper_release_artifacts
 from .services.log_identity_service import local_media_path_log_fingerprint, native_session_log_fingerprint
+from .services.playback_diagnostics import PlaybackDiagnosticsService
+from .services.playback_diagnostics.exports import OptionalParquetDependencyError
 from .services.status_service import get_system_status
 
 
@@ -147,6 +149,48 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "rotate-url-prefix",
         help="Rotate the random SPA URL prefix and revoke all sessions",
+    )
+
+    diagnostics_parser = subparsers.add_parser(
+        "playback-diagnostics",
+        help="Inspect the local encrypted playback diagnostics research store",
+    )
+    diagnostics_subparsers = diagnostics_parser.add_subparsers(
+        dest="diagnostics_command",
+        required=True,
+    )
+    diagnostics_subparsers.add_parser("status", help="Show recorder and capacity status")
+    diagnostics_list_parser = diagnostics_subparsers.add_parser(
+        "list",
+        help="List locally recorded playback sessions",
+    )
+    diagnostics_list_parser.add_argument("--session-id", default=None)
+    diagnostics_list_parser.add_argument("--date", default=None, help="UTC date, YYYY-MM-DD")
+    diagnostics_list_parser.add_argument("--basename", default=None, help="Exact media basename")
+    diagnostics_list_parser.add_argument("--source", default=None)
+    diagnostics_list_parser.add_argument("--platform", default=None)
+    diagnostics_list_parser.add_argument("--mode", default=None)
+    diagnostics_list_parser.add_argument("--limit", type=int, default=500)
+    for command_name in ("inspect", "verify"):
+        command_parser = diagnostics_subparsers.add_parser(
+            command_name,
+            help=f"{command_name.title()} one local playback diagnostics session",
+        )
+        command_parser.add_argument("session_id")
+    diagnostics_export_parser = diagnostics_subparsers.add_parser(
+        "export",
+        help="Export one local session without contacting an external service",
+    )
+    diagnostics_export_parser.add_argument("session_id")
+    diagnostics_export_parser.add_argument(
+        "--format",
+        dest="export_format",
+        required=True,
+        choices=("ndjson", "csv", "parquet", "perfetto"),
+    )
+    diagnostics_subparsers.add_parser(
+        "reconcile",
+        help="Remove catalog rows for session folders deleted manually",
     )
 
     disable_totp_parser = subparsers.add_parser(
@@ -367,6 +411,59 @@ def _backup_create_cli_summary(payload: dict[str, object]) -> dict[str, object]:
     return {field: payload[field] for field in safe_fields if field in payload}
 
 
+def _run_playback_diagnostics_cli(args, settings) -> int:
+    service = PlaybackDiagnosticsService(settings)
+    service.start()
+    try:
+        command = args.diagnostics_command
+        if command == "status":
+            payload = service.status()
+        elif command == "list":
+            sessions = service.list_sessions(
+                date=args.date,
+                basename=args.basename,
+                source=args.source,
+                platform=args.platform,
+                mode=args.mode,
+                limit=args.limit,
+            )
+            if args.session_id:
+                sessions = [
+                    row
+                    for row in sessions
+                    if str(row.get("playback_session_id")) == str(args.session_id)
+                ]
+            payload = {"sessions": sessions, "count": len(sessions)}
+        elif command == "inspect":
+            payload = service.inspect_session(args.session_id)
+        elif command == "verify":
+            payload = service.verify_session(args.session_id)
+        elif command == "export":
+            export_path = service.export_session(
+                args.session_id,
+                format_name=args.export_format,
+            )
+            payload = {
+                "playback_session_id": args.session_id,
+                "format": args.export_format,
+                "output_path": str(export_path),
+            }
+        elif command == "reconcile":
+            payload = service.reconcile()
+        else:
+            raise ValueError("Unknown playback diagnostics command")
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        return 0
+    except OptionalParquetDependencyError as exc:
+        print(str(exc))
+        return 2
+    except (KeyError, ValueError) as exc:
+        print(str(exc))
+        return 1
+    finally:
+        service.shutdown()
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -398,6 +495,9 @@ def main() -> None:
         parser.error(CLI_PLAINTEXT_BACKUP_DENIED_ERROR)
 
     settings = refresh_settings()
+
+    if args.command == "playback-diagnostics":
+        raise SystemExit(_run_playback_diagnostics_cli(args, settings))
 
     if args.command == "backup-list":
         payload = {"checkpoints": list_backup_checkpoints(settings, backups_dir=args.output_dir)}

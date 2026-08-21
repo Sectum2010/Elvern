@@ -22,6 +22,7 @@ from .cloud_library_service import build_cloud_stream_response, refresh_cloud_me
 from .library_service import get_media_item_record
 from .log_identity_service import local_media_path_log_fingerprint, native_session_log_fingerprint
 from .media_age_access_service import assert_user_can_access_media_by_age
+from .playback_diagnostics.runtime import resolve_native_stream_context
 
 
 logger = logging.getLogger(__name__)
@@ -772,6 +773,11 @@ def build_native_stream_response(
         validation_interval_seconds=stream_policy.validation_interval_seconds,
         ttl_refresh_interval_seconds=stream_policy.ttl_refresh_interval_seconds,
     )
+    diagnostic_playback_session_id = None
+    try:
+        diagnostic_playback_session_id = resolve_native_stream_context(session_id)
+    except Exception:  # noqa: BLE001 - diagnostics cannot alter native streaming.
+        pass
     target = build_cloud_stream_response(
         settings,
         user_id=int(row["user_id"]),
@@ -783,6 +789,7 @@ def build_native_stream_response(
             if stream_path_class == "cloud_proxy"
             else None
         ),
+        diagnostic_playback_session_id=diagnostic_playback_session_id,
     )
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media item not found")

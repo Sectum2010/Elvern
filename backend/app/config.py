@@ -329,6 +329,13 @@ class Settings:
     url_prefix: str | None
     url_prefix_rotation_reminder_days: int
     timezone_name: str
+    playback_diagnostics_enabled: bool
+    playback_diagnostics_root: Path
+    playback_diagnostics_max_bytes: int
+    playback_diagnostics_client_spool_max_bytes: int
+    playback_diagnostics_batch_max_events: int
+    playback_diagnostics_batch_max_bytes: int
+    playback_diagnostics_min_free_bytes: int
 
     @property
     def argon2_params_manually_set(self) -> bool:
@@ -546,6 +553,34 @@ def load_settings() -> Settings:
             180,
         ),
         timezone_name=_resolve_timezone_name(),
+        playback_diagnostics_enabled=_get_bool(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_ENABLED",
+            True,
+        ),
+        playback_diagnostics_root=_get_path(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_ROOT",
+            db_path.parent / "playback_diagnostics",
+        ),
+        playback_diagnostics_max_bytes=_get_positive_int(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_MAX_BYTES",
+            80_000_000_000,
+        ),
+        playback_diagnostics_client_spool_max_bytes=_get_positive_int(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_CLIENT_SPOOL_MAX_BYTES",
+            64_000_000,
+        ),
+        playback_diagnostics_batch_max_events=_get_positive_int(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_BATCH_MAX_EVENTS",
+            256,
+        ),
+        playback_diagnostics_batch_max_bytes=_get_positive_int(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_BATCH_MAX_BYTES",
+            524_288,
+        ),
+        playback_diagnostics_min_free_bytes=_get_positive_int(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_MIN_FREE_BYTES",
+            1_000_000_000,
+        ),
     )
     validate_settings(settings)
     return settings
@@ -597,6 +632,26 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError("ELVERN_MOBILE_SESSION_TTL_MINUTES must be at least 1")
     if settings.mobile_cache_ttl_hours < 1:
         raise ConfigError("ELVERN_MOBILE_CACHE_TTL_HOURS must be at least 1")
+    if settings.playback_diagnostics_max_bytes != 80_000_000_000:
+        raise ConfigError(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_MAX_BYTES must be exactly 80000000000"
+        )
+    if settings.playback_diagnostics_client_spool_max_bytes < 1_000_000:
+        raise ConfigError(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_CLIENT_SPOOL_MAX_BYTES must be at least 1000000"
+        )
+    if settings.playback_diagnostics_batch_max_events > 1_000:
+        raise ConfigError(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_BATCH_MAX_EVENTS must be no more than 1000"
+        )
+    if settings.playback_diagnostics_batch_max_bytes > 2_000_000:
+        raise ConfigError(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_BATCH_MAX_BYTES must be no more than 2000000"
+        )
+    if settings.playback_diagnostics_min_free_bytes < 100_000_000:
+        raise ConfigError(
+            "ELVERN_PLAYBACK_DIAGNOSTICS_MIN_FREE_BYTES must be at least 100000000"
+        )
     if settings.route2_cpu_budget_percent < 10 or settings.route2_cpu_budget_percent > 95:
         raise ConfigError(
             "ELVERN_ROUTE2_CPU_UPBOUND_PERCENT or ELVERN_ROUTE2_CPU_BUDGET_PERCENT must be between 10 and 95"

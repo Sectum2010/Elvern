@@ -20,6 +20,7 @@ backend/data/backups/
 backend/data/poster_display_cache/
 backend/data/helper_releases/
 backend/data/transcodes/
+backend/data/playback_diagnostics/
 .runtime/
 
 # Python

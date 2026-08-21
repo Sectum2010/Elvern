@@ -590,6 +590,9 @@ def delete_self(
     with get_connection(settings) as connection:
         connection.execute("DELETE FROM users WHERE id = ?", (actor.id,))
         connection.commit()
+    from .playback_diagnostics.service import unlink_diagnostic_identity
+
+    unlink_diagnostic_identity(settings, int(actor.id))
 
 
 def delete_user(
@@ -655,6 +658,9 @@ def delete_user(
         }
         connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
         connection.commit()
+    from .playback_diagnostics.service import unlink_diagnostic_identity
+
+    unlink_diagnostic_identity(settings, int(user_id))
     log_audit_event(
         settings,
         action="admin.user.delete",

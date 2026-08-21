@@ -15,6 +15,7 @@ __pycache__/
 
 backend/tests/
 backend/data/
+backend/data/playback_diagnostics/
 frontend/node_modules/
 frontend/dist/
 frontend/test-results/

@@ -4090,7 +4090,15 @@ def test_download_session_url_redaction_hides_token() -> None:
     assert redact_download_session_urls(raw) == "/api/download/sessions/[redacted]?download=1"
 
 
-def test_admin_delete_user_revokes_sessions_and_blocks_last_enabled_admin(initialized_settings) -> None:
+def test_admin_delete_user_revokes_sessions_and_blocks_last_enabled_admin(
+    initialized_settings,
+    monkeypatch,
+) -> None:
+    unlinked_user_ids = []
+    monkeypatch.setattr(
+        "backend.app.services.playback_diagnostics.service.unlink_diagnostic_identity",
+        lambda _settings, user_id: unlinked_user_ids.append(user_id) or True,
+    )
     created = _create_standard_user(initialized_settings, username="delete-user")
     _session_user, token = _issue_user_session(
         initialized_settings,
@@ -4122,6 +4130,7 @@ def test_admin_delete_user_revokes_sessions_and_blocks_last_enabled_admin(initia
     )
     assert deleted["username"] == "delete-user"
     assert get_user_by_session_token(initialized_settings, token) is None
+    assert unlinked_user_ids == [int(created["id"])]
 
     with pytest.raises(HTTPException) as self_exc:
         delete_user(

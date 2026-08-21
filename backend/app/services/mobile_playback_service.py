@@ -204,6 +204,16 @@ from .route2_shared_output_store import (
     write_shared_output_segment_media,
     write_shared_output_store_metadata,
 )
+from .playback_diagnostics.ffmpeg_observer import (
+    observe_ffmpeg_process_completed,
+    observe_ffmpeg_process_spawned,
+    observe_ffmpeg_progress_file,
+    observe_segment_publication,
+)
+from .playback_diagnostics.manager_observer import (
+    observe_atc_evaluation,
+    observe_route2_manager_event,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1675,6 +1685,111 @@ class MobilePlaybackManager:
             self._refresh_ready_window_locked(session, cache_state)
             self._transition_session_state_locked(session)
             return self._snapshot_locked(session, cache_state)
+
+    def get_diagnostic_session_context(
+        self,
+        session_id: str,
+        *,
+        user_id: int,
+    ) -> dict[str, object]:
+        """Return an observer-only snapshot without touching playback state."""
+
+        with self._lock:
+            session = self._get_owned_session_locked(session_id, user_id)
+            source_size_bytes: int | None = None
+            if session.source_kind == "local":
+                try:
+                    source_size_bytes = Path(session.source_locator).stat().st_size
+                except OSError:
+                    source_size_bytes = None
+            browser = session.browser_playback
+            return {
+                "playback_session_id": session.session_id,
+                "media_item_id": session.media_item_id,
+                "source_original_filename": (
+                    session.source_original_filename
+                    or f"media-item-{session.media_item_id}.unknown"
+                ),
+                "source_fingerprint": session.source_fingerprint,
+                "source_kind": session.source_kind,
+                "source_size_bytes": source_size_bytes,
+                "duration_ms": int(max(0.0, session.duration_seconds) * 1_000),
+                "container": session.source_container,
+                "video_codec": session.source_video_codec,
+                "audio_codec": session.source_audio_codec,
+                "width": session.source_width,
+                "height": session.source_height,
+                "pixel_format": session.source_pixel_format,
+                "bit_depth": session.source_bit_depth,
+                "hdr": session.source_hdr_flag,
+                "dolby_vision": session.source_dolby_vision_flag,
+                "audio_channels": session.source_audio_channels,
+                "selected_audio_stream_index": browser.selected_audio_stream_index,
+                "profile": session.profile,
+                "playback_mode": browser.playback_mode,
+                "stream_mode": browser.engine_mode,
+                "hls_engine": session.selected_hls_engine or "unknown",
+                "device_class": session.client_device_class or "unknown",
+                "created_at_utc": session.created_at,
+                "active_epoch_id": browser.active_epoch_id,
+                "attachment_revision": browser.attach_revision,
+                "state": session.state,
+            }
+
+    def resolve_diagnostic_session_for_epoch(self, epoch_id: str) -> str | None:
+        """Resolve an epoch for HTTP correlation without mutating playback state."""
+
+        with self._lock:
+            for session in self._sessions.values():
+                if epoch_id in session.browser_playback.epochs:
+                    return session.session_id
+        return None
+
+    def list_active_diagnostic_session_ids(self) -> tuple[str, ...]:
+        """Return live session IDs for passive host sampling."""
+
+        with self._lock:
+            return tuple(
+                session.session_id
+                for session in self._sessions.values()
+                if session.state not in {"failed", "stopped", "expired"}
+            )
+
+    def list_active_diagnostic_processes(self) -> tuple[dict[str, object], ...]:
+        """Return non-sensitive FFmpeg identities for passive /proc sampling."""
+
+        with self._lock:
+            observed_pids: set[int] = set()
+            processes: list[dict[str, object]] = []
+            for record in self._route2_workers.values():
+                pid = record.pid or (record.process.pid if record.process is not None else None)
+                if not isinstance(pid, int) or pid <= 0 or pid in observed_pids:
+                    continue
+                observed_pids.add(pid)
+                processes.append(
+                    {
+                        "playback_session_id": record.session_id,
+                        "worker_id": record.worker_id,
+                        "epoch_id": record.epoch_id,
+                        "pid": pid,
+                    }
+                )
+            for session in self._sessions.values():
+                job = session.active_job
+                process = job.process if job is not None else None
+                pid = process.pid if process is not None else None
+                if not isinstance(pid, int) or pid <= 0 or pid in observed_pids:
+                    continue
+                observed_pids.add(pid)
+                processes.append(
+                    {
+                        "playback_session_id": session.session_id,
+                        "worker_id": job.active_worker_id,
+                        "epoch_id": None,
+                        "pid": pid,
+                    }
+                )
+            return tuple(processes)
 
     def get_active_session(
         self,
@@ -10293,6 +10408,14 @@ class MobilePlaybackManager:
                 payload["adaptive_reason"] = adaptive_decision.reason
                 payload["adaptive_missing_metrics"] = adaptive_decision.missing_metrics
                 session = self._sessions.get(record.session_id)
+                if session is not None:
+                    observe_atc_evaluation(
+                        playback_session_id=session.session_id,
+                        epoch_id=record.epoch_id,
+                        worker_id=record.worker_id,
+                        adaptive_input=adaptive_input,
+                        adaptive_decision=adaptive_decision,
+                    )
                 epoch = (
                     session.browser_playback.epochs.get(record.epoch_id)
                     if session is not None and session.browser_playback.engine_mode == "route2"
@@ -10735,6 +10858,12 @@ class MobilePlaybackManager:
             )
         payload.update(details)
         logger.log(level, "Route2 %s", json.dumps(payload, sort_keys=True, default=str))
+        observe_route2_manager_event(
+            event,
+            session=session,
+            epoch=epoch,
+            details=details,
+        )
 
     def _log_route2_truth_violation(
         self,
@@ -12427,6 +12556,15 @@ class MobilePlaybackManager:
             epoch.publish_init_latency_seconds = latency_seconds
             epoch.last_publish_latency_seconds = latency_seconds
             epoch.last_publish_kind = "init"
+            observe_segment_publication(
+                playback_session_id=epoch.session_id,
+                epoch_id=epoch.epoch_id,
+                segment_kind="init",
+                segment_index=None,
+                segment_bytes=epoch.published_init_bytes,
+                publish_latency_seconds=latency_seconds,
+                frontier_segment=epoch.contiguous_published_through_segment,
+            )
         return result
 
     def _route2_publish_segment_locked(
@@ -12456,6 +12594,15 @@ class MobilePlaybackManager:
             )
             epoch.last_publish_latency_seconds = latency_seconds
             epoch.last_publish_kind = "segment"
+            observe_segment_publication(
+                playback_session_id=epoch.session_id,
+                epoch_id=epoch.epoch_id,
+                segment_kind="media",
+                segment_index=segment_index,
+                segment_bytes=epoch.published_segment_bytes.get(segment_index),
+                publish_latency_seconds=latency_seconds,
+                frontier_segment=epoch.contiguous_published_through_segment,
+            )
         return result
 
     def _publish_route2_epoch_outputs_locked(self, epoch: PlaybackEpoch) -> None:
@@ -12595,6 +12742,13 @@ class MobilePlaybackManager:
                 return
             self._publish_route2_epoch_outputs_locked(epoch)
             self._refresh_route2_session_authority_locked(session)
+            observe_ffmpeg_progress_file(
+                playback_session_id=session.session_id,
+                epoch_id=epoch.epoch_id,
+                worker_id=epoch.active_worker_id,
+                progress_path=epoch.epoch_dir / "ffmpeg.progress.log",
+                reader=_read_ffmpeg_progress_snapshot,
+            )
 
     def _run_route2_epoch_worker(self, session_id: str, epoch_id: str, worker_id: str) -> None:
         with self._lock:
@@ -12669,6 +12823,14 @@ class MobilePlaybackManager:
                 stderr=stderr_stream,
                 text=True,
             )
+            observe_ffmpeg_process_spawned(
+                playback_session_id=session_id,
+                command=command,
+                pid=process.pid,
+                worker_id=worker_id,
+                epoch_id=epoch_id,
+                selected_threads=thread_budget,
+            )
         except OSError as exc:
             if stderr_stream is not None:
                 stderr_stream.close()
@@ -12731,6 +12893,12 @@ class MobilePlaybackManager:
 
         self._publish_route2_epoch_outputs(session_id, epoch_id)
         return_code = process.wait()
+        observe_ffmpeg_process_completed(
+            playback_session_id=session_id,
+            worker_id=worker_id,
+            epoch_id=epoch_id,
+            return_code=return_code,
+        )
         stderr_tail = _read_text_tail(stderr_path)
         source_input = None
         source_input_kind = None
@@ -14063,6 +14231,14 @@ class MobilePlaybackManager:
                 stderr=subprocess.DEVNULL,
                 text=True,
             )
+            observe_ffmpeg_process_spawned(
+                playback_session_id=session_id,
+                command=command,
+                pid=process.pid,
+                worker_id=worker_id,
+                epoch_id=str(generation),
+                selected_threads=None,
+            )
         except OSError as exc:
             with self._lock:
                 self._workers.pop(worker_id, None)
@@ -14089,6 +14265,12 @@ class MobilePlaybackManager:
 
         self._publish_job_outputs(session_id, generation)
         return_code = process.wait()
+        observe_ffmpeg_process_completed(
+            playback_session_id=session_id,
+            worker_id=worker_id,
+            epoch_id=str(generation),
+            return_code=return_code,
+        )
         with self._lock:
             self._workers.pop(worker_id, None)
             session = self._sessions.get(session_id)

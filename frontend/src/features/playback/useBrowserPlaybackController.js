@@ -59,6 +59,7 @@ import {
   stopBrowserPlaybackSession,
 } from "./browserSessionClient";
 import { useOptimizedPlaybackSession } from "./useOptimizedPlaybackSession";
+import { usePlaybackDiagnosticRecorder } from "./usePlaybackDiagnosticRecorder";
 
 const SEEK_HEADROOM_SECONDS = 2;
 const COMPLETION_GRACE_SECONDS = 15;
@@ -316,6 +317,21 @@ export function useBrowserPlaybackController({
     setOptimizedPlaybackPending,
     hlsRef,
     hlsEngineDiagnostics,
+  });
+
+  const {
+    attachDiagnosticHls,
+    detachDiagnosticHls,
+    recordDiagnosticAction,
+  } = usePlaybackDiagnosticRecorder({
+    hlsEvents: Hls.Events,
+    hlsRef,
+    videoRef,
+    mobileSession,
+    streamSource,
+    hlsEngineDiagnostics,
+    deviceClass: browserPlaybackDeviceClass,
+    videoElementKey,
   });
 
   const resumePosition = useMemo(() => {
@@ -803,6 +819,10 @@ export function useBrowserPlaybackController({
       suppressProviderAuthModal = false,
     } = {},
   ) {
+    recordDiagnosticAction("play_intent", "user", {
+      requested: getPlaybackMode(playbackMode),
+      start_ms: Math.max(0, Number(startPositionSeconds) || 0) * 1_000,
+    });
     playbackFlowRef.current += 1;
     currentItemIdRef.current = itemId;
     attachedOptimizedManifestUrlRef.current = "";
@@ -888,6 +908,7 @@ export function useBrowserPlaybackController({
   }
 
   function playExistingBrowserSource() {
+    recordDiagnosticAction("resume_intent", "user");
     const video = videoRef.current;
     if (!video) {
       return;
@@ -906,6 +927,9 @@ export function useBrowserPlaybackController({
     const targetPosition = fullDuration > 0
       ? Math.min(fullDuration, numericTarget)
       : numericTarget;
+    recordDiagnosticAction("seek_intent", "user", {
+      requested: targetPosition * 1_000,
+    });
     const video = videoRef.current;
     const activeSession = mobileSessionRef.current;
     const shouldResumeAfterReady =
@@ -979,6 +1003,7 @@ export function useBrowserPlaybackController({
   }
 
   async function stopCurrentBrowserPlaybackSession() {
+    recordDiagnosticAction("stop_intent", "user");
     const activeSession = mobileSessionRef.current;
     playbackFlowRef.current += 1;
     currentItemIdRef.current = itemId;
@@ -1291,6 +1316,7 @@ export function useBrowserPlaybackController({
     hls.config.bufferTier = initialHlsConfig.bufferTier;
     hls.config.policySource = initialHlsConfig.policySource;
     hlsRef.current = hls;
+    attachDiagnosticHls(hls);
     hls.loadSource(streamSource.url);
     hls.attachMedia(video);
     setHlsEngineDiagnostics({
@@ -1332,6 +1358,7 @@ export function useBrowserPlaybackController({
       if (!useManualMobileAutoplay) {
         hls.off(Hls.Events.MANIFEST_PARSED, maybeAutoplay);
       }
+      detachDiagnosticHls();
       hls.destroy();
       if (hlsRef.current === hls) {
         hlsRef.current = null;

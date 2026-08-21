@@ -23,6 +23,8 @@ from ..services.mobile_playback_service import (
     PlaybackAdmissionError,
     PlaybackWorkerCooldownError,
 )
+from ..services.playback_diagnostics.eta_observer import observe_eta_snapshot
+from ..services.playback_diagnostics.runtime import observe_runtime_event
 
 
 router = APIRouter(tags=["browser_playback"])
@@ -48,6 +50,24 @@ def _resolve_browser_playback_profile(
 
 def _get_browser_manager(request: Request):
     return request.app.state.mobile_playback_manager
+
+
+def _observe_browser_session_created(
+    request: Request,
+    manager,
+    *,
+    session_id: str,
+    user_id: int,
+) -> None:
+    try:
+        context = manager.get_diagnostic_session_context(session_id, user_id=user_id)
+        request.app.state.playback_diagnostics_service.observe_playback_session_created(
+            context,
+            user_id=user_id,
+            client_user_agent=request.headers.get("user-agent"),
+        )
+    except Exception:  # noqa: BLE001 - diagnostics cannot alter session creation.
+        return
 
 
 def _coerce_session_error(exc: Exception) -> HTTPException:
@@ -82,7 +102,28 @@ def _rewrite_browser_session_payload(payload: dict[str, object]) -> dict[str, ob
         value = normalized.get(key)
         if isinstance(value, str):
             normalized[key] = value.replace("/api/mobile-playback/", "/api/browser-playback/")
+    observe_eta_snapshot(normalized)
     return normalized
+
+
+def _observe_browser_event(
+    event_name: str,
+    *,
+    session_id: str,
+    priority: str = "normal",
+    payload: dict[str, object] | None = None,
+) -> None:
+    try:
+        observe_runtime_event(
+            event_name,
+            playback_session_id=session_id,
+            event_source="server",
+            observation_kind="inferred",
+            priority=priority,
+            payload=payload or {},
+        )
+    except Exception:  # noqa: BLE001 - diagnostics cannot alter playback routes.
+        return
 
 
 @router.post("/api/browser-playback/sessions", response_model=MobilePlaybackSessionResponse)
@@ -122,6 +163,12 @@ def create_browser_playback_session(
         )
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
+    _observe_browser_session_created(
+        request,
+        manager,
+        session_id=str(response["session_id"]),
+        user_id=int(user.id),
+    )
     return MobilePlaybackSessionResponse(**_rewrite_browser_session_payload(response))
 
 
@@ -353,10 +400,28 @@ def stop_browser_playback_session(
     request: Request,
     user=CurrentUser,
 ) -> MobilePlaybackStopResponse:
+    _observe_browser_event(
+        "stop_intent",
+        session_id=session_id,
+        payload={"action_origin": "inferred_user"},
+    )
     try:
         stopped = _get_browser_manager(request).stop_session(session_id, user_id=int(user.id))
     except Exception as exc:  # noqa: BLE001
         raise _coerce_session_error(exc) from exc
+    if stopped:
+        _observe_browser_event(
+            "session_stopped",
+            session_id=session_id,
+            priority="critical",
+            payload={"state": "stopped"},
+        )
+        try:
+            diagnostics = getattr(request.app.state, "playback_diagnostics_service", None)
+            if diagnostics is not None:
+                diagnostics.finalize_session_async(session_id)
+        except Exception:  # noqa: BLE001 - diagnostics cannot alter stop behavior.
+            pass
     return MobilePlaybackStopResponse(
         stopped=stopped,
         message="Browser playback session released" if stopped else "No active browser playback session to release",

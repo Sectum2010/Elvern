@@ -43,6 +43,7 @@ PLAINTEXT_BACKUP_DENIED_ERROR = (
     "Plaintext backup is unsafe. Use explicit allow_plaintext_backup=True only for "
     "dev/test/manual recovery scenarios."
 )
+BACKUP_EXCLUDED_RUNTIME_PATHS = ("backend/data/playback_diagnostics",)
 PLAINTEXT_BACKUP_WARNING = (
     BACKUP_WARNING
     + " This checkpoint is a plaintext backup directory; keep it on trusted storage "
@@ -595,6 +596,7 @@ def _create_backup_checkpoint_impl(
         "transcode_dir": str(settings.transcode_dir.resolve()),
         "helper_releases_included": helper_releases_included,
         "assistant_uploads_included": assistant_uploads_included,
+        "excluded_runtime_paths": list(BACKUP_EXCLUDED_RUNTIME_PATHS),
         "env_included": env_included,
         "contains_secrets": True,
         "backup_trigger": backup_trigger,
@@ -968,6 +970,7 @@ def build_restore_dry_run_plan(
             "media_files_included": False,
             "poster_files_included": False,
             "transcodes_included": False,
+            "playback_diagnostics_included": False,
         }
 
     blocking_errors: list[str] = []

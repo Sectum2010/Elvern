@@ -25,6 +25,7 @@ from .routes.library import router as library_router
 from .routes.mobile_playback import router as mobile_playback_router
 from .routes.native_playback import router as native_playback_router
 from .routes.playback import router as playback_router
+from .routes.playback_diagnostics import router as playback_diagnostics_router
 from .routes.progress import router as progress_router
 from .routes.stream import router as stream_router
 from .routes.system import router as system_router
@@ -36,6 +37,12 @@ from .services.transcode_service import TranscodeManager
 from .services.mobile_playback_service import MobilePlaybackManager
 from .services.scan_service import ScanService
 from .services.poster_derivative_manager import PosterDerivativeManager
+from .services.playback_diagnostics import PlaybackDiagnosticsService
+from .services.playback_diagnostics.runtime import set_active_diagnostics_service
+from .services.playback_diagnostics.http_observer import (
+    PlaybackDiagnosticsBodyLimitMiddleware,
+    PlaybackDiagnosticsHttpMiddleware,
+)
 from .spa_static import install_manifest_middleware, mount_spa
 from .url_prefix_service import resolve_url_prefix
 
@@ -80,9 +87,15 @@ async def lifespan(app: FastAPI):
     app.state.poster_derivative_manager = PosterDerivativeManager(settings)
     app.state.transcode_manager = TranscodeManager(settings)
     app.state.mobile_playback_manager = MobilePlaybackManager(settings)
+    app.state.playback_diagnostics_service = PlaybackDiagnosticsService(settings)
+    app.state.playback_diagnostics_service.bind_playback_manager(
+        app.state.mobile_playback_manager
+    )
     app.state.admin_event_hub = admin_event_hub
     app.state.poster_derivative_manager.start()
     app.state.transcode_manager.start()
+    app.state.playback_diagnostics_service.start()
+    set_active_diagnostics_service(app.state.playback_diagnostics_service)
     app.state.mobile_playback_manager.start()
     app.state.admin_event_hub.start()
     app.state.login_ip_rate_limiter, app.state.login_username_rate_limiter = build_login_rate_limiters(settings)
@@ -97,11 +110,15 @@ async def lifespan(app: FastAPI):
     app.state.admin_event_hub.shutdown()
     app.state.poster_derivative_manager.shutdown()
     app.state.mobile_playback_manager.shutdown()
+    app.state.playback_diagnostics_service.shutdown()
+    set_active_diagnostics_service(None)
     app.state.transcode_manager.shutdown()
     logger.info("Elvern API shutting down")
 
 
 app = FastAPI(title="Elvern API", version="0.8.0", lifespan=lifespan)
+app.add_middleware(PlaybackDiagnosticsHttpMiddleware)
+app.add_middleware(PlaybackDiagnosticsBodyLimitMiddleware)
 install_manifest_middleware(app)
 app.include_router(admin_router)
 app.include_router(admin_assistant_router)
@@ -118,6 +135,7 @@ app.include_router(library_router)
 app.include_router(mobile_playback_router)
 app.include_router(native_playback_router)
 app.include_router(playback_router)
+app.include_router(playback_diagnostics_router)
 app.include_router(progress_router)
 app.include_router(stream_router)
 app.include_router(system_router)

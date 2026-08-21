@@ -257,8 +257,13 @@ def test_backup_create_with_output_dir_requires_plaintext_allow_flag(
 
 
 def test_backup_creation_produces_manifest_and_db_snapshot(initialized_settings, tmp_path, monkeypatch) -> None:
-    _prepare_fake_project_root(tmp_path, monkeypatch)
+    fake_root = _prepare_fake_project_root(tmp_path, monkeypatch)
     _insert_runtime_fixture_data(initialized_settings)
+    diagnostics_root = fake_root / "backend" / "data" / "playback_diagnostics"
+    (diagnostics_root / "keys").mkdir(parents=True)
+    (diagnostics_root / "keys" / "key-synthetic.bin").write_bytes(b"diagnostics-key")
+    (diagnostics_root / "sessions").mkdir()
+    (diagnostics_root / "sessions" / "synthetic.elvd").write_bytes(b"diagnostics-raw")
 
     checkpoint_dir = tmp_path / "checkpoint"
     payload = _create_plaintext_checkpoint(initialized_settings, checkpoint_dir)
@@ -276,6 +281,11 @@ def test_backup_creation_produces_manifest_and_db_snapshot(initialized_settings,
     assert manifest["env_included"] is True
     assert manifest["helper_releases_included"] is True
     assert manifest["assistant_uploads_included"] is True
+    assert manifest["excluded_runtime_paths"] == ["backend/data/playback_diagnostics"]
+    assert not any(
+        "playback_diagnostics" in str(file_record.get("relative_path") or "")
+        for file_record in manifest["files"]
+    )
     assert manifest["contains_secrets"] is True
     assert manifest["backup_trigger"] == "manual_cli"
     assert manifest["auto_checkpoint"] is False
@@ -1812,6 +1822,7 @@ def test_backup_restore_plan_returns_valid_plan_for_valid_checkpoint(
     assert plan["restore_scope"]["media_files_included"] is False
     assert plan["restore_scope"]["poster_files_included"] is False
     assert plan["restore_scope"]["transcodes_included"] is False
+    assert plan["restore_scope"]["playback_diagnostics_included"] is False
     assert "media library files" in plan["not_included"]
     assert "Stop backend and frontend services before any manual recovery work." in plan["required_pre_restore_steps"]
     assert plan["manual_restore_outline"]

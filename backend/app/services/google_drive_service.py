@@ -22,9 +22,33 @@ from .app_settings_service import (
     google_drive_callback_url,
 )
 from ._safe_http import HostNotAllowedError, safe_urlopen
+from .playback_diagnostics.provider_observer import ProviderRequestObserver
 
 
 logger = logging.getLogger(__name__)
+
+
+def _create_provider_observer(**kwargs) -> ProviderRequestObserver | None:
+    try:
+        return ProviderRequestObserver(**kwargs)
+    except Exception:  # noqa: BLE001 - diagnostics cannot alter provider requests.
+        return None
+
+
+def _notify_provider_observer(
+    observer: ProviderRequestObserver | None,
+    method_name: str,
+    *args,
+    **kwargs,
+) -> None:
+    if observer is None:
+        return
+    try:
+        getattr(observer, method_name)(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - diagnostics cannot alter provider streaming.
+        return
+
+
 GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -476,6 +500,7 @@ def proxy_google_drive_file_response(
     chunk_size: int = 1024 * 1024,
     validated_chunk_size: int | None = None,
     stream_validator: Callable[[], bool] | None = None,
+    diagnostic_playback_session_id: str | None = None,
 ) -> StreamingResponse:
     requested_range_header = str(range_header or "").strip()
     stitch_start = _parse_open_ended_byte_range(requested_range_header)
@@ -495,13 +520,20 @@ def proxy_google_drive_file_response(
         resource_key=resource_key,
         range_header=upstream_range_header,
     )
+    provider_observer = _create_provider_observer(
+        playback_session_id=diagnostic_playback_session_id,
+        range_header=upstream_range_header,
+    )
     try:
         upstream = safe_urlopen(request, timeout=30)
     except HTTPError as exc:
+        _notify_provider_observer(provider_observer, "error", exc, status_code=exc.code)
         _raise_google_drive_stream_http_exception(exc)
     except HostNotAllowedError as exc:
+        _notify_provider_observer(provider_observer, "error", exc)
         _raise_blocked_google_redirect(exc, detail="Google Drive redirected to an unexpected host.")
     except URLError as exc:
+        _notify_provider_observer(provider_observer, "error", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Google Drive could not be reached.",
@@ -509,6 +541,7 @@ def proxy_google_drive_file_response(
 
     upstream_headers = getattr(upstream, "headers", {})
     content_range = _parse_content_range(upstream_headers.get("Content-Range"))
+    _notify_provider_observer(provider_observer, "headers_received", upstream, content_range)
     response_headers = {
         "Accept-Ranges": upstream_headers.get("Accept-Ranges", "bytes"),
         "Cache-Control": "private, max-age=0, must-revalidate",
@@ -538,6 +571,8 @@ def proxy_google_drive_file_response(
             chunk_size=chunk_size,
             validated_chunk_size=validated_chunk_size,
             stream_validator=stream_validator,
+            diagnostic_playback_session_id=diagnostic_playback_session_id,
+            first_observer=provider_observer,
         )
         if stitch_start is not None and content_range is not None
         else _iter_upstream_response(
@@ -545,6 +580,7 @@ def proxy_google_drive_file_response(
             chunk_size=chunk_size,
             validated_chunk_size=validated_chunk_size,
             stream_validator=stream_validator,
+            observer=provider_observer,
         )
     )
     return StreamingResponse(
@@ -566,22 +602,41 @@ def _iter_upstream_response(
     chunk_size: int = 1024 * 1024,
     validated_chunk_size: int | None = None,
     stream_validator: Callable[[], bool] | None = None,
+    observer: ProviderRequestObserver | None = None,
 ) -> Iterator[bytes]:
     effective_chunk_size = resolve_effective_upstream_chunk_size(
         chunk_size=chunk_size,
         stream_validator=stream_validator,
         validated_chunk_size=validated_chunk_size,
     )
-    with upstream:
-        while True:
-            if stream_validator and not stream_validator():
-                break
-            chunk = upstream.read(effective_chunk_size)
-            if not chunk:
-                break
-            if stream_validator and not stream_validator():
-                break
-            yield chunk
+    eof = False
+    cancelled = False
+    try:
+        with upstream:
+            while True:
+                if stream_validator and not stream_validator():
+                    cancelled = True
+                    break
+                chunk = upstream.read(effective_chunk_size)
+                if not chunk:
+                    eof = True
+                    break
+                if observer is not None:
+                    _notify_provider_observer(observer, "chunk", len(chunk))
+                if stream_validator and not stream_validator():
+                    cancelled = True
+                    break
+                yield chunk
+    except GeneratorExit:
+        cancelled = True
+        raise
+    except BaseException as exc:
+        if observer is not None:
+            _notify_provider_observer(observer, "error", exc)
+        raise
+    finally:
+        if observer is not None:
+            _notify_provider_observer(observer, "finish", eof=eof, cancelled=cancelled)
 
 
 def _iter_stitched_google_drive_ranges(
@@ -596,16 +651,20 @@ def _iter_stitched_google_drive_ranges(
     chunk_size: int = 1024 * 1024,
     validated_chunk_size: int | None = None,
     stream_validator: Callable[[], bool] | None = None,
+    diagnostic_playback_session_id: str | None = None,
+    first_observer: ProviderRequestObserver | None = None,
 ) -> Iterator[bytes]:
     current_upstream = first_upstream
     current_start, current_end, total_size = first_content_range
     next_start = current_end + 1
+    current_observer = first_observer
     while True:
         yield from _iter_upstream_response(
             current_upstream,
             chunk_size=chunk_size,
             validated_chunk_size=validated_chunk_size,
             stream_validator=stream_validator,
+            observer=current_observer,
         )
         if stream_validator and not stream_validator():
             break
@@ -622,14 +681,32 @@ def _iter_stitched_google_drive_ranges(
             resource_key=resource_key,
             range_header=range_header,
         )
+        current_observer = _create_provider_observer(
+            playback_session_id=diagnostic_playback_session_id,
+            range_header=range_header,
+            retry_count=0,
+        )
         try:
             current_upstream = safe_urlopen(request, timeout=30)
         except HostNotAllowedError as exc:
+            _notify_provider_observer(current_observer, "error", exc)
             logger.error("Blocked SSRF attempt: %s", str(exc))
             break
-        except (HTTPError, URLError):
+        except (HTTPError, URLError) as exc:
+            _notify_provider_observer(
+                current_observer,
+                "error",
+                exc,
+                status_code=getattr(exc, "code", None),
+            )
             break
         content_range = _parse_content_range(getattr(current_upstream, "headers", {}).get("Content-Range"))
+        _notify_provider_observer(
+            current_observer,
+            "headers_received",
+            current_upstream,
+            content_range,
+        )
         if content_range is None:
             break
         current_start, current_end, total_size = content_range
